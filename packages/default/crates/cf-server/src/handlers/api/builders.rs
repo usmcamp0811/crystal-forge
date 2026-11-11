@@ -273,7 +273,15 @@ async fn resolve_cache_destinations_for_derivation(
                 derivation_id = derivation.id,
                 "failed to resolve canonical cache destinations: {e}"
             );
-            StatusCode::INTERNAL_SERVER_ERROR
+            // Work admitted before registrations spread across environments is
+            // refused as a conflict the operator can act on, not a server fault.
+            if e.downcast_ref::<crate::queries::cache_push::AmbiguousDerivationEnvironment>()
+                .is_some()
+            {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         })
 }
 

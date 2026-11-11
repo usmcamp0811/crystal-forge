@@ -163,9 +163,29 @@ pub struct SystemDeploymentProgressLoadResult {
 // Public Adapter Functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Fetch the systems list from the backend.
+/// Fetches the complete authorized list when the caller does not request a page.
+/// Explicit pages retain server pagination. A failed continuation returns an error
+/// rather than incomplete fleet counts or suggestions.
 pub async fn load_systems_with_fallback(params: &SystemsListParams) -> SystemsLoadResult {
-    match fetch_systems(params).await {
+    let result = async {
+        let mut request = params.clone();
+        let all_pages = request.page.is_none();
+        if all_pages {
+            request.page = Some(1);
+            request.per_page = Some(200);
+        }
+        let mut response = fetch_systems(&request).await?;
+        while all_pages && response.page < response.total_pages() {
+            request.page = Some(response.page + 1);
+            let next = fetch_systems(&request).await?;
+            response.page = next.page;
+            response.total = next.total;
+            response.items.extend(next.items);
+        }
+        Ok::<_, ApiClientError>(response)
+    }
+    .await;
+    match result {
         Ok(PaginatedResponse { items, .. }) => SystemsLoadResult {
             systems: items,
             notice: None,
@@ -301,15 +321,32 @@ pub async fn create_system_via_api(
     deployment_policy: String,
 ) -> Result<SystemDetail, String> {
     let request = CreateSystemRequest {
+        tags: Vec::new(),
+        description: None,
+        fqdn: None,
+        reachability: "direct".into(),
+        management_mode: Default::default(),
+        parent_host_id: None,
         hostname,
         system_configuration_name,
-        public_key,
+        public_key: Some(public_key),
         environment,
         flake_name,
         deployment_policy,
     };
 
-    match create_system(&request).await {
+    create_system_request_via_api(&request).await
+}
+
+/// Registers a resource with explicit mode, real credentials, and parent scope.
+/// Nonmanaged callers omit the key; the existing managed helper preserves enrollment.
+///
+/// # Errors
+/// Returns display-safe authorization, validation, transport, or decoding errors.
+pub async fn create_system_request_via_api(
+    request: &CreateSystemRequest,
+) -> Result<SystemDetail, String> {
+    match create_system(request).await {
         Ok(detail) => Ok(detail),
         Err(ApiClientError::Status {
             code: 401 | 403, ..
@@ -318,6 +355,27 @@ pub async fn create_system_via_api(
         Err(ApiClientError::Network(msg)) => Err(format!("Network error: {}", msg)),
         Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {}", msg)),
     }
+}
+
+/// Reads real configuration evidence without falling back to fixture data.
+///
+/// # Errors
+/// Preserves typed HTTP/authentication, transport, and decoding errors for views.
+pub async fn load_configuration_assurance(
+    system_id: Uuid,
+) -> Result<crate::api::models::ConfigurationAssurance, ApiClientError> {
+    crate::api::client::fetch_configuration_assurance(&system_id).await
+}
+
+/// Reloads the latest stored report; never asks a parent to collect synchronously.
+/// Views must retain their previous observation if this request fails.
+///
+/// # Errors
+/// Preserves typed HTTP/authentication, transport, and decoding errors for views.
+pub async fn load_latest_guest_observation(
+    system_id: Uuid,
+) -> Result<Option<crate::api::models::GuestObservationRow>, ApiClientError> {
+    crate::api::client::fetch_latest_guest_observation(&system_id).await
 }
 
 pub async fn update_system_via_api(
@@ -569,6 +627,10 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
     let now = deterministic_fallback_timestamp();
     vec![
         SystemSummary {
+            tags: Vec::new(),
+            description: None,
+            management_mode: Default::default(),
+            parent_host_id: None,
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             hostname: "atlas-01".to_string(),
             system_configuration_name: None,
@@ -593,6 +655,10 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             effective_heartbeat_interval_secs: 600,
         },
         SystemSummary {
+            tags: Vec::new(),
+            description: None,
+            management_mode: Default::default(),
+            parent_host_id: None,
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
             hostname: "atlas-02".to_string(),
             system_configuration_name: None,
@@ -617,6 +683,10 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             effective_heartbeat_interval_secs: 600,
         },
         SystemSummary {
+            tags: Vec::new(),
+            description: None,
+            management_mode: Default::default(),
+            parent_host_id: None,
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
             hostname: "staging-01".to_string(),
             system_configuration_name: None,
@@ -641,6 +711,10 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             effective_heartbeat_interval_secs: 600,
         },
         SystemSummary {
+            tags: Vec::new(),
+            description: None,
+            management_mode: Default::default(),
+            parent_host_id: None,
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
             hostname: "dev-box".to_string(),
             system_configuration_name: None,
@@ -679,6 +753,11 @@ pub fn fallback_flake_names() -> Vec<String> {
 pub fn fallback_system_detail() -> SystemDetail {
     let now = deterministic_fallback_timestamp();
     SystemDetail {
+        tags: Vec::new(),
+        description: None,
+        management_mode: Default::default(),
+        parent_host_id: None,
+        management_transition: None,
         id: Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap(),
         hostname: "unknown-system".to_string(),
         fqdn: None,
@@ -686,6 +765,7 @@ pub fn fallback_system_detail() -> SystemDetail {
         environment: None,
         is_active: false,
         deployment_policy: "manual".to_string(),
+        pinned_commit: None,
         health_status: HealthStatus::Offline,
         deployment_status: DeploymentStatus::Unknown,
         pipeline_stage: Some(PipelineStage::Unknown),
@@ -763,6 +843,29 @@ fn deterministic_fallback_timestamp() -> chrono::DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_metadata_response_defaults_are_legacy_compatible() {
+        let mut detail = fallback_system_detail();
+        detail.tags = vec!["edge".into()];
+        detail.description = Some("Operator context".into());
+        let wire = serde_json::to_value(&detail).unwrap();
+        let parsed: SystemDetail = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(parsed.tags, ["edge"]);
+        assert_eq!(parsed.description, detail.description);
+        let mut legacy = wire;
+        legacy.as_object_mut().unwrap().remove("tags");
+        legacy.as_object_mut().unwrap().remove("description");
+        let parsed: SystemDetail = serde_json::from_value(legacy).unwrap();
+        assert!(parsed.tags.is_empty());
+        assert!(parsed.description.is_none());
+        let mut summary = serde_json::to_value(&fallback_systems()[0]).unwrap();
+        summary.as_object_mut().unwrap().remove("tags");
+        summary.as_object_mut().unwrap().remove("description");
+        let parsed: SystemSummary = serde_json::from_value(summary).unwrap();
+        assert!(parsed.tags.is_empty());
+        assert!(parsed.description.is_none());
+    }
 
     #[test]
     fn should_redirect_for_auth_errors() {

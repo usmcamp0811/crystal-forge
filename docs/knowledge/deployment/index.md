@@ -1,5 +1,9 @@
 # Concept
 
+Management-mode authority precedes all deployment policies. See
+[management modes and configuration assurance](../concepts/management-modes-and-configuration-assurance.md)
+for transitions and keyless registrations.
+
 * [Advanced Policy Types](advanced-policy-types.md) - Defines the time_window, require_approvals, canary_rollout, and cve_threshold deployment-time policy types with configuration fields, approval workflow and API endpoints, canary phases and state tracking, and the difference from require_cve_check.
 * [Built-in Policy Types](built-in-policy-types.md) - Defines the require_cf_agent, require_packages, and custom_check policy types with their JSON configuration, the legacy single-expression and multi-rule custom_check shapes, and the all and any modes.
 * [Composite policy enforcement](composite-policy-enforcement.md) - Defines composite policy schema version 1 with its eight typed rule kinds, authoritative phases, rule result aggregation, evaluation expression rules, assessment scoping, and fail-closed final authorization before target updates.

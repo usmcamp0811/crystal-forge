@@ -1082,12 +1082,15 @@ async fn advance_snapshot_selection_tx(
 /// Publishes bounded Native identity from the successful producer transaction.
 ///
 /// Callers hold snapshot -> active owner locks and have persisted the actual
-/// successful derivation. Missing output, excluded gates, path conflicts, or
+/// successful derivation. Missing output, excluded gates, mismatched carriers, or
 /// incomplete identities publish nothing. No Nix evaluation or Config traversal
 /// occurs. Certification, selector advance, and reciprocal binding are atomic.
 /// Native publication precedes request issuance: real insertion time, captured
 /// after the writer lock, must not exceed the request's immutable `issued_at`.
 /// Older unbound requests and observations never acquire a later certificate.
+/// An unchanged artifact retains this commit's own real carrier through its
+/// enforced physical binding. Certification does not claim this commit built;
+/// publication reads separately prove the real execution and current cache scope.
 /// Reciprocal work selects at most [`RECIPROCAL_SNAPSHOT_BATCH_LIMIT`] requests.
 ///
 /// # Errors
@@ -1684,7 +1687,9 @@ pub(crate) async fn retain_bound_deployment_observations_tx(
 /// again after the missing fact arrives, so an authoritative deployment binding
 /// can exist while its retained generation is absent.
 ///
-/// This function repairs exactly that gap for the system's latest observation.
+/// This function repairs exactly that gap for the active managed enrollment's
+/// latest observation. Reports before re-enrollment remain history, not repair
+/// candidates, even when their output still matches a retained deployment.
 ///
 /// # Authority
 ///
@@ -1726,7 +1731,7 @@ pub(crate) async fn reconcile_current_generation_retention_tx(
     let observed = sqlx::query_as::<_, (String, i32, String, DateTime<Utc>)>(
         "SELECT system.hostname,state.generation,state.store_path,state.timestamp
          FROM systems system JOIN LATERAL (
-             SELECT candidate.* FROM system_states candidate
+              SELECT candidate.* FROM view_agent_current_system_states candidate
              WHERE candidate.hostname=system.hostname
              ORDER BY candidate.timestamp DESC,candidate.id DESC LIMIT 1
          ) state ON true WHERE system.id=$1 AND state.generation IS NOT NULL
@@ -1746,7 +1751,9 @@ pub(crate) async fn reconcile_current_generation_retention_tx(
 
 /// Retains a uniquely reconciled external activation against its real artifact.
 ///
-/// This server-owned path starts from the latest agent observation. It requires
+/// This server-owned path starts from the active managed enrollment's latest
+/// agent observation. Reports before re-enrollment cannot establish new Current
+/// lineage. It requires
 /// an explicit generation/store match, exactly one NixOS derivation in the
 /// registered flake and effective configuration, the currently selected
 /// certified V1 or schema-3 deployment artifact for the exact live derivation,
@@ -1786,8 +1793,8 @@ pub(crate) async fn reconcile_external_observed_generation_tx(
             JOIN LATERAL (
                 SELECT candidate.generation,candidate.store_path,candidate.timestamp,
                        candidate.generation_matches_current_store_path
-                FROM system_states candidate
-                WHERE candidate.hostname=system.hostname
+                 FROM view_agent_current_system_states candidate
+                 WHERE candidate.hostname=system.hostname
                 ORDER BY candidate.timestamp DESC NULLS LAST,candidate.id DESC
                 LIMIT 1
             ) state ON true
@@ -1932,7 +1939,7 @@ pub async fn reconcile_current_generation_retention(
             FROM systems system
             JOIN LATERAL (
                 SELECT candidate.generation, candidate.generation_matches_current_store_path
-                FROM system_states candidate
+                FROM view_agent_current_system_states candidate
                 WHERE candidate.hostname = system.hostname
                 ORDER BY candidate.timestamp DESC, candidate.id DESC
                 LIMIT 1
@@ -2014,8 +2021,8 @@ pub(crate) async fn reconcile_external_current_generation_page(
            JOIN LATERAL (
              SELECT candidate.generation,candidate.store_path,
                     candidate.generation_matches_current_store_path
-             FROM system_states candidate
-             WHERE candidate.hostname=system.hostname
+              FROM view_agent_current_system_states candidate
+              WHERE candidate.hostname=system.hostname
              ORDER BY candidate.timestamp DESC NULLS LAST,candidate.id DESC
              LIMIT 1
            ) state ON true
@@ -3172,6 +3179,8 @@ pub(crate) async fn get_config_summary_v2(
 /// CONCURRENCY: Selection, token validation, carrier facts, running state, and
 /// seven-day drift all use one read-only repeatable-read transaction. The read
 /// never queues work, changes selectors, or mutates evaluation state.
+/// Running state requires the active managed enrollment. A pending enrollment
+/// keeps exact configuration evidence readable without a runtime comparison.
 pub(crate) async fn get_config_summary_v2_with_token(
     pool: &PgPool,
     system_id: Uuid,
@@ -3246,7 +3255,7 @@ pub(crate) async fn get_config_summary_v2_with_token(
         SELECT NULLIF(btrim(state.store_path), '') AS running_store_path,
                state.generation_matches_current_store_path AS running_profile_matches
         FROM systems system
-        JOIN system_states state ON state.hostname = system.hostname
+        JOIN view_agent_current_system_states state ON state.hostname = system.hostname
         WHERE system.id = $1
         ORDER BY state.timestamp DESC, state.id DESC
         LIMIT 1
@@ -3720,6 +3729,8 @@ pub async fn get_selected_evaluation_summary(
 /// observations use one read-only repeatable-read transaction. Commit-mode
 /// responses require the artifact to remain current. Generation-mode responses
 /// require the exact retained generation reference to remain present.
+/// Running state and drift use only the active managed enrollment's reports;
+/// historical generation selection does not restore runtime authority.
 ///
 /// # Errors
 ///
@@ -3809,7 +3820,7 @@ pub async fn get_selected_evaluation_summary_with_token(
         ), latest_state AS (
             SELECT state.store_path, state.generation_matches_current_store_path
             FROM systems system
-            JOIN system_states state ON state.hostname = system.hostname
+            JOIN view_agent_current_system_states state ON state.hostname = system.hostname
             WHERE system.id = $1
             ORDER BY state.timestamp DESC, state.id DESC
             LIMIT 1
@@ -3888,6 +3899,8 @@ pub async fn get_selected_evaluation_summary_with_token(
 /// boundary. Heartbeat configuration does not change this product boundary. The
 /// observation before the window establishes coverage but does not contribute
 /// drift. Any missing exact path makes coverage insufficient.
+/// Only active managed observations within the current enrollment contribute.
+/// Heartbeats attached to earlier enrollments cannot bridge the coverage gap.
 async fn seven_day_drift_status<'e, E>(
     executor: E,
     system_id: Uuid,
@@ -3909,13 +3922,13 @@ where
         ), observations AS (
             SELECT state.timestamp AS observed_at, state.store_path
             FROM parameters parameter
-            JOIN system_states state ON state.hostname = parameter.hostname
+            JOIN view_agent_current_system_states state ON state.hostname = parameter.hostname
             WHERE state.timestamp >= parameter.start_at - parameter.max_gap
               AND state.timestamp <= parameter.end_at
             UNION ALL
             SELECT heartbeat.timestamp, state.store_path
             FROM parameters parameter
-            JOIN system_states state ON state.hostname = parameter.hostname
+            JOIN view_agent_current_system_states state ON state.hostname = parameter.hostname
             JOIN agent_heartbeats heartbeat ON heartbeat.system_state_id = state.id
             WHERE heartbeat.timestamp >= parameter.start_at - parameter.max_gap
               AND heartbeat.timestamp <= parameter.end_at
@@ -4245,10 +4258,23 @@ pub async fn get_flake_output_snapshot_with_token(
                snapshot.content_digest AS selected_content_digest,
                previous_snapshot.content_digest AS previous_content_digest,
                content.payload,
-               previous_content.payload AS previous_payload
+                previous_content.payload AS previous_payload,
+                native.evaluation_attempt_id AS native_attempt_id,
+                native.configuration_names AS native_configuration_names
         FROM commits c
         LEFT JOIN flake_output_snapshots snapshot ON snapshot.commit_id = c.id
         LEFT JOIN flake_output_contents content ON content.digest = snapshot.content_digest
+        LEFT JOIN LATERAL (
+            SELECT inventory.evaluation_attempt_id, inventory.configuration_names
+            FROM evaluation_attempt_inventory inventory
+            JOIN evaluation_attempts attempt ON attempt.id=inventory.evaluation_attempt_id
+              AND attempt.commit_id=inventory.commit_id
+              AND attempt.attempt_number=inventory.attempt_number
+            WHERE inventory.commit_id=c.id
+              AND inventory.attempt_number=c.evaluation_attempt_count
+              AND inventory.execution_mode='native'
+            LIMIT 1
+        ) native ON true
         LEFT JOIN commits previous_commit
           ON previous_commit.flake_id = c.flake_id
          AND previous_commit.git_commit_hash = c.first_parent_sha
@@ -4314,10 +4340,33 @@ pub async fn get_flake_output_snapshot_with_token(
         && full_previous_outputs.is_some())
     .then_some(previous_content_digest.as_deref())
     .flatten();
-    let snapshot_token = (lifecycle == SnapshotLifecycle::Available)
+    // Preserve the existing full-snapshot token used by module declarations.
+    // Native inventory supplies the independent Systems facet only when that
+    // optional full snapshot is unavailable; it never changes other facets.
+    let (native_attempt, native_names): (Option<Uuid>, Option<Vec<String>>) =
+        if lifecycle == SnapshotLifecycle::Available {
+            (None, None)
+        } else {
+            (row.try_get("native_attempt_id")?, row.try_get("native_configuration_names")?)
+        };
+    let mut systems_available = lifecycle == SnapshotLifecycle::Available
+        || (native_attempt.is_some() && native_names.is_some());
+    // Native discovery is authoritative for system names even when optional
+    // module/input inspection produced no full output snapshot. Its immutable
+    // attempt identity also binds continuation pages, without pretending those
+    // other facets are available or mixing a superseding native inventory.
+    let effective_digest = if let Some(attempt) = native_attempt {
+        let mut digest = Sha256::new();
+        digest.update(attempt.as_bytes());
+        if let Some(full_digest) = &selected_content_digest { digest.update(full_digest); }
+        Some(digest.finalize().to_vec())
+    } else {
+        selected_content_digest.clone()
+    };
+    let snapshot_token = systems_available
         .then(|| {
             flake_output_snapshot_token(
-                selected_content_digest.as_deref(),
+                effective_digest.as_deref(),
                 first_parent_resolved,
                 first_parent_revision.as_deref(),
                 usable_previous_digest,
@@ -4346,7 +4395,8 @@ pub async fn get_flake_output_snapshot_with_token(
           SELECT $1::integer AS flake_id, $2::uuid AS visibility_user,
                  $3::text AS revision, $4::jsonb AS payload,
                  $5::jsonb AS previous_payload, $6::text AS system_filter,
-                 $7::bigint AS page_limit, $8::bigint AS page_offset
+                  $7::bigint AS page_limit, $8::bigint AS page_offset,
+                  $9::text[] AS native_names
         ), active_systems AS (
           SELECT system.*,
                  COALESCE(NULLIF(btrim(system.system_configuration_name), ''),
@@ -4356,7 +4406,8 @@ pub async fn get_flake_output_snapshot_with_token(
         ), visible_systems AS (
           SELECT system.*, environment.name AS environment_name,
                  environment.color_hex AS environment_color,
-                 deployment.current_commit_hash AS deployed_revision,
+                  CASE WHEN system.management_mode='managed'
+                       THEN deployment.current_commit_hash END AS deployed_revision,
                  COUNT(*) OVER (PARTITION BY system.configuration_name) AS output_host_count
           FROM active_systems system
           CROSS JOIN parameters parameter
@@ -4371,9 +4422,13 @@ pub async fn get_flake_output_snapshot_with_token(
         ), declared_raw AS (
           SELECT DISTINCT declaration.configuration_name
           FROM parameters parameter
-          CROSS JOIN LATERAL jsonb_array_elements_text(
-            CASE WHEN jsonb_typeof(parameter.payload->'declared_systems') = 'array'
-                 THEN parameter.payload->'declared_systems' ELSE '[]'::jsonb END
+           CROSS JOIN LATERAL unnest(
+             COALESCE(parameter.native_names, ARRAY(
+               SELECT jsonb_array_elements_text(
+                 CASE WHEN jsonb_typeof(parameter.payload->'declared_systems') = 'array'
+                      THEN parameter.payload->'declared_systems' ELSE '[]'::jsonb END
+               )
+             ))
           ) declaration(configuration_name)
         ), declared AS (
           SELECT declaration.configuration_name
@@ -4408,13 +4463,14 @@ pub async fn get_flake_output_snapshot_with_token(
                       THEN 'managed_undeclared' ELSE 'managed' END AS state,
                  CASE WHEN system.deployed_revision IS DISTINCT FROM parameter.revision
                       THEN system.deployed_revision END AS deployed_revision,
-                 system.output_host_count > 1 AS output_collapsed
+                  system.output_host_count > 1 AS output_collapsed,
+                  system.management_mode
           FROM visible_systems system
           CROSS JOIN parameters parameter
           LEFT JOIN declared declaration USING (configuration_name)
           UNION ALL
           SELECT declaration.configuration_name, NULL::uuid, NULL::text,
-                 NULL::text, NULL::text, 'declared_unmanaged', NULL::text, false
+                  NULL::text, NULL::text, 'declared_unmanaged', NULL::text, false, NULL::text
           FROM declared declaration
           WHERE NOT EXISTS (
               SELECT 1 FROM visible_systems system
@@ -4448,7 +4504,8 @@ pub async fn get_flake_output_snapshot_with_token(
         )
         SELECT COALESCE((
                    SELECT jsonb_agg(jsonb_build_object(
-                       'configuration_name', page.configuration_name,
+                        'configuration_name', page.configuration_name,
+                        'management_mode', page.management_mode,
                        'system_id', page.system_id,
                        'hostname', page.hostname,
                        'environment_name', page.environment_name,
@@ -4493,11 +4550,18 @@ pub async fn get_flake_output_snapshot_with_token(
     })
     .bind(i64::try_from(limit).context("flake page limit exceeds i64")?)
     .bind(i64::try_from(offset).context("flake page offset exceeds i64")?)
+    .bind(native_names)
     .fetch_one(pool)
     .await?;
     let mut systems_page: Vec<ReconciledFlakeSystem> =
         serde_json::from_value(reconciliation.try_get("systems")?)
             .context("failed to decode bounded flake reconciliation page")?;
+    // Page distinct declaration names separately from registration rows: many
+    // registrations may share one configuration, without multiplying discovery
+    // requests or losing names at registration-page boundaries.
+    let declared_names: Vec<String> = serde_json::from_value(reconciliation.try_get("visible_declared")?)
+        .context("failed to decode visible declared configuration names")?;
+    let declared_names_page = declared_names.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
     let managed_system_count: i64 = reconciliation.try_get("managed_system_count")?;
     let declared_system_count: i64 = reconciliation.try_get("declared_system_count")?;
     let previous_declared_system_count = if full_previous_outputs.is_some() {
@@ -4582,6 +4646,7 @@ pub async fn get_flake_output_snapshot_with_token(
         "outputs": &payload,
         "previous_outputs": &previous_outputs,
         "systems": &systems_page,
+        "declared_system_names": systems_available.then_some(&declared_names_page),
         "delta": &delta,
     }))
     .context("failed to size flake output response")?
@@ -4592,19 +4657,21 @@ pub async fn get_flake_output_snapshot_with_token(
         payload = None;
         previous_outputs = None;
         systems_page.clear();
+        systems_available = false;
         delta = None;
     }
     let systems_has_more = system_total
         > i64::try_from(offset.saturating_add(systems_page.len()))
             .context("flake page end exceeds i64")?;
     Ok(Some(FlakeOutputSnapshotResponse {
+        declared_system_names: systems_available.then_some(declared_names_page),
         lifecycle,
         revision: revision.to_string(),
         first_parent_revision,
         first_parent_resolved,
         comparison_available: first_parent_resolved && previous_outputs.is_some(),
         error,
-        snapshot_token: (lifecycle == SnapshotLifecycle::Available)
+        snapshot_token: systems_available
             .then_some(snapshot_token)
             .flatten(),
         outputs: payload,
@@ -4898,6 +4965,11 @@ pub async fn reclaim_orphaned_snapshot_content(pool: &PgPool) -> Result<Snapshot
             FROM derivations candidate
             JOIN commits commit ON commit.id = candidate.commit_id
             WHERE commit.source_archived
+              AND NOT EXISTS (SELECT 1 FROM derivations alias
+                              WHERE alias.reused_from_derivation_id=candidate.id)
+              AND NOT EXISTS (SELECT 1 FROM build_jobs job JOIN derivations consumer
+                              ON consumer.reused_build_job_id=job.id
+                              WHERE job.derivation_id=candidate.id)
               AND NOT EXISTS (
                   SELECT 1 FROM evaluation_generation_snapshots retained
                   WHERE retained.derivation_id = candidate.id
@@ -6302,7 +6374,10 @@ mod tests {
                 hostname: format!("host-{suffix}"),
                 environment_id: None,
                 is_active: true,
-                public_key: PublicKey::from_verifying_key(key.verifying_key()),
+                management_mode: crate::models::systems::ManagementMode::Managed,
+                agent_enrolled_at: None,
+                public_key: Some(PublicKey::from_verifying_key(key.verifying_key())),
+                parent_host_id: None,
                 flake_id: Some(flake_id),
                 derivation: String::new(),
                 system_configuration_name: Some("host".into()),
@@ -6336,6 +6411,58 @@ mod tests {
             .await
             .unwrap();
         (system, commit, suffix)
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn native_declarations_enable_registration_without_full_output_snapshot(pool: PgPool) {
+        use crate::models::evaluation_snapshots::ReconciledFlakeSystemState;
+        use crate::models::systems::ManagementMode;
+        use crate::queries::evaluation_inventory::InventoryExecutionMode;
+        let (system, commit, _) = native_identity_context(&pool, InventoryExecutionMode::Native).await;
+        let flake = system.flake_id.unwrap();
+        sqlx::query("UPDATE systems SET system_configuration_name='not-declared' WHERE id=$1")
+            .bind(system.id).execute(&pool).await.unwrap();
+        let first = get_flake_output_snapshot_with_token(
+            &pool, flake, &commit.git_commit_hash, None, None, FlakeSystemFilter::All, 1, 0,
+        ).await.unwrap().unwrap();
+        assert_ne!(first.lifecycle, SnapshotLifecycle::Available);
+        assert!(first.outputs.is_none(), "native names do not fabricate module/input outputs");
+        assert_eq!(first.declared_system_names, Some(vec!["host".into()]));
+        assert_eq!(first.declared_system_count, 1);
+        assert_eq!(first.systems.len(), 1);
+        assert_eq!(first.systems[0].state, ReconciledFlakeSystemState::DeclaredUnmanaged);
+        assert!(first.systems[0].system_id.is_none());
+        assert!(first.systems[0].management_mode.is_none());
+        let token = first.snapshot_token.unwrap();
+        let next = get_flake_output_snapshot_with_token(
+            &pool, flake, &commit.git_commit_hash, Some(&token), None, FlakeSystemFilter::All, 1, 1,
+        ).await.unwrap().unwrap();
+        assert_eq!(next.snapshot_token.as_deref(), Some(token.as_str()));
+        assert_eq!(next.declared_system_names, Some(vec![]));
+        assert_eq!(next.systems[0].management_mode, Some(ManagementMode::Managed));
+        assert_eq!(next.systems[0].state, ReconciledFlakeSystemState::ManagedUndeclared);
+        for mode in [ManagementMode::External, ManagementMode::Reference] {
+            sqlx::query("INSERT INTO systems(hostname,flake_id,system_configuration_name,management_mode,derivation)
+                VALUES ($1,$2,'host',$3,'')")
+                .bind(format!("native-registration-{mode}"))
+                .bind(flake).bind(mode).execute(&pool).await.unwrap();
+        }
+        let tracked = get_flake_output_snapshot_with_token(
+            &pool, flake, &commit.git_commit_hash, Some(&token), None, FlakeSystemFilter::All, 100, 0,
+        ).await.unwrap().unwrap();
+        assert_eq!(tracked.declared_system_names, Some(vec!["host".into()]));
+        assert_eq!(tracked.managed_system_count, 3, "registry count spans modes, not deployment authority");
+        assert_eq!(tracked.declared_unmanaged_count, 0);
+        assert!(tracked.systems.iter().any(|s| s.management_mode == Some(ManagementMode::Reference)));
+        assert!(tracked.systems.iter().any(|s| s.management_mode == Some(ManagementMode::External)));
+        sqlx::query("UPDATE commits SET evaluation_status='failed' WHERE id=$1")
+            .bind(commit.id).execute(&pool).await.unwrap();
+        let (mock, mock_commit, _) = native_identity_context(&pool, InventoryExecutionMode::Mock).await;
+        let unavailable = get_flake_output_snapshot_with_token(
+            &pool, mock.flake_id.unwrap(), &mock_commit.git_commit_hash, None, None, FlakeSystemFilter::All, 100, 0,
+        ).await.unwrap().unwrap();
+        assert!(unavailable.declared_system_names.is_none(), "mock inventory is not native declaration authority");
     }
 
     async fn native_identity_fixture(pool: &PgPool) -> (System, Commit, i32, Uuid) {
@@ -7509,6 +7636,385 @@ mod tests {
         .expect("generation snapshot should be retained");
     }
 
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn reenrollment_current_config_reads_and_repairs_preserve_history(pool: PgPool) {
+        for (mode, cf_deployment) in [("external", false), ("reference", true)] {
+            let (system, commit, derivation, snapshot) = native_identity_fixture(&pool).await;
+            let (output, carrier): (String, String) = sqlx::query_as(
+                "SELECT expected_store_path,derivation_path FROM derivations WHERE id=$1",
+            )
+            .bind(derivation)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            // Keep readable V1 Config history separate from certified Native
+            // deployment identity; Inspector V2 never supplies retention proof.
+            let config_snapshot = persist_test_snapshot(&pool, &commit, "enrollment").await;
+            let mut tx = pool.begin().await.unwrap();
+            lock_snapshot_writer_tx(&mut tx).await.unwrap();
+            advance_snapshot_selection_tx(&mut tx, commit.id, "host", snapshot)
+                .await
+                .unwrap();
+            let mut inspection =
+                v2_reader_artifact(commit.id, vec![v2_option(&["services", "epoch"], "same")]);
+            inspection.carrier_drv_path = carrier;
+            persist_config_artifact_v2_deferred_tx(
+                &mut tx,
+                commit.id,
+                "host",
+                inspection,
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            sqlx::query(
+                "UPDATE derivations SET store_path=expected_store_path,completed_at=clock_timestamp()
+                 WHERE id=$1",
+            )
+            .bind(derivation)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO evaluation_generation_snapshots
+                 (system_id,generation,snapshot_id,derivation_id,commit_id,source_store_path,configuration_name)
+                 VALUES($1,6,$2,$3,$4,$5,'host')",
+            )
+            .bind(system.id)
+            .bind(config_snapshot)
+            .bind(derivation)
+            .bind(commit.id)
+            .bind(&output)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO evaluation_generation_snapshots
+                 (system_id,generation,snapshot_id,derivation_id,commit_id,source_store_path,configuration_name)
+                 VALUES($1,7,$2,$3,$4,$5,'host')",
+            )
+            .bind(system.id)
+            .bind(snapshot)
+            .bind(derivation)
+            .bind(commit.id)
+            .bind(&output)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let scan: Uuid = sqlx::query_scalar(
+                "INSERT INTO cve_scans(derivation_id,scanner_name,status)
+                 VALUES($1,'enrollment','in_progress') RETURNING id",
+            )
+            .bind(derivation)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE cve_scans SET status='completed',completed_at=now(),evidence_schema_version=1 WHERE id=$1")
+                .bind(scan).execute(&pool).await.unwrap();
+            if cf_deployment {
+                sqlx::query(
+                    "INSERT INTO pending_system_deployments
+                     (system_id,target_store_path,requested_commit_id,requested_derivation_id,evaluation_snapshot_id,status,source)
+                     VALUES($1,$2,$3,$4,$5,'succeeded','enrollment-test')",
+                )
+                .bind(system.id)
+                .bind(&output)
+                .bind(commit.id)
+                .bind(derivation)
+                .bind(snapshot)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            let old_state: i32 = sqlx::query_scalar(
+                "INSERT INTO system_states
+                 (hostname,change_reason,generation,store_path,generation_matches_current_store_path,timestamp)
+                 VALUES($1,'startup',7,$2,true,now()-interval '7 days 5 minutes') RETURNING id",
+            )
+            .bind(&system.hostname)
+            .bind(&output)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO agent_heartbeats(system_state_id,timestamp)
+                 SELECT $1,observed_at FROM generate_series(
+                    now()-interval '7 days 5 minutes',now(),interval '30 minutes') observed_at",
+            )
+            .bind(old_state)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let heartbeat_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM agent_heartbeats WHERE system_state_id=$1",
+            )
+            .bind(old_state)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO system_states
+                 (hostname,change_reason,generation,store_path,generation_matches_current_store_path,timestamp)
+                 VALUES($1,'state_delta',8,$2,true,clock_timestamp())",
+            )
+            .bind(&system.hostname)
+            .bind(&output)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let history: Vec<(i32, Option<i32>, Option<String>, DateTime<Utc>)> = sqlx::query_as(
+                "SELECT id,generation,store_path,timestamp FROM system_states WHERE hostname=$1 ORDER BY id",
+            )
+            .bind(&system.hostname)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let selected = select_generation_snapshot(&pool, system.id, 6)
+                .await
+                .unwrap()
+                .unwrap();
+            let summary = get_selected_evaluation_summary(&pool, system.id, &selected)
+                .await
+                .unwrap();
+            assert_eq!(summary.running_store_path.as_deref(), Some(output.as_str()));
+            assert_eq!(summary.drift, EvaluationDrift::Matches);
+            assert_eq!(
+                summary.seven_day_drift,
+                SevenDayDriftStatus::NoObservedDrift
+            );
+
+            // Prove each repair has eligible lineage before the transition.
+            // Roll back this probe so pending-enrollment no-ops are meaningful.
+            let mut probe = pool.begin().await.unwrap();
+            lock_snapshot_writer_tx(&mut probe).await.unwrap();
+            assert_eq!(
+                reconcile_current_generation_retention_tx(&mut probe, system.id)
+                    .await
+                    .unwrap(),
+                cf_deployment
+            );
+            if !cf_deployment {
+                assert!(
+                    reconcile_external_observed_generation_tx(&mut probe, system.id)
+                        .await
+                        .unwrap()
+                );
+            }
+            probe.rollback().await.unwrap();
+
+            // Deactivation alone must not erase detail telemetry or invent an
+            // outage. Current authority still requires an active registration.
+            let health: (String, Option<String>, DateTime<Utc>) = sqlx::query_as(
+                "SELECT health_status,current_store_path,last_seen FROM view_system_detail WHERE id=$1",
+            )
+            .bind(system.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(health.0, "healthy");
+            let current: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM view_current_cve_authority WHERE system_id=$1",
+            )
+            .bind(system.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(current, 1, "the inactive guard must suppress real authority");
+            sqlx::query("UPDATE systems SET is_active=false WHERE id=$1")
+                .bind(system.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let inactive: (String, Option<String>, DateTime<Utc>) = sqlx::query_as(
+                "SELECT health_status,current_store_path,last_seen FROM view_system_detail WHERE id=$1",
+            )
+            .bind(system.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(inactive, health);
+            let current: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM view_current_cve_authority WHERE system_id=$1",
+            )
+            .bind(system.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(current, 0);
+            sqlx::query(
+                "UPDATE systems SET is_active=true,management_mode=$2,public_key=NULL WHERE id=$1",
+            )
+            .bind(system.id)
+            .bind(mode)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE systems SET management_mode='managed',public_key=$2 WHERE id=$1")
+                .bind(system.id)
+                .bind(crate::test_utils::crypto::test_public_key_base64().1)
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            // A recent heartbeat on retained state cannot establish current
+            // running identity, generation lineage, health or drift coverage.
+            sqlx::query("INSERT INTO agent_heartbeats(system_state_id,timestamp) VALUES($1,clock_timestamp())")
+                .bind(old_state).execute(&pool).await.unwrap();
+            let pending = get_selected_evaluation_summary(&pool, system.id, &selected)
+                .await
+                .unwrap();
+            assert!(pending.running_store_path.is_none());
+            assert!(pending.running_profile_matches.is_none());
+            assert_eq!(pending.drift, EvaluationDrift::Unavailable);
+            assert_eq!(
+                pending.seven_day_drift,
+                SevenDayDriftStatus::InsufficientCoverage
+            );
+            assert_eq!(
+                pending.selected_store_path.as_deref(),
+                Some(output.as_str())
+            );
+            let ConfigSummaryQueryV2::Summary(pending_v2) =
+                get_config_summary_v2(&pool, system.id, &commit.git_commit_hash)
+                    .await
+                    .unwrap()
+            else {
+                panic!("exact V2 configuration evidence must remain readable");
+            };
+            assert!(pending_v2.running_store_path.is_none());
+            assert!(pending_v2.running_profile_matches.is_none());
+            assert_eq!(pending_v2.drift, EvaluationDrift::Unavailable);
+            assert_eq!(
+                pending_v2.seven_day_drift,
+                SevenDayDriftStatus::InsufficientCoverage
+            );
+            assert_eq!(
+                pending_v2.selected_store_path.as_deref(),
+                Some(output.as_str())
+            );
+            assert!(
+                !reconcile_current_generation_retention(&pool, system.id)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                !reconcile_external_current_generation(&pool, system.id)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                reconcile_external_current_generation_page(&pool, None)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let mut probe = pool.begin().await.unwrap();
+            lock_snapshot_writer_tx(&mut probe).await.unwrap();
+            assert!(
+                !reconcile_current_generation_retention_tx(&mut probe, system.id)
+                    .await
+                    .unwrap()
+            );
+            probe.rollback().await.unwrap();
+            assert!(
+                select_generation_snapshot(&pool, system.id, 8)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let retained = select_generation_snapshot(&pool, system.id, 7)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(retained.id, snapshot);
+            let pending_detail: Option<String> =
+                sqlx::query_scalar("SELECT current_store_path FROM view_system_detail WHERE id=$1")
+                    .bind(system.id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(
+                pending_detail.is_none(),
+                "inactive-history detail must still enforce the epoch"
+            );
+
+            sqlx::query(
+                "INSERT INTO system_states
+                 (hostname,change_reason,generation,store_path,generation_matches_current_store_path,timestamp)
+                 VALUES($1,'state_delta',8,$2,true,clock_timestamp())",
+            )
+            .bind(&system.hostname)
+            .bind(&output)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let fresh = get_selected_evaluation_summary(&pool, system.id, &selected)
+                .await
+                .unwrap();
+            assert_eq!(fresh.running_store_path.as_deref(), Some(output.as_str()));
+            assert_eq!(fresh.drift, EvaluationDrift::Matches);
+            assert_eq!(
+                fresh.seven_day_drift,
+                SevenDayDriftStatus::InsufficientCoverage
+            );
+            let ConfigSummaryQueryV2::Summary(fresh_v2) =
+                get_config_summary_v2(&pool, system.id, &commit.git_commit_hash)
+                    .await
+                    .unwrap()
+            else {
+                panic!("fresh V2 summary must remain readable");
+            };
+            assert_eq!(
+                fresh_v2.running_store_path.as_deref(),
+                Some(output.as_str())
+            );
+            assert_eq!(fresh_v2.drift, EvaluationDrift::Matches);
+            if cf_deployment {
+                assert!(
+                    reconcile_current_generation_retention(&pool, system.id)
+                        .await
+                        .unwrap()
+                );
+            } else {
+                assert!(
+                    reconcile_external_current_generation(&pool, system.id)
+                        .await
+                        .unwrap()
+                );
+            }
+            let repaired = select_generation_snapshot(&pool, system.id, 8)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(repaired.id, snapshot);
+            let retained_history: Vec<(i32, Option<i32>, Option<String>, DateTime<Utc>)> = sqlx::query_as(
+                "SELECT id,generation,store_path,timestamp FROM system_states WHERE hostname=$1 ORDER BY id",
+            )
+            .bind(&system.hostname)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(retained_history.len(), history.len() + 1);
+            assert_eq!(&retained_history[..history.len()], history.as_slice());
+            let retained_heartbeats: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM agent_heartbeats WHERE system_state_id=$1",
+            )
+            .bind(old_state)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(retained_heartbeats, heartbeat_count + 1);
+            // Release the fixture's producer slot before the next mode case.
+            assert!(matches!(
+                crate::queries::commits::mark_commit_evaluation_complete(&pool, commit.id, 1)
+                    .await
+                    .unwrap(),
+                crate::queries::commits::EvalCompleteOutcome::Completed
+            ));
+        }
+    }
+
     async fn assert_comparison_isolated(
         pool: &PgPool,
         system_id: Uuid,
@@ -8532,7 +9038,10 @@ mod tests {
                 hostname: hostname.clone(),
                 environment_id: None,
                 is_active: true,
-                public_key: PublicKey::from_verifying_key(key.verifying_key()),
+                management_mode: crate::models::systems::ManagementMode::Managed,
+                agent_enrolled_at: None,
+                public_key: Some(PublicKey::from_verifying_key(key.verifying_key())),
+                parent_host_id: None,
                 flake_id: Some(flake.id),
                 derivation: String::new(),
                 system_configuration_name: Some("host".into()),
@@ -9168,7 +9677,10 @@ mod tests {
                 hostname: hostname.clone(),
                 environment_id: None,
                 is_active: true,
-                public_key: PublicKey::from_verifying_key(key.verifying_key()),
+                management_mode: crate::models::systems::ManagementMode::Managed,
+                agent_enrolled_at: None,
+                public_key: Some(PublicKey::from_verifying_key(key.verifying_key())),
+                parent_host_id: None,
                 flake_id: Some(flake.id),
                 derivation: String::new(),
                 system_configuration_name: Some("host".into()),
@@ -10444,7 +10956,10 @@ mod tests {
             hostname: format!("host-{suffix}"),
             environment_id: None,
             is_active: true,
-            public_key: PublicKey::from_verifying_key(key.verifying_key()),
+            management_mode: crate::models::systems::ManagementMode::Managed,
+            agent_enrolled_at: None,
+            public_key: Some(PublicKey::from_verifying_key(key.verifying_key())),
+            parent_host_id: None,
             flake_id: Some(flake.id),
             derivation: String::new(),
             system_configuration_name: Some("host".into()),
@@ -11243,7 +11758,10 @@ mod tests {
             hostname: hostname.clone(),
             environment_id: None,
             is_active: true,
-            public_key: PublicKey::from_verifying_key(key.verifying_key()),
+            management_mode: crate::models::systems::ManagementMode::Managed,
+            agent_enrolled_at: None,
+            public_key: Some(PublicKey::from_verifying_key(key.verifying_key())),
+            parent_host_id: None,
             flake_id: Some(flake.id),
             derivation: String::new(),
             system_configuration_name: Some("host".into()),
@@ -11637,7 +12155,10 @@ mod tests {
                 hostname: format!("hidden-{hostname}"),
                 environment_id: Some(hidden_environment),
                 is_active: true,
-                public_key: PublicKey::from_verifying_key(hidden_key.verifying_key()),
+                management_mode: crate::models::systems::ManagementMode::Managed,
+                agent_enrolled_at: None,
+                public_key: Some(PublicKey::from_verifying_key(hidden_key.verifying_key())),
+                parent_host_id: None,
                 flake_id: Some(flake.id),
                 derivation: String::new(),
                 system_configuration_name: Some("host".into()),
@@ -16695,7 +17216,10 @@ mod tests {
                 hostname: format!("selector-isolation-{suffix}"),
                 environment_id: None,
                 is_active: true,
-                public_key: PublicKey::from_verifying_key(key.verifying_key()),
+                management_mode: crate::models::systems::ManagementMode::Managed,
+                agent_enrolled_at: None,
+                public_key: Some(PublicKey::from_verifying_key(key.verifying_key())),
+                parent_host_id: None,
                 flake_id: Some(flake.id),
                 derivation: String::new(),
                 system_configuration_name: Some("host".into()),

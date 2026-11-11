@@ -21,6 +21,9 @@ use crate::security::snapshot_redaction::{
 /// actual persisted derivation. It makes no option or comparison completeness
 /// claim. Historical identity remains readable after runnable rows are reclaimed;
 /// deployment and rollback still require exact live lineage joins.
+/// The derivation identifies this evaluated configuration carrier. A proven
+/// physical origin or adopted execution can belong to another commit; this
+/// manifest makes no build, scan, or runtime Git attribution claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativeDeploymentIdentity {
@@ -30,7 +33,7 @@ pub(crate) struct NativeDeploymentIdentity {
     pub(crate) attempt_number: i32,
     /// Full evaluated Git commit SHA.
     pub(crate) commit_sha: String,
-    /// Actual persisted NixOS derivation row.
+    /// Actual persisted NixOS evaluation carrier, not an execution-source alias.
     pub(crate) derivation_id: i32,
     /// Evaluated `.drv` path belonging to that row.
     pub(crate) drv_path: String,
@@ -483,6 +486,10 @@ pub struct QueueConfigInspectionResponse {
 /// Represents one system in authoritative flake reconciliation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconciledFlakeSystem {
+    /// Deployment authority of the registered resource; None for unregistered
+    /// declarations. Reconciliation state does not imply managed authority.
+    #[serde(default)]
+    pub management_mode: Option<crate::models::systems::ManagementMode>,
     /// Declared NixOS configuration name or managed configuration name.
     pub configuration_name: String,
     /// Managed Crystal Forge system, when one exists.
@@ -513,10 +520,15 @@ pub enum ReconciledFlakeSystemState {
     ManagedUndeclared,
 }
 
-/// Returns cached revision-scoped flake outputs and reconciliation.
+/// Returns revision-scoped declarations, cached output facets and reconciliation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlakeOutputSnapshotResponse {
-    /// Explicit snapshot lifecycle.
+    /// Bounded declared-name page from a full snapshot or the current native
+    /// inventory. None means unavailable; Some(empty) is authoritative emptiness.
+    /// Modules and inputs retain their independent full-snapshot lifecycle.
+    #[serde(default)]
+    pub declared_system_names: Option<Vec<String>>,
+    /// Lifecycle of the full module/input snapshot, independent of declarations.
     pub lifecycle: SnapshotLifecycle,
     /// Full selected revision SHA.
     pub revision: String,
@@ -547,8 +559,9 @@ pub struct FlakeOutputSnapshotResponse {
     pub delta: Option<FlakeOutputDelta>,
     /// Authoritative declared-to-managed system reconciliation.
     pub systems: Vec<ReconciledFlakeSystem>,
-    /// Total number of visible active managed systems for this flake. This is
-    /// revision-independent and can exceed the bounded `systems` page.
+    /// Total visible active registrations for this flake, across all modes.
+    /// This historical field name means registry tracking, not deployment
+    /// authority. It is revision-independent and may exceed the systems page.
     pub managed_system_count: i64,
     /// Number of declared configurations in the selected revision.
     pub declared_system_count: i64,

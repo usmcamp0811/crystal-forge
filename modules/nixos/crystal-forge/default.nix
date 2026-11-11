@@ -1629,8 +1629,15 @@ in {
       };
       host = lib.mkOption {
         type = lib.types.str;
-        default = "127.0.0.1";
-        description = "Server bind address";
+        default = "0.0.0.0";
+        description = ''
+          Server bind address. The default listens on all IPv4 interfaces,
+          preserving the effective default from before the server honored this
+          option. Use 127.0.0.1 for a loopback-only API, for example behind a
+          local reverse proxy. A wildcard listener can accept remote connections
+          wherever existing network and firewall policy permits; this option
+          does not open firewall ports.
+        '';
       };
       port = lib.mkOption {
         type = lib.types.port;

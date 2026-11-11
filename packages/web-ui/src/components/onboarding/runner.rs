@@ -24,7 +24,10 @@
 use dioxus::prelude::*;
 use dioxus_router::Navigator;
 use gloo_timers::future::TimeoutFuture;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::Closure;
 
 use super::layout::{Rect, Viewport};
 use super::records::{self, Resolution};
@@ -437,7 +440,7 @@ async fn run_stop(
                 publish(runtime, TourRuntime { rect: None, status });
             }
         }
-        TimeoutFuture::new(TARGET_POLL_MS).await;
+        crate::hooks::visibility::visible_tick(TARGET_POLL_MS).await;
         waited += TARGET_POLL_MS;
     }
 }
@@ -465,19 +468,165 @@ pub fn use_tour_runner(ctrl: CoachController) {
     });
 }
 
+/// Owns every browser registration that keeps [`Surroundings`] current.
+///
+/// Measurement is event-driven. It runs once per animation frame at most, after
+/// one of these changes, and never while the document is hidden:
+///
+/// - the window is resized;
+/// - the document becomes visible again;
+/// - the page structure changes, or a `class`, `open`, `hidden`, `aria-modal` or
+///   `role` attribute changes. These are the changes that open or close a
+///   drawer, a modal or the shell. Navigation is a structure change.
+///
+/// Dropping the watcher disconnects the observer, removes both listeners and
+/// cancels pending measurements. A pending animation frame that fires later
+/// finds the watcher gone and does nothing.
+struct SurroundingsWatcher {
+    window: web_sys::Window,
+    document: web_sys::Document,
+    observer: web_sys::MutationObserver,
+    on_resize: Closure<dyn FnMut()>,
+    on_visibility: Closure<dyn FnMut()>,
+    // Kept alive for the observer; never called after `observer.disconnect()`.
+    _on_mutation: Closure<dyn FnMut(js_sys::Array, web_sys::MutationObserver)>,
+    state: Rc<WatcherState>,
+}
+
+/// State shared between the watcher and its animation-frame callbacks.
+struct WatcherState {
+    /// True while a measurement is queued, so a burst of events costs one.
+    pending: Cell<bool>,
+    /// False once the watcher is dropped.
+    alive: Cell<bool>,
+}
+
+/// Queues one measurement for the next animation frame.
+fn schedule_measure(state: &Rc<WatcherState>, surroundings: Signal<Surroundings>) {
+    if !state.alive.get() || state.pending.replace(true) {
+        return;
+    }
+    let queued = Rc::clone(state);
+    // `once_into_js` frees the callback after its single call.
+    let callback = Closure::once_into_js(move || {
+        queued.pending.set(false);
+        if !queued.alive.get() {
+            return;
+        }
+        let next = Surroundings {
+            overlay_open: overlay_open(),
+            viewport: measure_viewport(),
+        };
+        let mut surroundings = surroundings;
+        if *surroundings.peek() != next {
+            surroundings.set(next);
+        }
+    });
+    let queued_ok = web_sys::window()
+        .map(|window| {
+            window
+                .request_animation_frame(callback.unchecked_ref())
+                .is_ok()
+        })
+        .unwrap_or(false);
+    if !queued_ok {
+        state.pending.set(false);
+    }
+}
+
+impl SurroundingsWatcher {
+    fn start(surroundings: Signal<Surroundings>) -> Option<Self> {
+        let window = web_sys::window()?;
+        let document = window.document()?;
+        let body = document.body()?;
+        let state = Rc::new(WatcherState {
+            pending: Cell::new(false),
+            alive: Cell::new(true),
+        });
+
+        let on_resize = {
+            let state = Rc::clone(&state);
+            Closure::<dyn FnMut()>::new(move || schedule_measure(&state, surroundings))
+        };
+        let on_visibility = {
+            let state = Rc::clone(&state);
+            Closure::<dyn FnMut()>::new(move || {
+                if !crate::hooks::visibility::is_hidden() {
+                    schedule_measure(&state, surroundings);
+                }
+            })
+        };
+        let on_mutation = {
+            let state = Rc::clone(&state);
+            Closure::<dyn FnMut(js_sys::Array, web_sys::MutationObserver)>::new(
+                move |_records, _observer| {
+                    // A hidden document renders nothing, so wait for visibility.
+                    if !crate::hooks::visibility::is_hidden() {
+                        schedule_measure(&state, surroundings);
+                    }
+                },
+            )
+        };
+
+        let observer = web_sys::MutationObserver::new(on_mutation.as_ref().unchecked_ref()).ok()?;
+        let init = web_sys::MutationObserverInit::new();
+        init.set_child_list(true);
+        init.set_subtree(true);
+        init.set_attributes(true);
+        let filter = js_sys::Array::new();
+        for name in ["class", "open", "hidden", "aria-modal", "role"] {
+            filter.push(&wasm_bindgen::JsValue::from_str(name));
+        }
+        init.set_attribute_filter(&filter);
+        observer.observe_with_options(&body, &init).ok()?;
+        window
+            .add_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref())
+            .ok()?;
+        document
+            .add_event_listener_with_callback(
+                "visibilitychange",
+                on_visibility.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+
+        schedule_measure(&state, surroundings);
+        Some(Self {
+            window,
+            document,
+            observer,
+            on_resize,
+            on_visibility,
+            _on_mutation: on_mutation,
+            state,
+        })
+    }
+}
+
+impl Drop for SurroundingsWatcher {
+    fn drop(&mut self) {
+        self.state.alive.set(false);
+        self.observer.disconnect();
+        let _ = self
+            .window
+            .remove_event_listener_with_callback("resize", self.on_resize.as_ref().unchecked_ref());
+        let _ = self.document.remove_event_listener_with_callback(
+            "visibilitychange",
+            self.on_visibility.as_ref().unchecked_ref(),
+        );
+    }
+}
+
 /// Keeps the overlay and viewport measurements current. Mount once.
+///
+/// The measurements change only on the events described at
+/// [`SurroundingsWatcher`], so an idle page performs no geometry reads. The
+/// hook owns the watcher and releases every registration when it unmounts.
 pub fn use_surroundings(ctrl: CoachController) {
-    use_future(move || async move {
-        let mut surroundings = ctrl.surroundings;
-        loop {
-            let next = Surroundings {
-                overlay_open: overlay_open(),
-                viewport: measure_viewport(),
-            };
-            if *surroundings.peek() != next {
-                surroundings.set(next);
-            }
-            TimeoutFuture::new(350).await;
+    let watcher = use_hook(|| Rc::new(RefCell::new(SurroundingsWatcher::start(ctrl.surroundings))));
+    use_drop({
+        let watcher = Rc::clone(&watcher);
+        move || {
+            watcher.borrow_mut().take();
         }
     });
 }

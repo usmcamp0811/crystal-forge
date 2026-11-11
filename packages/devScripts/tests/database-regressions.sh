@@ -447,6 +447,7 @@ SQL
       evidence_for_ato \
       framework_version_id_lifecycle \
       hardening_admission_migration_upgrade \
+      management_mode_migration_upgrade \
       policy_counts_defect \
       policy_editor_phase2 \
       poam_workflows \
@@ -465,6 +466,41 @@ SQL
     beginPhase selected-library-and-additional-integration-regressions
     runRegressionCommand cf-server-lib compile \
       cargo test --offline --package cf-server --lib --no-run
+    # Configuration assurance must not grant deployment or Current-runtime
+    # authority. Keep these real database regressions on the existing isolated
+    # CI path, including builder claims rather than queue admission alone.
+    cargo test --offline --package cf-server --lib -- \
+      --ignored --test-threads=1 \
+      management_mode_ \
+      deployment_authority_blocks_nonmanaged_and_inactive_bypass_paths \
+      artifact_admission_ \
+      exact_reuse_ \
+      completion_reconciliation_accepts_only_exact_agentless_artifact_evidence \
+      native_declarations_enable_registration_without_full_output_snapshot \
+      removed_head_retains_real_scan_history_without_promoting_it \
+      configuration_fleet_without_heartbeat_selects_head_once_and_preserves_failures \
+      retained_observation_loses_current_authority_but_keeps_exact_scan \
+      management_metrics_partition_machines_without_unobserved_outages \
+      guest_observations_require_current_parent_environment_and_identity \
+      configuration_hardening_selects_artifact_without_heartbeat_and_never_current \
+      configuration_coverage_and_shared_modes_do_not_confer_runtime \
+      scoped_scan_admission_serializes_composite_metadata_race \
+      manual_and_periodic_scan_affinity_preserves_session_and_environment_guards \
+      retained_observations_lose_runtime_authority_after_mode_conversion \
+      registration_and_rename_start_a_new_observation_boundary \
+      key_rotation_applies_only_to_an_active_managed_registration \
+      cascade_delete_removes_guest_observations_and_detaches_foreign_guests \
+      static_publication_ \
+      database_and_legacy_publication_rules_are_unchanged \
+      legacy_publication_identity_must_stay_unambiguous \
+      scan_of_a_reused_head_fails_closed_without_a_matching_static_publication \
+      flake_deletion_removes_origin_alias_and_adopted_job_together \
+      reenrollment_current_config_reads_and_repairs_preserve_history \
+      external_to_managed_transition_reconciles_queued_builds \
+      cross_environment_shared_configuration_fails_closed_until_resolved \
+      derivation_environment_rule_is_unique_ambiguous_or_absent \
+      explicit_name_and_hostname_fallback_share_one_ambiguity_rule \
+      single_owner_environment_move_rehomes_queued_job
     echo "=== Selected POA&M authorization, setup, notification, and overdue regressions ==="
     # Current counts and optional assignments have distinct database contracts.
     # Keep these ignored regressions on the normal isolated execution path.
@@ -960,9 +996,18 @@ TOML
       queries::cache_destinations::tests::niks3_assignment_writers_wait_for_publication_snapshot \
       handlers::agent::heartbeat::tests::niks3_signed_handler_preserves_pending_deployment_and_delivers_only_selected_reads \
       handlers::agent::heartbeat::tests::signed_heartbeat_classification_preserves_exact_state_lineage \
+      handlers::agent::state::tests::authenticated_state_waiting_across_reenrollment_is_rejected \
+      handlers::agent::state::tests::signed_agent_cannot_poison_another_registration_on_either_endpoint \
+      handlers::agent::state::tests::authenticated_state_cannot_follow_renamed_hostname_to_new_registration \
+      handlers::agent::state::tests::managed_detail_counts_require_exact_current_enrollment_not_configuration_history \
+      handlers::agent::heartbeat::tests::stale_signed_delivery_cannot_claim_reenrolled_target_or_private_cache \
+      queries::systems::tests::duplicate_cleanup_rechecks_enrollment_and_rolls_back_with_observation \
+      queries::system_states::tests::enrollment_epoch_uses_lock_acquisition_time_not_transaction_start \
       queries::system_states::tests::latest_state_decodes_migrated_history_without_boot_id \
       handlers::api::builders::tests::niks3_builder_and_agent_selection_share_assigned_first_policy \
       queries::builders::tests::niks3_canonical_environment_dispatch_rejects_ambiguity_before_credentials \
+      queries::builders::tests::environment_move_after_claim_withholds_cache_dispatch \
+      queries::builders::tests::environment_move_fences_restricted_builder_claims \
       queries::builders::tests::niks3_canonical_environment_completion_rejects_post_dispatch_ambiguity \
       queries::builders::tests::niks3_preclaim_handler_rejects_legacy_and_allows_capable_builder \
       handlers::api::builders::proxy_dispatch_tests::proxy_credential_dispatch_signed_tcp_next_job \

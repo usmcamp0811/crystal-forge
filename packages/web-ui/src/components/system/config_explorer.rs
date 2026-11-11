@@ -1044,6 +1044,8 @@ fn ExplorerChildren(
 /// The component never uses the certified V2 snapshot token for scoped reads.
 /// When `scoped_enabled` is false, Browse and Configured remain local
 /// unavailable states while certified Search and Sources remain usable.
+/// Configuration-only targets carry an exact commit and do not identify a
+/// running generation. Certified comparisons remain observations, not attestations.
 #[component]
 pub(crate) fn ConfigExplorer(
     system_id: Uuid,
@@ -1051,6 +1053,7 @@ pub(crate) fn ConfigExplorer(
     scoped_enabled: bool,
     disabled_reason: String,
     target: String,
+    #[props(default)] configuration_only: bool,
     primary_lifecycle: SnapshotLifecycle,
     evaluation_time: String,
     package_count: String,
@@ -1624,7 +1627,7 @@ pub(crate) fn ConfigExplorer(
                         button { class: "cfgx-link focus-ring", onclick: move |_| on_request_inventory.call(()), "request full inventory" }
                     }
                 }
-                div { class: "cfgx-meta-i", title: if comparison_ready { "A certified complete inventory and valid baseline make comparison meaningful." } else { "Changed and Drift require sufficient certified complete coverage. Incomplete data does not mean zero changes or no drift." }, span { "comparison" } b { class: if comparison_ready { "ok" } else { "warn" }, if comparison_ready { "ready" } else { "unavailable" } } }
+                div { class: "cfgx-meta-i", title: if configuration_only { "Configuration comparison only. No running generation or guest state is inferred. Complete certified coverage and a valid baseline are required." } else if comparison_ready { "A certified complete inventory and valid baseline make comparison meaningful." } else { "Changed and Drift require sufficient certified complete coverage. Incomplete data does not mean zero changes or no drift." }, span { if configuration_only { "config comparison" } else { "comparison" } } b { class: if comparison_ready { "ok" } else { "warn" }, if comparison_ready { "ready" } else { "unavailable" } } }
             }
                 if let Some(error) = inventory_request_error.as_deref() {
                     div { class: "cfg-explorer-local-error", role: "alert", "Configuration inspection prerequisite: {error}" }

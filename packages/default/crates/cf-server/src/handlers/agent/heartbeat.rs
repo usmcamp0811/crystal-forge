@@ -92,7 +92,7 @@ fn handle_duplicate_active_system_cleanup_result(
             warn!(
                 current_hostname = %current_hostname,
                 duplicate_hostnames = ?deactivated,
-                "Auto-deactivated duplicate active systems sharing agent public key"
+                "Selected duplicate active systems for transactional deactivation"
             );
             deactivated
         }
@@ -116,6 +116,12 @@ fn handle_duplicate_active_system_cleanup_result(
 /// trusted HTTPS proxy. An exact
 /// publication source failure suppresses the target before claiming deployment;
 /// heartbeat ingestion still commits and the deployment remains retryable.
+/// Optional signed guest reports are validated under the same writer transaction.
+/// An invalid guest batch, or one naming a guest that is no longer an authorized
+/// target, is discarded whole and stores nothing; the heartbeat itself still
+/// commits and the response carries the parent's current authorized targets.
+/// Older agents without reports receive a normal response. Guest evidence never updates
+/// a guest's system state, scan evidence, or Current CVE/POA&M authority.
 pub async fn log(
     State(state): State<CFState>,
     State(pool): State<PgPool>,
@@ -132,20 +138,21 @@ pub async fn log(
         Ok(capabilities) => capabilities,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
+    // Optional evidence is read only from the exact authenticated request body.
+    #[derive(serde::Deserialize)]
+    struct GuestReports {
+        #[serde(default)]
+        guest_observations: Vec<cf_protocol::agent::GuestObservation>,
+    }
+    let reports = match serde_json::from_slice::<GuestReports>(&agent_request.body) {
+        Ok(body) => body.guest_observations,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
 
-    // Hotfix: if the same public key appears on multiple active hostnames,
-    // deactivate the stale duplicates and keep only the authenticated hostname active.
-    // This prevents renamed/re-joined hosts from leaving old active rows that skew health.
-    let public_key_base64 = agent_request.system.public_key.to_base64();
-    let _ = handle_duplicate_active_system_cleanup_result(
-        &agent_request.system.hostname,
-        deactivate_duplicate_active_systems_by_public_key(
-            &pool,
-            &agent_request.system.hostname,
-            &public_key_base64,
-        )
-        .await,
-    );
+    let Some(public_key) = agent_request.system.public_key.as_ref() else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let public_key_base64 = public_key.to_base64();
 
     // Try to deserialize with version detection
     let (payload, version_compatible) = match deserialize_system_state_versioned(&agent_request) {
@@ -200,6 +207,13 @@ pub async fn log(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
+    // Cleanup locks the union of duplicate/current POA&M keys before any
+    // system-row lock, then rechecks the signer. Its savepoint preserves
+    // best-effort behavior on SQL failures.
+    let deactivated_duplicates = handle_duplicate_active_system_cleanup_result(
+        &agent_request.system.hostname,
+        deactivate_duplicate_active_systems_by_public_key(&mut tx, &agent_request.system).await,
+    );
     let system_id = match crate::queries::system_events::find_system_id_by_hostname_tx(
         &mut tx,
         &payload.hostname,
@@ -225,6 +239,21 @@ pub async fn log(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
+    // SECURITY: Authentication outside the transaction may predate a mode/key
+    // transition. Recheck after POA&M locks and hold the row through insertion.
+    let needs_enrollment_state = match crate::queries::system_states::lock_agent_enrollment_tx(
+        &mut tx,
+        &agent_request.system,
+    )
+    .await
+    {
+        Ok(Some(needs_full)) => needs_full,
+        Ok(None) => return StatusCode::FORBIDDEN.into_response(),
+        Err(error) => {
+            debug!("failed to recheck agent enrollment: {error:#}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
     let previous_observed =
         match lock_observed_system_state_by_hostname_tx(&mut tx, &payload.hostname).await {
             Ok(value) => value,
@@ -236,6 +265,22 @@ pub async fn log(
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         };
+
+    let guest_observation_targets = match crate::queries::guest_observations::ingest_tx(
+        &mut tx,
+        agent_request.system.id,
+        &public_key_base64,
+        &reports,
+    )
+    .await
+    {
+        Ok(Some(targets)) => targets,
+        Ok(None) => return StatusCode::FORBIDDEN.into_response(),
+        Err(error) => {
+            debug!("failed to persist guest observations: {error:#}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     let boot_id_change = if let Some(ref new_boot_id) = payload.boot_id {
         match update_boot_id_tx(&mut tx, &payload.hostname, new_boot_id).await {
@@ -289,18 +334,24 @@ pub async fn log(
     // precomputed heartbeat_or_state decision to ensure we capture post-reboot state.
     let force_full_state_for_reboot = matches!(boot_id_change, Some(BootIdChange::Changed));
 
-    if force_full_state_for_reboot {
-        // Reboot detected: always write full system state regardless of equivalence.
+    // An equivalent first report under the new key must not keep pointing
+    // heartbeat-only rows at a state excluded by the enrollment boundary.
+    if force_full_state_for_reboot || needs_enrollment_state {
+        // A reboot or pending enrollment always needs a full observation.
         if let Err(e) = insert_system_state(
             &mut *tx,
             &payload,
             version_compatible,
             restart_type,
-            Some("startup"),
+            Some(if force_full_state_for_reboot {
+                "startup"
+            } else {
+                "state_delta"
+            }),
         )
         .await
         {
-            debug!("❌ failed to insert reboot system state: {e:?}");
+            debug!("❌ failed to insert full system state: {e:?}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
         if let Err(e) =
@@ -314,7 +365,7 @@ pub async fn log(
             )
             .await
         {
-            debug!("failed to retain reboot generation snapshot: {e:?}");
+            debug!("failed to retain full-state generation snapshot: {e:?}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     } else {
@@ -370,10 +421,14 @@ pub async fn log(
         debug!("❌ failed to commit heartbeat transaction: {e:?}");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
+    if !deactivated_duplicates.is_empty() {
+        warn!(duplicate_hostnames = ?deactivated_duplicates,
+            "Committed duplicate active-system cleanup");
+    }
 
     // Routine heartbeats do not change Current evidence. A full state row
     // triggers best-effort membership repair only after its commit succeeds.
-    if force_full_state_for_reboot || heartbeat_or_state.is_err() {
+    if force_full_state_for_reboot || needs_enrollment_state || heartbeat_or_state.is_err() {
         crate::services::poam::schedule_scheduled_environment_cve_reconciliation_for_system(
             &pool,
             agent_request.system.id,
@@ -408,6 +463,11 @@ pub async fn log(
     // Log what was actually inserted (accounting for reboot override).
     if force_full_state_for_reboot {
         info!("📊 State change recorded for {} (reboot)", payload.hostname);
+    } else if needs_enrollment_state {
+        info!(
+            "📊 State recorded for {} (new enrollment)",
+            payload.hostname
+        );
     } else {
         match heartbeat_or_state {
             Ok(_) => info!("💓 Heartbeat recorded for {}", payload.hostname),
@@ -435,9 +495,9 @@ pub async fn log(
     let mut runtime_caches = Vec::new();
 
     if let Some(target) = desired_target.clone() {
-        match crate::services::composite_enforcement::authorize_and_claim_desired_target_with_read(
+        match crate::services::composite_enforcement::authorize_agent_desired_target_with_read(
             &pool,
-            agent_request.system.id,
+            &agent_request.system,
             &target,
             confidential,
             capabilities,
@@ -473,6 +533,10 @@ pub async fn log(
         }
     }
 
+    // SECURITY: There is no independent cache-configuration response. Read
+    // credentials are returned only with the enrollment-bound delivery above;
+    // a missing or rejected target leaves runtime_caches empty.
+
     // Resolve per-system heartbeat interval, falling back to server-config default.
     let heartbeat_interval_secs = {
         let per_system = get_system_heartbeat_interval_secs(&pool, &agent_request.system.hostname)
@@ -491,6 +555,7 @@ pub async fn log(
     };
 
     let response = LogResponse {
+        guest_observation_targets,
         desired_target,
         runtime_caches,
         heartbeat_interval_secs,
@@ -626,6 +691,178 @@ async fn reconcile_system_health_attention(pool: &PgPool, system_id: Uuid, hostn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database and database creation privileges"]
+    async fn stale_signed_delivery_cannot_claim_reenrolled_target_or_private_cache(pool: PgPool) {
+        use crate::services::composite_enforcement::authorize_agent_desired_target_with_read;
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use ed25519_dalek::Signer;
+
+        for reuse_key in [false, true] {
+            let hostname = format!("delivery-epoch-{reuse_key}");
+            let (old_key, verifying) = crate::test_utils::crypto::generate_keypair();
+            let environment: Uuid =
+                sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+                    .bind(&hostname)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let flake: i32 = sqlx::query_scalar("INSERT INTO flakes(name,repo_url) VALUES($1,'https://example.invalid/'||$1) RETURNING id")
+                .bind(&hostname).fetch_one(&pool).await.unwrap();
+            let id: Uuid = sqlx::query_scalar("INSERT INTO systems(hostname,environment_id,public_key,flake_id,derivation,deployment_policy) VALUES($1,$2,$3,$4,'','manual') RETURNING id")
+                .bind(&hostname).bind(environment).bind(STANDARD.encode(verifying.to_bytes())).bind(flake).fetch_one(&pool).await.unwrap();
+            let commit: i32 = sqlx::query_scalar("INSERT INTO commits(flake_id,git_commit_hash,commit_timestamp) VALUES($1,$2,now()) RETURNING id")
+                .bind(flake).bind("a".repeat(40)).fetch_one(&pool).await.unwrap();
+            let target = format!("/nix/store/{}-{hostname}", "a".repeat(32));
+            let derivation: i32 = sqlx::query_scalar("INSERT INTO derivations(commit_id,derivation_name,derivation_type,derivation_path,store_path,status_id,cf_agent_enabled,policy_requirements_met) VALUES($1,$2,'nixos',$3,$4,(SELECT id FROM derivation_statuses WHERE name='build-complete'),true,true) RETURNING id")
+                .bind(commit).bind(&hostname).bind(format!("{target}.drv")).bind(&target).fetch_one(&pool).await.unwrap();
+            let cache: i32 = sqlx::query_scalar("INSERT INTO cache_destinations(name,cache_type,enabled,push_to,niks3_server_url,niks3_write_auth_mode,niks3_auth_token,niks3_public_keys,niks3_read_auth_mode,niks3_read_client_cert,niks3_read_client_key) VALUES($1,'Niks3',true,'https://read.example','https://write.example','token','fixture-write-token',ARRAY['cache:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='],'mtls',$2,'enrollment-read-secret') RETURNING id")
+                .bind(&hostname).bind(crate::security::cache_secrets::TEST_CERTIFICATE).fetch_one(&pool).await.unwrap();
+            sqlx::query("INSERT INTO cache_destination_environments(cache_destination_id,environment_id) VALUES($1,$2)")
+                .bind(cache).bind(environment).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO cache_push_jobs(derivation_id,store_path,status,cache_destination_id,cache_destination_source) VALUES($1,$2,'completed',$3,'database')")
+                .bind(derivation).bind(&target).bind(cache).execute(&pool).await.unwrap();
+
+            let payload = crate::test_utils::builders::SystemStateBuilder::new()
+                .hostname(&hostname)
+                .build();
+            let body = Bytes::from(serde_json::to_vec(&payload).unwrap());
+            let mut headers = HeaderMap::new();
+            headers.insert("x-key-id", hostname.parse().unwrap());
+            headers.insert(
+                "x-signature",
+                STANDARD
+                    .encode(old_key.sign(&body).to_bytes())
+                    .parse()
+                    .unwrap(),
+            );
+            let verified = authenticate_agent_request(&headers, body.clone(), &pool)
+                .await
+                .unwrap();
+            let state = CFState::new(
+                pool.clone(),
+                crate::config::ServerConfig::default(),
+                std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+                crate::server::jobs::BackgroundJobRegistry::new(),
+            );
+            let response = crate::handlers::agent::state::update(
+                State(state.clone()),
+                State(pool.clone()),
+                headers,
+                body,
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            // Pause the old request at the ingestion/delivery boundary. Revocation
+            // commits before the new manual intent exists, so it cannot be claimed
+            // by the old request as already-authorized in-flight work.
+            let (new_key, _) = if reuse_key {
+                (old_key.clone(), old_key.verifying_key())
+            } else {
+                crate::test_utils::crypto::generate_keypair()
+            };
+            sqlx::query(
+                "UPDATE systems SET management_mode='reference',public_key=NULL WHERE id=$1",
+            )
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE systems SET management_mode='managed',public_key=$2 WHERE id=$1")
+                .bind(id)
+                .bind(STANDARD.encode(new_key.verifying_key().to_bytes()))
+                .execute(&pool)
+                .await
+                .unwrap();
+            let body = Bytes::from(serde_json::to_vec(&payload).unwrap());
+            let mut headers = HeaderMap::new();
+            headers.insert("x-key-id", hostname.parse().unwrap());
+            headers.insert(
+                "x-signature",
+                STANDARD
+                    .encode(new_key.sign(&body).to_bytes())
+                    .parse()
+                    .unwrap(),
+            );
+            let fresh = authenticate_agent_request(&headers, body.clone(), &pool)
+                .await
+                .unwrap();
+            let response = log(State(state), State(pool.clone()), None, headers, body).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let response: LogResponse = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(response.desired_target.is_none());
+            assert!(
+                response.runtime_caches.is_empty(),
+                "no-target responses must not grant independent read credentials"
+            );
+            sqlx::query(
+                "UPDATE systems SET desired_target=$2,desired_target_set_at=now() WHERE id=$1",
+            )
+            .bind(id)
+            .bind(&target)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let pending = crate::queries::system_events::set_pending_deployment_target(
+                &pool,
+                id,
+                Some(&target),
+                "manual_deploy",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            sqlx::query("UPDATE pending_system_deployments SET requested_commit_id=$2,requested_derivation_id=$3 WHERE id=$1")
+                .bind(pending).bind(commit).bind(derivation).execute(&pool).await.unwrap();
+            let capabilities = cf_protocol::agent::AgentCapabilities {
+                supports_niks3: true,
+                ..Default::default()
+            };
+            let denied = authorize_agent_desired_target_with_read(
+                &pool,
+                &verified.system,
+                &target,
+                true,
+                capabilities,
+            )
+            .await
+            .unwrap();
+            assert!(!denied.authorization.allowed());
+            assert!(denied.target.is_none() && denied.publication_read.is_none());
+            let delivered: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                "SELECT delivered_at FROM pending_system_deployments WHERE id=$1",
+            )
+            .bind(pending)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(delivered.is_none());
+            let allowed = authorize_agent_desired_target_with_read(
+                &pool,
+                &fresh.system,
+                &target,
+                true,
+                capabilities,
+            )
+            .await
+            .unwrap();
+            assert!(allowed.authorization.allowed());
+            assert_eq!(allowed.target.as_deref(), Some(target.as_str()));
+            let read = allowed.publication_read.unwrap().into_runtime_cache();
+            assert!(
+                serde_json::to_string(&read)
+                    .unwrap()
+                    .contains("enrollment-read-secret")
+            );
+        }
+    }
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires verified isolated database and database creation privileges"]

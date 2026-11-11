@@ -124,19 +124,19 @@ pub(super) fn EvalLogPane(commit_id: i32, live: bool, empty_message: Option<Stri
     let mut autoscroll = use_signal(|| true);
     let mut poll_tick = use_signal(|| 0_u64);
 
-    use_future(move || async move {
+    // The poll is keyed on `live`. A value captured once would keep polling after
+    // the pane stops being live and would never start if the pane became live later.
+    use_future(use_reactive(&live, move |live| async move {
+        // Preserve the existing two-second live-log refresh cadence for both
+        // queue and history drawers.
         #[cfg(target_arch = "wasm32")]
-        loop {
-            // Preserve the existing two-second live-log refresh cadence for
-            // both queue and history drawers.
-            gloo_timers::future::TimeoutFuture::new(2000).await;
-            if live {
-                poll_tick.set(poll_tick() + 1);
-            } else {
-                break;
-            }
+        while live {
+            crate::hooks::visibility::visible_tick(2000).await;
+            poll_tick.set(poll_tick() + 1);
         }
-    });
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = (live, poll_tick);
+    }));
 
     // Fetch again whenever `poll_tick` changes.
     let mut logs_resource = use_resource(move || async move {

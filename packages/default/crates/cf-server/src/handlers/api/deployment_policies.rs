@@ -315,7 +315,7 @@ fn validate_policy_config(
 ) -> Result<Value, (StatusCode, String)> {
     let validated_config = validate_policy_config_fields(policy_type, config)?;
     validate_policy_type_config(policy_type, &validated_config)
-        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+        .map_err(|message| (policy_validation_status(&message), message))?;
     Ok(validated_config)
 }
 
@@ -326,8 +326,20 @@ async fn validate_policy_config_async(
     let validated_config = validate_policy_config_fields(policy_type, config)?;
     validate_policy_type_config_async(policy_type, &validated_config)
         .await
-        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+        .map_err(|message| (policy_validation_status(&message), message))?;
     Ok(validated_config)
+}
+
+/// Returns 503 when the Nix parser gave no verdict and 400 otherwise.
+///
+/// An unavailable parser says nothing about the submitted policy, so the
+/// client must retry instead of editing a valid expression.
+fn policy_validation_status(message: &str) -> StatusCode {
+    if crate::models::deployment_policies::is_syntax_validation_unavailable(message) {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::BAD_REQUEST
+    }
 }
 
 impl PaginationParams {
@@ -1137,6 +1149,24 @@ mod tests {
             .expect_err("missing packages must be rejected");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("config.packages"));
+    }
+
+    #[test]
+    fn unavailable_parser_is_retryable_not_invalid_input() {
+        let unavailable = format!(
+            "{}: the Nix parser did not finish within 2 seconds. The custom_check expression was not checked; retry the request.",
+            crate::models::deployment_policies::NIX_SYNTAX_VALIDATION_UNAVAILABLE
+        );
+        assert_eq!(
+            super::policy_validation_status(&unavailable),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            super::policy_validation_status(
+                "custom_check expression is invalid: invalid Nix expression syntax: x"
+            ),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]

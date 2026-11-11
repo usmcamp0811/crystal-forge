@@ -712,11 +712,13 @@ async fn legacy_finding_action_context_tx(
                 None,
             )
         })?;
+    // SECURITY: Retained observations survive mode changes, but only a current
+    // managed registration can authorize a runtime finding action.
     let deployed: Option<(i32, String, Value)> = sqlx::query_as(
         r#"SELECT derivation.id,deployed.store_path,derivation.policy_results
            FROM systems system
            JOIN LATERAL (
-             SELECT state.store_path FROM system_states state
+             SELECT state.store_path FROM view_agent_current_system_states state
              WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
                AND btrim(state.store_path)<>''
              ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
@@ -724,7 +726,7 @@ async fn legacy_finding_action_context_tx(
            JOIN derivations derivation
              ON COALESCE(derivation.store_path,derivation.expected_store_path)=deployed.store_path
             AND derivation.derivation_type='nixos'
-           WHERE system.id=$1
+            WHERE system.id=$1 AND system.management_mode='managed'
            ORDER BY derivation.completed_at DESC NULLS LAST,derivation.id DESC LIMIT 1"#,
     )
     .bind(system_id)
@@ -883,10 +885,13 @@ async fn validate_current_assessment_tx(
     tx: &mut Transaction<'_, Postgres>,
     context: &AssessmentContext,
 ) -> Result<(), PoamError> {
+    // SECURITY: Configuration assessments remain readable after conversion;
+    // retained runtime state must not authorize remediation or closure.
     let current_store: Option<String> = sqlx::query_scalar(
         r#"
-        SELECT ss.store_path FROM systems s JOIN system_states ss ON ss.hostname=s.hostname
-        WHERE s.id=$1 AND ss.store_path IS NOT NULL AND btrim(ss.store_path)<>''
+        SELECT ss.store_path FROM systems s JOIN view_agent_current_system_states ss ON ss.hostname=s.hostname
+        WHERE s.id=$1 AND s.management_mode='managed'
+          AND ss.store_path IS NOT NULL AND btrim(ss.store_path)<>''
         ORDER BY ss.timestamp DESC,ss.id DESC LIMIT 1"#,
     )
     .bind(context.system_id)
@@ -3428,7 +3433,7 @@ async fn fleet_cve_subjects_tx(
                 ON authority.system_id=system.id
               JOIN environments environment ON environment.id=authority.environment_id
               JOIN LATERAL (
-                SELECT current.primary_ip_address FROM system_states current
+                SELECT current.primary_ip_address FROM view_agent_current_system_states current
                 WHERE current.hostname=system.hostname
                 ORDER BY current.timestamp DESC NULLS LAST,current.id DESC LIMIT 1
               ) state ON true
@@ -9847,9 +9852,10 @@ async fn current_legacy_observations_tx(
              state.store_path AS target_store_path,derivation.policy_results,
              state.timestamp AS observed_at
            FROM (SELECT DISTINCT unnest($1::uuid[]) AS system_id) requested
-           JOIN systems system ON system.id=requested.system_id
+            JOIN systems system ON system.id=requested.system_id
+              AND system.management_mode='managed'
            JOIN LATERAL (
-             SELECT state.store_path,state.timestamp FROM system_states state
+             SELECT state.store_path,state.timestamp FROM view_agent_current_system_states state
              WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
                AND btrim(state.store_path)<>''
              ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
@@ -10075,6 +10081,9 @@ async fn current_verification_items_tx(
     .execute(&mut **tx)
     .await?;
 
+    // SECURITY: Neither legacy nor composite configuration evidence can close
+    // runtime findings once the registration loses managed authority. Existing
+    // system locks and latest-observation checks still govern managed evidence.
     let observations = sqlx::query_as::<_, AssessmentObservation>(
         r#"SELECT a.system_id,a.policy_lineage_id,a.policy_version_id,a.id AS assessment_id,
              a.derivation_id,a.target_store_path,a.effective_set_digest,
@@ -10086,9 +10095,9 @@ async fn current_verification_items_tx(
            FROM composite_policy_assessments a
            JOIN (SELECT DISTINCT unnest($1::uuid[]) AS system_id) requested
              ON requested.system_id=a.system_id
-           JOIN systems s ON s.id=a.system_id
+            JOIN systems s ON s.id=a.system_id AND s.management_mode='managed'
            JOIN LATERAL (
-             SELECT ss.store_path FROM system_states ss
+             SELECT ss.store_path FROM view_agent_current_system_states ss
              WHERE ss.hostname=s.hostname AND ss.store_path IS NOT NULL AND btrim(ss.store_path)<>''
              ORDER BY ss.timestamp DESC,ss.id DESC LIMIT 1
            ) deployed ON deployed.store_path=a.target_store_path
@@ -11662,6 +11671,256 @@ pub async fn bundle_rollups(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn retained_observations_lose_runtime_authority_after_mode_conversion(pool: PgPool) {
+        use crate::models::deployment_policies::{
+            AssignedPolicy, CompositePolicyConfig, CreateDeploymentPolicyRequest, DeploymentPolicy,
+            PolicyCheckResult, policy_result_key,
+        };
+        use crate::models::evaluate_with_policies::{
+            SuccessfulSystemResult, persist_evaluated_system,
+        };
+        use crate::queries::commits::{EvalStartOutcome, mark_commit_evaluation_started};
+        use crate::queries::deployment_policies::create_deployment_policy;
+
+        let flake: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes(name,repo_url) VALUES ('poam-mode','https://example.invalid/poam-mode') RETURNING id",
+        ).fetch_one(&pool).await.unwrap();
+        let commit: i32 = sqlx::query_scalar(
+            "INSERT INTO commits(flake_id,git_commit_hash,commit_timestamp) VALUES ($1,$2,now()) RETURNING id",
+        ).bind(flake).bind("a".repeat(40)).fetch_one(&pool).await.unwrap();
+        let system: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems(hostname,public_key,is_active,flake_id,system_configuration_name,derivation)
+             VALUES ('poam-mode','fixture-key',TRUE,$1,'poam-mode','poam-mode') RETURNING id",
+        )
+        .bind(flake)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let config: CompositePolicyConfig = serde_json::from_value(json!({
+            "schema_version":1,"mode":"all",
+            "rules":[{"id":Uuid::new_v4(),"kind":"eval_passed","config":{}}],
+        }))
+        .unwrap();
+        let mut assigned = Vec::new();
+        let mut lineages = Vec::new();
+        for (kind, config, policy) in [
+            (
+                "require_packages",
+                json!({"packages":["hello"],"strict":true}),
+                DeploymentPolicy::RequirePackages {
+                    packages: vec!["hello".into()],
+                    strict: true,
+                },
+            ),
+            (
+                "composite",
+                serde_json::to_value(&config).unwrap(),
+                DeploymentPolicy::Composite { config },
+            ),
+        ] {
+            let created = create_deployment_policy(
+                &pool,
+                &CreateDeploymentPolicyRequest {
+                    name: format!("poam-mode-{kind}"),
+                    policy_type: kind.into(),
+                    config,
+                    enabled: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let version: Uuid = sqlx::query_scalar(
+                "SELECT current_draft_version_id FROM deployment_policies WHERE id=$1",
+            )
+            .bind(created.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE deployment_policy_versions SET trust_state='trusted' WHERE id=$1")
+                .bind(version)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO system_policies(system_id,policy_id) VALUES ($1,$2)")
+                .bind(system)
+                .bind(created.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            lineages.push(created.id);
+            assigned.push(AssignedPolicy {
+                policy_id: version,
+                policy_name: created.name,
+                enforcement_mode: Default::default(),
+                policy,
+            });
+        }
+        let EvalStartOutcome::Started { attempt } =
+            mark_commit_evaluation_started(&pool, commit).await.unwrap()
+        else {
+            panic!("fixture attempt must start");
+        };
+        sqlx::query(
+            "INSERT INTO evaluation_attempt_inventory(evaluation_attempt_id,commit_id,
+                 attempt_number,configuration_names,selected_configuration_names,execution_mode)
+             SELECT id,commit_id,attempt_number,ARRAY['poam-mode'],ARRAY['poam-mode'],'native'
+             FROM evaluation_attempts WHERE commit_id=$1 AND attempt_number=$2",
+        )
+        .bind(commit)
+        .bind(attempt)
+        .execute(&pool)
+        .await
+        .unwrap();
+        crate::services::composite_enforcement::initialize_eval_passed_attempt(
+            &pool,
+            commit,
+            attempt,
+            &BTreeMap::from([("poam-mode".into(), assigned.clone())]),
+        )
+        .await
+        .unwrap();
+        let result = SuccessfulSystemResult {
+            system_name: "poam-mode".into(),
+            derivation_target: "flake#nixosConfigurations.poam-mode".into(),
+            drv_path: format!("/nix/store/{}-poam-mode.drv", "a".repeat(32)),
+            expected_store_path: Some(format!("/nix/store/{}-poam-mode", "b".repeat(32))),
+            cf_agent_enabled: Some(true),
+            build_eligible: true,
+        };
+        let check = PolicyCheckResult::from_assigned(
+            result.system_name.clone(),
+            &json!({
+                "cfAgentEnabled":true,
+                policy_result_key(&assigned[0].policy_id):true,
+            }),
+            &assigned,
+        )
+        .unwrap();
+        persist_evaluated_system(&pool, commit, attempt, &result, &check, &assigned)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO system_states(hostname,store_path,change_reason) VALUES ('poam-mode',$1,'startup')")
+            .bind(&result.expected_store_path).execute(&pool).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        lock_assessment_finding_key_tx(&mut tx, (system, lineages[0]))
+            .await
+            .unwrap();
+        let legacy_finding: Uuid = sqlx::query_scalar(
+            "INSERT INTO poam_findings(system_id,policy_lineage_id) VALUES ($1,$2)
+             ON CONFLICT(system_id,policy_lineage_id) DO UPDATE SET system_id=EXCLUDED.system_id RETURNING id",
+        ).bind(system).bind(lineages[0]).fetch_one(&mut *tx).await.unwrap();
+        let assessment: Uuid = sqlx::query_scalar("SELECT id FROM composite_policy_assessments WHERE system_id=$1 AND policy_lineage_id=$2")
+            .bind(system).bind(lineages[1]).fetch_one(&mut *tx).await.unwrap();
+        let context = assessment_context_tx(&mut tx, assessment)
+            .await
+            .unwrap()
+            .unwrap();
+        let findings = vec![
+            (legacy_finding, system, lineages[0]),
+            (context.finding_id, system, lineages[1]),
+        ];
+        let actor = PoamActor {
+            user_id: Uuid::new_v4(),
+            identifier: "fixture".into(),
+            is_admin: true,
+            can_mutate: true,
+            environment_ids: vec![],
+            request_origin: None,
+        };
+        let resolved = resolve_systems_effective_policies_in_tx(&mut tx, &[system])
+            .await
+            .unwrap();
+        let legacy = current_legacy_observations_tx(&mut tx, &findings, &resolved)
+            .await
+            .unwrap();
+        let reference = FindingObservationReference {
+            source: FindingObservationSource::NixPolicyResult,
+            source_id: legacy[&(system, lineages[0])].derivation_id.to_string(),
+            policy_version_id: assigned[0].policy_id,
+            token: legacy[&(system, lineages[0])].observation_token.clone(),
+        };
+        legacy_finding_action_context_tx(&mut tx, &actor, legacy_finding, &reference)
+            .await
+            .unwrap();
+        validate_current_assessment_tx(&mut tx, &context)
+            .await
+            .unwrap();
+        let current = current_verification_items_tx(&mut tx, &findings, Utc::now())
+            .await
+            .unwrap();
+        assert!(
+            current
+                .iter()
+                .all(|item| closure_result_is_accepted(&item.result))
+        );
+        for mode in ["external", "reference"] {
+            sqlx::query("UPDATE systems SET management_mode=$2,public_key=NULL WHERE id=$1")
+                .bind(system)
+                .bind(mode)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            assert!(matches!(
+                legacy_finding_action_context_tx(&mut tx, &actor, legacy_finding, &reference).await,
+                Err(PoamError::Precondition("stale_finding", _, _))
+            ));
+            assert!(matches!(
+                validate_current_assessment_tx(&mut tx, &context).await,
+                Err(PoamError::Precondition("stale_finding", _, _))
+            ));
+            assert!(
+                current_legacy_observations_tx(&mut tx, &findings, &resolved)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let items = current_verification_items_tx(&mut tx, &findings, Utc::now())
+                .await
+                .unwrap();
+            assert!(
+                items
+                    .iter()
+                    .all(|item| !closure_result_is_accepted(&item.result)),
+                "{mode}"
+            );
+            assert!(
+                observation_snapshot_tx(&mut tx, assessment)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "configuration assessment remains readable evidence"
+            );
+            sqlx::query("UPDATE systems SET management_mode='managed',public_key=$2 WHERE id=$1")
+                .bind(system)
+                .bind(crate::test_utils::crypto::test_public_key_base64().1)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            assert!(matches!(
+                legacy_finding_action_context_tx(&mut tx, &actor, legacy_finding, &reference).await,
+                Err(PoamError::Precondition("stale_finding", _, _))
+            ));
+            assert!(matches!(
+                validate_current_assessment_tx(&mut tx, &context).await,
+                Err(PoamError::Precondition("stale_finding", _, _))
+            ));
+            let items = current_verification_items_tx(&mut tx, &findings, Utc::now())
+                .await
+                .unwrap();
+            assert!(
+                items
+                    .iter()
+                    .all(|item| !closure_result_is_accepted(&item.result)),
+                "{mode} re-enrollment cannot restore retained closure authority"
+            );
+        }
+        tx.rollback().await.unwrap();
+    }
+
     struct FixedClock(DateTime<Utc>);
     impl PoamClock for FixedClock {
         fn now(&self) -> DateTime<Utc> {

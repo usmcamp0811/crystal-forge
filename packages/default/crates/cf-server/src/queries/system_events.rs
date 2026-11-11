@@ -1,5 +1,6 @@
 use crate::models::system_events::SystemEventType;
 use crate::models::system_states::SystemState;
+use crate::models::systems::ManagementMode;
 use crate::queries::systems::BootIdChange;
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
@@ -236,12 +237,33 @@ pub async fn lock_observed_system_state_by_hostname_tx(
     Ok(row)
 }
 
+/// Sets pending deployment work while holding the system's authority lock.
+///
+/// Callers must acquire any snapshot or POA&M locks before calling this helper.
+/// The system row is locked before pending rows, matching composite delivery.
+/// Clearing pending intent is permitted in every management mode.
+///
+/// # Errors
+/// Returns an error before changing pending rows if a nonempty target is supplied
+/// for a nonmanaged or inactive system, or if the database operation fails.
 pub async fn set_pending_deployment_target_tx(
     tx: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
     desired_target: Option<&str>,
     source: &str,
 ) -> Result<Option<Uuid>> {
+    let (mode, is_active) = sqlx::query_as::<_, (ManagementMode, bool)>(
+        "SELECT management_mode, is_active FROM systems WHERE id = $1 FOR UPDATE",
+    )
+    .bind(system_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if desired_target.is_some() {
+        anyhow::ensure!(
+            mode.permits_deployment() && is_active,
+            "System management mode {mode} or activity does not permit deployment"
+        );
+    }
     expire_stale_pending_deployments_tx(tx, system_id).await?;
 
     sqlx::query(
@@ -325,11 +347,28 @@ pub async fn set_pending_deployment_target(
     Ok(result)
 }
 
+/// Marks pending work delivered only for an active managed system.
+///
+/// The system-row lock serializes this direct helper with authority revocation.
+/// Returns zero without changing pending work when authority is absent.
+///
+/// # Errors
+/// Returns database errors.
 pub async fn mark_pending_deployment_delivered(
     pool: &PgPool,
     system_id: Uuid,
     target_store_path: &str,
 ) -> Result<u64> {
+    let mut tx = pool.begin().await?;
+    let authority = sqlx::query_as::<_, (ManagementMode, bool)>(
+        "SELECT management_mode, is_active FROM systems WHERE id = $1 FOR UPDATE",
+    )
+    .bind(system_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if !authority.is_some_and(|(mode, active)| mode.permits_deployment() && active) {
+        return Ok(0);
+    }
     let result = sqlx::query(
         r#"
         UPDATE pending_system_deployments
@@ -342,17 +381,34 @@ pub async fn mark_pending_deployment_delivered(
     )
     .bind(system_id)
     .bind(target_store_path)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(result.rows_affected())
 }
 
+/// Marks pending work applying only for an active managed system.
+///
+/// Locks the system row before pending work. Callers must acquire any snapshot
+/// or POA&M locks first. Returns `None` when deployment authority is absent.
+///
+/// # Errors
+/// Returns database errors.
 pub async fn mark_pending_deployment_applying_tx(
     tx: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
     target_store_path: &str,
 ) -> Result<Option<PendingSystemDeployment>> {
+    let authority = sqlx::query_as::<_, (ManagementMode, bool)>(
+        "SELECT management_mode, is_active FROM systems WHERE id = $1 FOR UPDATE",
+    )
+    .bind(system_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if !authority.is_some_and(|(mode, active)| mode.permits_deployment() && active) {
+        return Ok(None);
+    }
     let row = find_matching_pending_deployment_tx(tx, system_id, Some(target_store_path)).await?;
     let Some(row) = row else {
         return Ok(None);

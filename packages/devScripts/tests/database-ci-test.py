@@ -230,6 +230,13 @@ done
                     process.wait(timeout=30)
                     raise
             text = log.read_text()
+            if status != expected:
+                # The evidence log is otherwise only an artifact. A runner that
+                # is terminated never uploads it, so the trace must carry the
+                # cause (for example rustc killed during a cold compile, which
+                # Cargo reports as exit 101 before the controlled runner runs).
+                print(f"--- {log.name}: last 40 lines ---", file=sys.stderr)
+                print("\n".join(text.splitlines()[-40:]), file=sys.stderr, flush=True)
             assert status == expected, (app, fault, status, expected, str(log))
             if fault == "initialization":
                 assert "invalid-task501-option" in text

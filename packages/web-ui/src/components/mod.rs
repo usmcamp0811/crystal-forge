@@ -67,7 +67,7 @@ pub use filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, MultiSelectDropdown,
     ViewToggle,
 };
-pub use heartbeat_spinner::HeartbeatSpinner;
+pub use heartbeat_spinner::{HeartbeatSpinner, use_heartbeat_clock_provider};
 pub use icon::{Icon, IconName};
 pub use io_menu::{IOMenu, IOMenuItem};
 pub use layout::{AppShell, Card, SidebarNav, TopBar};

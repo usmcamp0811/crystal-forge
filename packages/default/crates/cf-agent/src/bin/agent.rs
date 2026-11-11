@@ -14,6 +14,9 @@ use tokio::time::{Duration, sleep};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+#[path = "agent/guest_observations.rs"]
+mod guest_observations;
+
 /// Default heartbeat interval used when the server provides no override.
 const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 600;
 
@@ -51,6 +54,8 @@ enum HeartbeatResult {
 
 // Agent state that holds the deployment manager
 struct AgentState {
+    /// Replaced after each successful pull; never discovers unassociated guests.
+    guest_observation_targets: Vec<cf_protocol::agent::GuestObservationTarget>,
     deployment_manager: AgentDeploymentManager,
     /// Store path from the last successfully sent heartbeat, used to deduplicate
     /// inotify events that fire for the same derivation.
@@ -67,6 +72,7 @@ impl AgentState {
         let startup_uptime_secs = sysinfo::System::uptime();
 
         Ok(Self {
+            guest_observation_targets: Vec::new(),
             deployment_manager,
             last_reported_store_path: None,
             startup_uptime_secs,
@@ -152,10 +158,11 @@ fn deriver_drv_with_test_fallback(path: &OsStr) -> Result<String> {
     }
 }
 
-/// Creates and signs a system state payload.
+/// Creates and signs host state and optional, separately collected guest evidence.
 async fn create_signed_payload(
     current_system: &OsStr,
     context: &str,
+    observations: Vec<cf_protocol::agent::GuestObservation>,
 ) -> Result<(SystemState, String, String)> {
     let cfg = CrystalForgeConfig::load()?;
     let client_cfg = &cfg.client;
@@ -175,21 +182,23 @@ async fn create_signed_payload(
 
     let capabilities = runtime_capabilities(OsStr::new("nix")).await;
     let (payload_json, signature_b64) =
-        sign_current_system_payload(&payload, &signing_key, capabilities)?;
+        sign_current_system_payload(&payload, &signing_key, capabilities, observations)?;
 
     Ok((payload, payload_json, signature_b64))
 }
 
 // SECURITY: Both state and heartbeat POSTs send these exact signed bytes.
-// Capabilities must remain inside the signature, not in an unsigned header.
+// Capabilities and guest reports must remain inside the signature.
 fn sign_current_system_payload(
     payload: &SystemState,
     signing_key: &SigningKey,
     capabilities: cf_protocol::agent::AgentCapabilities,
+    guest_observations: Vec<cf_protocol::agent::GuestObservation>,
 ) -> Result<(String, String)> {
     let payload_json = serde_json::to_string(&cf_protocol::agent::CurrentSystemRequest {
         state: payload,
         capabilities,
+        guest_observations,
     })?;
     let signature_b64 = STANDARD.encode(signing_key.sign(payload_json.as_bytes()).to_bytes());
     Ok((payload_json, signature_b64))
@@ -218,7 +227,8 @@ pub async fn post_system_state_change(current_system: &OsStr, context: &str) -> 
     let cfg = CrystalForgeConfig::load()?;
     let client_cfg = &cfg.client;
 
-    let (_, payload_json, signature_b64) = create_signed_payload(current_system, context).await?;
+    let (_, payload_json, signature_b64) =
+        create_signed_payload(current_system, context, Vec::new()).await?;
     let hostname = hostname::get()?.to_string_lossy().into_owned();
 
     let client = reqwest::Client::new();
@@ -252,11 +262,17 @@ pub async fn post_system_state_change(current_system: &OsStr, context: &str) -> 
 
 /// Posts heartbeat to the server with retry (exponential backoff) and returns the
 /// `LogResponse` including `heartbeat_interval_secs` when present.
-async fn post_heartbeat_with_retry(current_system: &OsStr, context: &str) -> Result<LogResponse> {
+async fn post_heartbeat_with_retry(
+    current_system: &OsStr,
+    context: &str,
+    targets: &[cf_protocol::agent::GuestObservationTarget],
+) -> Result<LogResponse> {
     let cfg = CrystalForgeConfig::load()?;
     let client_cfg = &cfg.client;
 
-    let (_, payload_json, signature_b64) = create_signed_payload(current_system, context).await?;
+    let observations = guest_observations::collect(targets).await;
+    let (_, payload_json, signature_b64) =
+        create_signed_payload(current_system, context, observations).await?;
     let hostname = hostname::get()?.to_string_lossy().into_owned();
 
     let client = reqwest::Client::new();
@@ -325,6 +341,9 @@ async fn post_heartbeat_with_retry(current_system: &OsStr, context: &str) -> Res
 /// HeartbeatResult::Failed if all retry attempts were exhausted.
 ///
 /// P1-2: If an interval_tx sender is provided, updates it with the server's interval.
+/// Consumes the previous successful pull's guest targets and signs their read-only
+/// evidence. A failed pull discards that list so revocation cannot pin reporting
+/// to obsolete associations. No synchronous guest refresh is performed.
 pub async fn post_system_heartbeat_with_deployment(
     current_system: &OsStr,
     context: &str,
@@ -332,7 +351,11 @@ pub async fn post_system_heartbeat_with_deployment(
     interval_tx: Option<&watch::Sender<u64>>,
 ) -> Result<HeartbeatResult> {
     info!("Posting heartbeat ({context})");
-    let log_response = match post_heartbeat_with_retry(current_system, context).await {
+    // Consume each pull's targets once. If an association was revoked while we
+    // collected, a rejected report must not pin all future parent heartbeats to
+    // that obsolete list. The next normal pull re-establishes current targets.
+    let targets = std::mem::take(&mut agent_state.lock().await.guest_observation_targets);
+    let log_response = match post_heartbeat_with_retry(current_system, context, &targets).await {
         Ok(resp) => resp,
         Err(e) => {
             error!("❌ Heartbeat failed after all retries: {e:#}");
@@ -351,6 +374,7 @@ pub async fn post_system_heartbeat_with_deployment(
 
     // Process deployment with our deployment manager
     let mut state = agent_state.lock().await;
+    state.guest_observation_targets = log_response.guest_observation_targets.clone();
     let (deployment_result, _) = state
         .deployment_manager
         .process_heartbeat_response(log_response)
@@ -714,6 +738,15 @@ mod tests {
                 supports_niks3: true,
                 supports_niks3_basic_read: true,
             },
+            vec![
+                serde_json::from_value(serde_json::json!({
+                "guest_id":"00000000-0000-0000-0000-000000000001",
+                "guest_identity":"guest", "unit":"microvm@guest.service",
+                "unit_active_state":"active", "runner_store_path":null,
+                "observed_at":"2026-10-31T12:00:00Z"
+                }))
+                .unwrap(),
+            ],
         )
         .unwrap();
         let decoded = STANDARD.decode(signature).unwrap();
@@ -727,6 +760,17 @@ mod tests {
             serde_json::json!({"supports_niks3": true, "supports_niks3_basic_read": true})
         );
         assert_eq!(value["hostname"], "signed-agent");
+        assert_eq!(
+            value["guest_observations"][0]["unit_active_state"],
+            "active"
+        );
+        let mut tampered = value.clone();
+        tampered["guest_observations"][0]["unit_active_state"] = serde_json::json!("failed");
+        assert!(
+            key.verifying_key()
+                .verify(&serde_json::to_vec(&tampered).unwrap(), &signature)
+                .is_err()
+        );
         assert!(value.get("state").is_none());
         let old_server: SystemState = serde_json::from_str(&body).unwrap();
         assert_eq!(
@@ -754,6 +798,7 @@ mod tests {
             let mut manager = AgentDeploymentManager::new(config);
             let (result, interval) = manager
                 .process_heartbeat_response(LogResponse {
+                    guest_observation_targets: Vec::new(),
                     desired_target: None,
                     runtime_caches: Vec::new(),
                     heartbeat_interval_secs: Some(30),

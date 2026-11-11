@@ -1,5 +1,8 @@
 # Bundle Update Log
 
+## 2026-10-31
+* **TASK-508 management modes:** Updated the partial worktree contract for DB-owned enrollment epochs, persistent registration metadata, Native declaration discovery without full module/input snapshots, scoped exact scan intent, independent hardening evidence, guest-batch recovery and inactive detail telemetry. Corrected builder-claim and unknown-health claims in place. Recorded owner-reported targeted passes and selected VM cases separately from pending exact-source owner runs, upgrade and final UI parity; the normal state-machine full-run failure remains unresolved.
+
 ## 2026-10-10
 * **Niks3 CA compatibility**: Added a focused operator contract for supported full NSS/OpenSSL bundles and root-preserving normalization. Corrected the main Niks3 guide's certificate-only CA restriction and augmenting-write-probe claim. Documented separate client identity checks, canonical Save and legacy in-memory projection, 17 static probe codes, bounded CLI hints, and synthetic-versus-deployed proof limits. Runtime and browser gate evidence remains distinct from source implementation status.
 

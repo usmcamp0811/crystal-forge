@@ -563,6 +563,10 @@ impl SystemSummaryBuilder {
 
     pub fn build(&self) -> SystemSummary {
         SystemSummary {
+            tags: Vec::new(),
+            description: None,
+            management_mode: Default::default(),
+            parent_host_id: None,
             id: self.id,
             hostname: self.hostname.clone(),
             system_configuration_name: None,

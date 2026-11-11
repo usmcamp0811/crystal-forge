@@ -161,6 +161,13 @@ pub async fn resolve_publication_read_tx(
     confidential: bool,
     capabilities: cf_protocol::agent::AgentCapabilities,
 ) -> Result<Option<PublicationRead>> {
+    // SECURITY: The requested derivation remains the authorized configuration
+    // binding. Resolve only same-flake/configuration execution evidence; all
+    // existing destination/environment/transport gates below remain mandatory.
+    let execution_id: i32 = sqlx::query_scalar("SELECT derivation_execution_source($1)")
+        .bind(derivation_id)
+        .fetch_one(&mut **tx)
+        .await?;
     let references: Vec<(Option<i32>, Option<String>, String)> = sqlx::query_as(
         "SELECT cache_destination_id, cache_destination, cache_destination_source
          FROM cache_push_jobs
@@ -168,7 +175,7 @@ pub async fn resolve_publication_read_tx(
          ORDER BY CASE cache_destination_source WHEN 'database' THEN 0 ELSE 1 END, id
          FOR SHARE",
     )
-    .bind(derivation_id)
+    .bind(execution_id)
     .bind(store_path)
     .fetch_all(&mut **tx)
     .await?;

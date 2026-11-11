@@ -4,6 +4,49 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// Rechecks the signed agent identity under the system-row lock.
+///
+/// The caller MUST acquire snapshot-writer and POA&M locks first. The lock lasts
+/// through observation commit, so mode changes, rotation and deactivation cannot
+/// race a report authenticated earlier. Returns `None` for revoked credentials;
+/// `Some(true)` requires a full report because enrollment has no current state.
+/// The epoch must also match the authentication snapshot, even if a key is reused.
+///
+/// # Errors
+/// Returns database errors without authorizing any observation write.
+pub(crate) async fn lock_agent_enrollment_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    verified: &crate::models::systems::System,
+) -> Result<Option<bool>> {
+    let Some(key) = verified.public_key.as_ref() else {
+        return Ok(None);
+    };
+    let locked: Option<(String, bool)> = sqlx::query_as(
+        "SELECT hostname, agent_enrolled_at IS NOT NULL FROM systems WHERE id=$1 AND hostname=$2
+         AND is_active AND management_mode='managed' AND public_key=$3
+         AND agent_enrolled_at IS NOT DISTINCT FROM $4::timestamptz FOR UPDATE",
+    )
+    .bind(verified.id)
+    .bind(&verified.hostname)
+    .bind(key.to_base64())
+    .bind(verified.agent_enrolled_at)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((hostname, has_epoch)) = locked else {
+        return Ok(None);
+    };
+    if !has_epoch {
+        return Ok(Some(false));
+    }
+    let needs_full = sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM view_agent_current_system_states WHERE hostname=$1)",
+    )
+    .bind(hostname)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(Some(needs_full))
+}
+
 const FETCH_SYSTEM_GENERATIONS_SQL: &str = r#"
 WITH generation_rows AS (
   SELECT
@@ -327,6 +370,52 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires verified isolated database and database creation privileges"]
+    async fn enrollment_epoch_uses_lock_acquisition_time_not_transaction_start(pool: PgPool) {
+        let (_, key) = crate::test_utils::crypto::test_public_key_base64();
+        sqlx::query("INSERT INTO systems(hostname,management_mode,derivation) VALUES('epoch-clock','reference','')")
+            .execute(&pool).await.unwrap();
+        // Start the transition transaction before the old writer. Its now()
+        // predates the report, even though the UPDATE will execute afterward.
+        let mut transition = pool.begin().await.unwrap();
+        let started: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(&mut *transition)
+            .await
+            .unwrap();
+        let mut old_writer = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM systems WHERE hostname='epoch-clock' FOR UPDATE")
+            .execute(&mut *old_writer)
+            .await
+            .unwrap();
+        let reported: chrono::DateTime<Utc> = sqlx::query_scalar(
+            "INSERT INTO system_states(hostname,change_reason,store_path,timestamp)
+             VALUES('epoch-clock','startup','/nix/store/epoch-clock-retained-system',clock_timestamp()) RETURNING timestamp",
+        )
+        .fetch_one(&mut *old_writer)
+        .await
+        .unwrap();
+        assert!(reported > started);
+        old_writer.commit().await.unwrap();
+        let enrolled: chrono::DateTime<Utc> = sqlx::query_scalar(
+            "UPDATE systems SET management_mode='managed',public_key=$1
+             WHERE hostname='epoch-clock' RETURNING agent_enrolled_at",
+        )
+        .bind(key)
+        .fetch_one(&mut *transition)
+        .await
+        .unwrap();
+        assert!(enrolled > reported);
+        let eligible: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM view_agent_current_system_states WHERE hostname='epoch-clock'",
+        )
+        .fetch_one(&mut *transition)
+        .await
+        .unwrap();
+        assert_eq!(eligible, 0, "pre-lock observations must remain history");
+        transition.rollback().await.unwrap();
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database and database creation privileges"]
     async fn latest_state_decodes_migrated_history_without_boot_id(pool: PgPool) {
         let mut state = SystemStateBuilder::new().build();
         state.hostname = "latest-state-decoder".into();
@@ -411,7 +500,10 @@ mod tests {
             hostname: hostname.clone(),
             environment_id: None,
             is_active: true,
-            public_key,
+            management_mode: crate::models::systems::ManagementMode::Managed,
+            agent_enrolled_at: None,
+            public_key: Some(public_key),
+            parent_host_id: None,
             flake_id: Some(flake.id),
             derivation: String::new(),
             system_configuration_name: None,
@@ -687,16 +779,27 @@ mod tests {
         use ed25519_dalek::Signature;
         use uuid::Uuid;
 
+        // Report identity must equal the authenticated registration.
+        let reported_hostname: String = serde_json::from_slice::<serde_json::Value>(&json).unwrap()
+            ["hostname"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let mock_system = System {
             id: Uuid::new_v4(),
-            hostname: "test".to_string(),
+            hostname: reported_hostname.clone(),
             environment_id: None,
             is_active: true,
-            public_key: crate::models::public_key::PublicKey::from_base64(
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                "test",
-            )
-            .unwrap(),
+            management_mode: crate::models::systems::ManagementMode::Managed,
+            agent_enrolled_at: None,
+            parent_host_id: None,
+            public_key: Some(
+                crate::models::public_key::PublicKey::from_base64(
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                    "test",
+                )
+                .unwrap(),
+            ),
             flake_id: None,
             derivation: "test".to_string(),
             system_configuration_name: None,
@@ -707,7 +810,7 @@ mod tests {
         };
 
         let mock_request = VerifiedAgentRequest {
-            key_id: "test".to_string(),
+            key_id: reported_hostname,
             signature: Signature::from_bytes(&[0; 64]),
             system: mock_system,
             body: json.into(),
@@ -763,16 +866,27 @@ mod tests {
         use ed25519_dalek::Signature;
         use uuid::Uuid;
 
+        // Report identity must equal the authenticated registration.
+        let reported_hostname: String = serde_json::from_slice::<serde_json::Value>(&json).unwrap()
+            ["hostname"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let mock_system = System {
             id: Uuid::new_v4(),
-            hostname: "test".to_string(),
+            hostname: reported_hostname.clone(),
             environment_id: None,
             is_active: true,
-            public_key: crate::models::public_key::PublicKey::from_base64(
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                "test",
-            )
-            .unwrap(),
+            management_mode: crate::models::systems::ManagementMode::Managed,
+            agent_enrolled_at: None,
+            parent_host_id: None,
+            public_key: Some(
+                crate::models::public_key::PublicKey::from_base64(
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                    "test",
+                )
+                .unwrap(),
+            ),
             flake_id: None,
             derivation: "test".to_string(),
             system_configuration_name: None,
@@ -783,7 +897,7 @@ mod tests {
         };
 
         let mock_request = VerifiedAgentRequest {
-            key_id: "test".to_string(),
+            key_id: reported_hostname,
             signature: Signature::from_bytes(&[0; 64]),
             system: mock_system,
             body: json.into(),

@@ -45,8 +45,8 @@ The document describes the Systems list, its preview panel, and all eight System
 
 - **D1, D2.** A uniquely mapped completed schema-1 scan can be shown without complete deployment proof. SC1 first made it read-only until trusted server reconciliation retained the observed generation. The continuity design later superseded that gate for CVE mutation. Unmapped running output stays unmapped, with no automatic flake-head fallback.
 - **D3.** A CVE count means distinct canonical CVE IDs. A finding count means distinct CVE and package pairs. A scan occurrence count is a third unit.
-- **D4.** The header stays scoped to the running configuration.
-- **D5.** Refresh follows intent. Current re-resolves to the reported running target. A newly evaluated commit only adds a browsing choice.
+- **D4.** The managed-machine header stays scoped to the running configuration.
+- **D5.** Managed Current refresh re-resolves to the reported running target. A newly evaluated commit only adds a browsing choice.
 - **D6.** Findings keep a stable identity (`system_id + canonical_cve_id + canonical_package_name`). Edits capture their start context. Later slices implement continuity.
 - **D7.** Disappearance of a finding yields "Candidate remediated" and then the existing "Awaiting verification" state. Formal closure needs authoritative verification. Automatic closure is a separate policy choice.
 - **D8.** Document precedence for SC1 and the work remaining before SC5.
@@ -63,6 +63,14 @@ The document describes the Systems list, its preview panel, and all eight System
 | Later | Optional agent scanning (observational Vulnix results for unmapped output). |
 
 ## Implementation status
+
+TASK-508 extends the presentation to external/reference registrations under the
+approved management-mode design in `docs/design/CrystalForge` at `18b47eed`.
+Those resources select configuration evidence, not a running Current target.
+Parent-observation reload reads stored latest evidence and does not synchronously
+refresh the guest. Fixture data and simulated Refresh are not backend contracts.
+See [management modes](../concepts/management-modes-and-configuration-assurance.md)
+for source behavior, contradictions and pending browser/integration proof.
 
 > **Status:** partial. The document is part audit, part approved design, part proposal. SC1 target and scan selection shipped. The continuity design superseded parts of the SC1 gate. The status of SC2 to SC5 was not checked.
 

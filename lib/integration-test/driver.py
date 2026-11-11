@@ -17,7 +17,7 @@
 #   paths are stored with `receipt(...)` and asserted by relationship only.
 # - Every wait is bounded and names the condition it waits for.
 
-import base64
+import tempfile
 import contextlib
 import json
 import shlex
@@ -121,8 +121,16 @@ def wait_for(predicate, what, timeout, interval=1.0):
 
 
 def _vm_write(node, path, text):
-    data = base64.b64encode(text.encode()).decode()
-    node.succeed(f"mkdir -p $(dirname {shlex.quote(path)}) && echo {data} | base64 -d > {shlex.quote(path)}")
+    """Transfers payloads without embedding their contents in VM command logs.
+
+    The driver's shared-folder transfer keeps SQL, JSON and runtime credentials
+    out of command text. A private temporary file exists only for the transfer;
+    copy failures still propagate through the normal driver assertions.
+    """
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as source:
+        source.write(text)
+        source.flush()
+        node.copy_from_host(source.name, path)
 
 
 def sql_json(node, query, database="crystal_forge"):
@@ -133,7 +141,7 @@ def sql_json(node, query, database="crystal_forge"):
     """
     _vm_write(node, "/tmp/cf-it/query.sql", f"SELECT coalesce(json_agg(t), '[]'::json) FROM ({query}) t;\n")
     out = node.succeed(
-        f"runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -d {shlex.quote(database)} -At -f /tmp/cf-it/query.sql"
+        f"runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -d {shlex.quote(database)} -At -f - < /tmp/cf-it/query.sql"
     )
     return json.loads(out.strip() or "[]")
 

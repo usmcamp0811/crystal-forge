@@ -31,7 +31,18 @@ use crate::models::retry_policy::{
     automatic_retry_eligible,
 };
 use crate::queries::attention;
-use crate::queries::build_jobs::{lock_build_derivation, lock_build_queue_order};
+use crate::queries::build_jobs::{
+    ARTIFACT_POLICY_PREDICATE, JOB_ENVIRONMENT_IS_CURRENT, lock_build_derivation,
+    lock_build_queue_order,
+};
+
+// Claim templates substitute the same artifact gate used by admission and
+// legacy claims, plus the current-owner environment check. All session,
+// environment, source, and exact-job predicates remain independent
+// requirements; artifact admission grants none of them.
+fn claimable_job_predicate() -> String {
+    format!("({ARTIFACT_POLICY_PREDICATE}) AND ({JOB_ENVIRONMENT_IS_CURRENT})")
+}
 
 const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
     UPDATE build_jobs
@@ -48,10 +59,9 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
         FROM build_jobs
         JOIN derivations d ON d.id = build_jobs.derivation_id
         WHERE build_jobs.status = 'queued'
-            AND build_jobs.available_at <= NOW()
+          AND build_jobs.available_at <= NOW()
           AND ($3::uuid IS NULL OR build_jobs.id = $3)
-          AND d.cf_agent_enabled IS TRUE
-          AND d.policy_requirements_met IS TRUE
+          AND ({artifact_policy_with_env})
         ORDER BY
             build_jobs.queue_position DESC NULLS LAST,
             build_jobs.priority_weight DESC,
@@ -85,8 +95,7 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
           AND build_jobs.available_at <= NOW()
           AND ($4::uuid IS NULL OR build_jobs.id = $4)
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
-          AND d.cf_agent_enabled IS TRUE
-          AND d.policy_requirements_met IS TRUE
+          AND ({artifact_policy_with_env})
         ORDER BY
             build_jobs.queue_position DESC NULLS LAST,
             build_jobs.priority_weight DESC,
@@ -120,8 +129,7 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL: &str = r#"
         LEFT JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
         WHERE build_jobs.status = 'queued'
           AND build_jobs.available_at <= NOW()
-          AND d.cf_agent_enabled IS TRUE
-          AND d.policy_requirements_met IS TRUE
+          AND ({artifact_policy_with_env})
           AND build_jobs.id = $2
           AND d.commit_id IS NOT NULL
           AND d.derivation_path IS NOT NULL
@@ -157,8 +165,7 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
         WHERE build_jobs.status = 'queued'
           AND build_jobs.available_at <= NOW()
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
-          AND d.cf_agent_enabled IS TRUE
-          AND d.policy_requirements_met IS TRUE
+          AND ({artifact_policy_with_env})
           AND build_jobs.id = $3
           AND d.commit_id IS NOT NULL
           AND d.derivation_path IS NOT NULL
@@ -977,6 +984,10 @@ fn validate_verified_source_claim_preflight(
 
 /// Claims an eligible job with session fencing and atomic concurrency checks.
 ///
+/// Uses configuration artifact admission, not managed deployment eligibility.
+/// Agentless artifacts retain their actual agent fact and must still satisfy
+/// the exact-job, session, environment, and execution-strategy prerequisites.
+///
 /// `preflight_job_id`, when supplied, restricts either strategy to that exact
 /// candidate. A lost or locked candidate returns `None`; the claim MUST NOT
 /// substitute unvalidated work. Verified-source claims require a candidate.
@@ -1078,55 +1089,63 @@ pub async fn claim_next_job_atomic(
     let job = if environment_ids.is_empty() {
         // Wildcard: builder can claim jobs from any environment
         match execution_strategy {
-            RemoteBuildExecutionStrategy::ServerDerivation => {
-                sqlx::query_as::<_, BuildJobRow>(CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL)
-                    .bind(builder_id)
-                    .bind(builder_session_id)
-                    .bind(preflight_job_id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .context("Failed to claim job (wildcard server_derivation) in transaction")?
-            }
+            RemoteBuildExecutionStrategy::ServerDerivation => sqlx::query_as::<_, BuildJobRow>(
+                &CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL
+                    .replace("{artifact_policy_with_env}", &claimable_job_predicate()),
+            )
+            .bind(builder_id)
+            .bind(builder_session_id)
+            .bind(preflight_job_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to claim job (wildcard server_derivation) in transaction")?,
             RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
                 let job_id = preflight_job_id
                     .context("verified-source claim requires a preflighted job ID")?;
-                sqlx::query_as::<_, BuildJobRow>(CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL)
-                    .bind(builder_id)
-                    .bind(job_id)
-                    .bind(builder_session_id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .context(
-                        "Failed to claim job (wildcard source_re_evaluate_verified) in transaction",
-                    )?
+                sqlx::query_as::<_, BuildJobRow>(
+                    &CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL
+                        .replace("{artifact_policy_with_env}", &claimable_job_predicate()),
+                )
+                .bind(builder_id)
+                .bind(job_id)
+                .bind(builder_session_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .context(
+                    "Failed to claim job (wildcard source_re_evaluate_verified) in transaction",
+                )?
             }
         }
     } else {
         // Filtered: only jobs matching builder's environment assignments
         match execution_strategy {
-            RemoteBuildExecutionStrategy::ServerDerivation => {
-                sqlx::query_as::<_, BuildJobRow>(CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL)
-                    .bind(builder_id)
-                    .bind(environment_ids)
-                    .bind(builder_session_id)
-                    .bind(preflight_job_id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .context("Failed to claim job (filtered server_derivation) in transaction")?
-            }
+            RemoteBuildExecutionStrategy::ServerDerivation => sqlx::query_as::<_, BuildJobRow>(
+                &CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL
+                    .replace("{artifact_policy_with_env}", &claimable_job_predicate()),
+            )
+            .bind(builder_id)
+            .bind(environment_ids)
+            .bind(builder_session_id)
+            .bind(preflight_job_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to claim job (filtered server_derivation) in transaction")?,
             RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
                 let job_id = preflight_job_id
                     .context("verified-source claim requires a preflighted job ID")?;
-                sqlx::query_as::<_, BuildJobRow>(CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL)
-                    .bind(builder_id)
-                    .bind(environment_ids)
-                    .bind(job_id)
-                    .bind(builder_session_id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .context(
-                        "Failed to claim job (filtered source_re_evaluate_verified) in transaction",
-                    )?
+                sqlx::query_as::<_, BuildJobRow>(
+                    &CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL
+                        .replace("{artifact_policy_with_env}", &claimable_job_predicate()),
+                )
+                .bind(builder_id)
+                .bind(environment_ids)
+                .bind(job_id)
+                .bind(builder_session_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .context(
+                    "Failed to claim job (filtered source_re_evaluate_verified) in transaction",
+                )?
             }
         }
     };
@@ -1150,7 +1169,7 @@ pub async fn peek_next_server_derivation_job(
     pool: &PgPool,
     environment_ids: &[Uuid],
 ) -> Result<Option<BuildJob>> {
-    sqlx::query_as::<_, BuildJobRow>(
+    sqlx::query_as::<_, BuildJobRow>(&format!(
         r#"
         SELECT build_jobs.*
         FROM build_jobs
@@ -1160,8 +1179,8 @@ pub async fn peek_next_server_derivation_job(
           AND (cardinality($1::uuid[]) = 0
                OR build_jobs.environment_id = ANY($1)
                OR build_jobs.environment_id IS NULL)
-          AND d.cf_agent_enabled IS TRUE
-          AND d.policy_requirements_met IS TRUE
+          AND ({ARTIFACT_POLICY_PREDICATE})
+          AND ({JOB_ENVIRONMENT_IS_CURRENT})
         ORDER BY build_jobs.queue_position DESC NULLS LAST,
                  build_jobs.priority_weight DESC,
                  (SELECT c.commit_timestamp FROM commits c
@@ -1169,7 +1188,7 @@ pub async fn peek_next_server_derivation_job(
                  build_jobs.created_at ASC
         LIMIT 1
         "#,
-    )
+    ))
     .bind(environment_ids)
     .fetch_optional(pool)
     .await
@@ -1200,7 +1219,7 @@ pub async fn peek_next_verified_source_job(
     pool: &PgPool,
     environment_ids: &[Uuid],
 ) -> Result<Option<VerifiedSourceClaimCandidate>> {
-    sqlx::query_as::<_, VerifiedSourceClaimCandidate>(
+    sqlx::query_as::<_, VerifiedSourceClaimCandidate>(&format!(
         r#"
         SELECT build_jobs.id AS job_id,
                f.repo_url,
@@ -1214,8 +1233,8 @@ pub async fn peek_next_verified_source_job(
           AND (cardinality($1::uuid[]) = 0
                OR build_jobs.environment_id = ANY($1)
                OR build_jobs.environment_id IS NULL)
-          AND d.cf_agent_enabled IS TRUE
-          AND d.policy_requirements_met IS TRUE
+          AND ({ARTIFACT_POLICY_PREDICATE})
+          AND ({JOB_ENVIRONMENT_IS_CURRENT})
           AND d.derivation_path IS NOT NULL
         ORDER BY
             build_jobs.queue_position DESC NULLS LAST,
@@ -1224,7 +1243,7 @@ pub async fn peek_next_verified_source_job(
             build_jobs.created_at ASC
         LIMIT 1
         "#,
-    )
+    ))
     .bind(environment_ids)
     .fetch_optional(pool)
     .await
@@ -1489,6 +1508,9 @@ pub async fn complete_job_atomic_with_policy(
 /// # Errors
 /// Returns an error for database failures, superseded sessions, non-building
 /// jobs, changed selections, or disabled/ineligible selected destinations.
+/// When a destination is selected, it also returns an error when the job's
+/// environment differs from the configuration's current owner environment,
+/// or the owner is ambiguous.
 ///
 /// # Examples
 /// ```no_run
@@ -1535,6 +1557,26 @@ pub async fn record_job_cache_dispatch(
         }
     }
     if let Some(id) = destination_id {
+        // SECURITY: The builder was authorized to claim this job for the
+        // environment the job carries. Destination eligibility below is decided
+        // for the configuration's current owner environment. Release credentials
+        // only when the two are the same, so a registration move after the
+        // claim cannot give this builder another environment's destination.
+        // The check runs under the job row lock, before any credential read.
+        let (commit_id, derivation_name): (Option<i32>, String) =
+            sqlx::query_as("SELECT commit_id, derivation_name FROM derivations WHERE id = $1")
+                .bind(job.derivation_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let owner = crate::queries::cache_push::resolve_derivation_environment(
+            &mut *tx,
+            commit_id,
+            &derivation_name,
+        )
+        .await?;
+        if owner != job.environment_id {
+            bail!("Build job environment no longer matches the configuration owner");
+        }
         lock_eligible_cache_destination(&mut tx, id, job.derivation_id).await?;
     }
     if job.cache_dispatch_recorded_at.is_some() {
@@ -3453,6 +3495,350 @@ mod tests {
     use chrono::{Duration, Utc};
     use sqlx::postgres::PgPoolOptions;
 
+    async fn artifact_claim_fixture(pool: &PgPool, mode: &str, environment: Uuid) -> Uuid {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let now = Utc::now();
+        let job = create_queued_job(
+            pool,
+            &format!("https://example.test/{suffix}.git"),
+            &suffix,
+            &format!("{suffix}00000000"),
+            now,
+            &format!("config-{suffix}"),
+            1.0,
+            now,
+        )
+        .await;
+        set_job_derivation_path(pool, job, &format!("/nix/store/{suffix}.drv")).await;
+        sqlx::query(
+            "INSERT INTO systems(hostname,flake_id,system_configuration_name,derivation,
+                management_mode,public_key,is_active,environment_id)
+             SELECT $2,c.flake_id,d.derivation_name,d.derivation_name,$3,$4,TRUE,$5
+             FROM build_jobs j JOIN derivations d ON d.id=j.derivation_id
+             JOIN commits c ON c.id=d.commit_id WHERE j.id=$1",
+        )
+        .bind(job)
+        .bind(format!("resource-{suffix}"))
+        .bind(mode)
+        .bind(if mode == "managed" {
+            Some("fixture-key")
+        } else {
+            None
+        })
+        .bind(environment)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE derivations d SET cf_agent_enabled=FALSE,policy_requirements_met=FALSE,
+                policy_results='{\"global\":{\"cfAgentEnabled\":{\"passed\":false},\"artifactAdmission\":{\"passed\":true}}}'
+             FROM build_jobs j WHERE j.id=$1 AND d.id=j.derivation_id",
+        )
+        .bind(job)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE build_jobs SET environment_id=$2 WHERE id=$1")
+            .bind(job)
+            .bind(environment)
+            .execute(pool)
+            .await
+            .unwrap();
+        job
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn artifact_admission_builder_claim_preserves_authorization_and_prerequisites(
+        pool: PgPool,
+    ) {
+        let environment: Uuid = sqlx::query_scalar("SELECT id FROM environments WHERE name='dev'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let other: Uuid = sqlx::query_scalar("SELECT id FROM environments WHERE name='prod'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        for mode in ["external", "reference"] {
+            for strategy in [
+                RemoteBuildExecutionStrategy::ServerDerivation,
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            ] {
+                for filtered in [false, true] {
+                    let builder = create_active_test_builder(&pool, "artifact-claim").await;
+                    let session = Uuid::new_v4();
+                    establish_builder_session(
+                        &pool,
+                        &builder.id,
+                        &session,
+                        60,
+                        "artifact claim test",
+                    )
+                    .await
+                    .unwrap();
+                    if filtered {
+                        assign_builder_to_environment(&pool, &builder.id, &environment)
+                            .await
+                            .unwrap();
+                    }
+                    let environments = get_builder_environment_ids(&pool, &builder.id)
+                        .await
+                        .unwrap();
+                    let job = artifact_claim_fixture(&pool, mode, environment).await;
+                    let hidden = peek_next_server_derivation_job(&pool, &[other])
+                        .await
+                        .unwrap();
+                    assert!(hidden.is_none());
+                    let hidden = peek_next_verified_source_job(&pool, &[other])
+                        .await
+                        .unwrap();
+                    assert!(hidden.is_none());
+                    let denied = claim_next_job_atomic(
+                        &pool,
+                        &builder.id,
+                        1,
+                        &[other],
+                        strategy,
+                        Some(&session),
+                        Some(&job),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(denied.is_none());
+                    let stale = Uuid::new_v4();
+                    let stale_error = claim_next_job_atomic(
+                        &pool,
+                        &builder.id,
+                        1,
+                        &environments,
+                        strategy,
+                        Some(&stale),
+                        Some(&job),
+                    )
+                    .await
+                    .unwrap_err();
+                    assert!(stale_error.to_string().contains("builder_session_mismatch"));
+                    if strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified {
+                        let missing_preflight = claim_next_job_atomic(
+                            &pool,
+                            &builder.id,
+                            1,
+                            &environments,
+                            strategy,
+                            Some(&session),
+                            None,
+                        )
+                        .await
+                        .unwrap_err();
+                        assert!(missing_preflight.to_string().contains("preflighted job ID"));
+                        // Artifact admission does not supply a verified-source
+                        // derivation path or replace canonical preflight.
+                        let path: String = sqlx::query_scalar("SELECT d.derivation_path FROM derivations d JOIN build_jobs j ON j.derivation_id=d.id WHERE j.id=$1")
+                            .bind(job).fetch_one(&pool).await.unwrap();
+                        let clear_path = "UPDATE derivations d SET derivation_path=NULL FROM build_jobs j WHERE j.id=$1 AND d.id=j.derivation_id";
+                        // 0322 forbids clearing a job-bound physical identity.
+                        assert!(
+                            sqlx::query(clear_path)
+                                .bind(job)
+                                .execute(&pool)
+                                .await
+                                .is_err()
+                        );
+                        // Pre-0322 databases can still hold such rows; selectors
+                        // must keep rejecting them. Create that legacy state with
+                        // triggers disabled for this fixture transaction only.
+                        let mut legacy = pool.begin().await.unwrap();
+                        sqlx::query("SET LOCAL session_replication_role = replica")
+                            .execute(&mut *legacy)
+                            .await
+                            .unwrap();
+                        sqlx::query(clear_path)
+                            .bind(job)
+                            .execute(&mut *legacy)
+                            .await
+                            .unwrap();
+                        legacy.commit().await.unwrap();
+                        let missing_source = peek_next_verified_source_job(&pool, &environments)
+                            .await
+                            .unwrap();
+                        assert!(missing_source.is_none());
+                        let denied = claim_next_job_atomic(
+                            &pool,
+                            &builder.id,
+                            1,
+                            &environments,
+                            strategy,
+                            Some(&session),
+                            Some(&job),
+                        )
+                        .await
+                        .unwrap();
+                        assert!(denied.is_none());
+                        set_job_derivation_path(&pool, job, &path).await;
+                    }
+                    let server_candidate = peek_next_server_derivation_job(&pool, &environments)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let source_candidate = peek_next_verified_source_job(&pool, &environments)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(server_candidate.id, job);
+                    assert_eq!(source_candidate.job_id, job);
+                    // A newer queue head cannot replace the preflighted job.
+                    let competing_job = artifact_claim_fixture(&pool, mode, environment).await;
+                    // Revocation between peek and claim must be rechecked.
+                    sqlx::query("UPDATE derivations d SET policy_results=jsonb_set(policy_results,'{global,artifactAdmission,passed}','false') FROM build_jobs j WHERE j.id=$1 AND d.id=j.derivation_id")
+                        .bind(job).execute(&pool).await.unwrap();
+                    let revoked = claim_next_job_atomic(
+                        &pool,
+                        &builder.id,
+                        1,
+                        &environments,
+                        strategy,
+                        Some(&session),
+                        Some(&job),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(revoked.is_none());
+                    sqlx::query("UPDATE derivations d SET policy_results=jsonb_set(policy_results,'{global,artifactAdmission,passed}','true') FROM build_jobs j WHERE j.id=$1 AND d.id=j.derivation_id")
+                        .bind(job).execute(&pool).await.unwrap();
+                    let claimed = claim_next_job_atomic(
+                        &pool,
+                        &builder.id,
+                        1,
+                        &environments,
+                        strategy,
+                        Some(&session),
+                        Some(&job),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(claimed.id, job);
+                    assert_eq!(claimed.builder_id, Some(builder.id));
+                    assert_eq!(claimed.builder_session_id, Some(session));
+                    assert_eq!(claimed.environment_id, Some(environment));
+                    assert_eq!(claimed.status, "building");
+                    let at_capacity = claim_next_job_atomic(
+                        &pool,
+                        &builder.id,
+                        1,
+                        &environments,
+                        strategy,
+                        Some(&session),
+                        Some(&competing_job),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(at_capacity.is_none());
+                    let authorized =
+                        get_authorized_source_archive_job(&pool, &job, &builder.id, &session)
+                            .await
+                            .unwrap();
+                    let unauthorized =
+                        get_authorized_source_archive_job(&pool, &job, &builder.id, &stale)
+                            .await
+                            .unwrap();
+                    assert!(authorized.is_some());
+                    assert!(unauthorized.is_none());
+                    let facts: (bool, bool) = sqlx::query_as("SELECT d.cf_agent_enabled,d.policy_requirements_met FROM derivations d JOIN build_jobs j ON j.derivation_id=d.id WHERE j.id=$1")
+                        .bind(job).fetch_one(&pool).await.unwrap();
+                    assert_eq!(facts, (false, false));
+                    set_build_job_status(&pool, job, "cancelled").await;
+                    set_build_job_status(&pool, competing_job, "cancelled").await;
+                }
+            }
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn artifact_admission_all_builder_selectors_reject_ineligible_jobs(pool: PgPool) {
+        let environment: Uuid = sqlx::query_scalar("SELECT id FROM environments WHERE name='dev'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let builder = create_active_test_builder(&pool, "artifact-denials").await;
+        for case in [
+            "managed",
+            "wrong-config",
+            "inactive",
+            "strict-failure",
+            "legacy",
+            "excluded",
+        ] {
+            let mode = if case == "managed" {
+                "managed"
+            } else {
+                "reference"
+            };
+            let job = artifact_claim_fixture(&pool, mode, environment).await;
+            match case {
+                "wrong-config" | "inactive" => {
+                    sqlx::query("UPDATE systems s SET system_configuration_name=CASE WHEN $2 THEN 'missing-config' ELSE s.system_configuration_name END,is_active=$2 FROM commits c,derivations d,build_jobs j WHERE j.id=$1 AND d.id=j.derivation_id AND c.id=d.commit_id AND s.flake_id=c.flake_id")
+                        .bind(job).bind(case == "wrong-config").execute(&pool).await.unwrap();
+                }
+                "strict-failure" | "legacy" | "excluded" => {
+                    sqlx::query("UPDATE derivations d SET policy_results=$2,build_preparation_state=$3 FROM build_jobs j WHERE j.id=$1 AND d.id=j.derivation_id")
+                        .bind(job)
+                        .bind(if case == "strict-failure" { serde_json::json!({"global":{"artifactAdmission":{"passed":false}}}) } else if case == "legacy" { serde_json::json!({}) } else { serde_json::json!({"global":{"artifactAdmission":{"passed":true}}}) })
+                        .bind(if case == "excluded" { "not_required" } else { "pending" })
+                        .execute(&pool).await.unwrap();
+                }
+                _ => {}
+            }
+            for environments in [vec![], vec![environment]] {
+                let server_candidate = peek_next_server_derivation_job(&pool, &environments)
+                    .await
+                    .unwrap();
+                let source_candidate = peek_next_verified_source_job(&pool, &environments)
+                    .await
+                    .unwrap();
+                assert!(server_candidate.is_none(), "{case}");
+                assert!(source_candidate.is_none(), "{case}");
+                for strategy in [
+                    RemoteBuildExecutionStrategy::ServerDerivation,
+                    RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+                ] {
+                    let claimed = claim_next_job_atomic(
+                        &pool,
+                        &builder.id,
+                        1,
+                        &environments,
+                        strategy,
+                        None,
+                        Some(&job),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(claimed.is_none(), "{case}");
+                }
+            }
+            let legacy = crate::queries::build_jobs::get_next_job_for_builder(&pool, builder.id)
+                .await
+                .unwrap();
+            assert!(legacy.is_none(), "{case}");
+            let unchanged = get_build_job_by_id(&pool, &job).await.unwrap().unwrap();
+            assert_eq!(unchanged.status, "queued");
+            assert!(unchanged.builder_id.is_none());
+            assert!(unchanged.builder_session_id.is_none());
+            assert!(unchanged.cache_dispatch_recorded_at.is_none());
+            set_build_job_status(&pool, job, "cancelled").await;
+        }
+        for mode in ["external", "reference"] {
+            let job = artifact_claim_fixture(&pool, mode, environment).await;
+            let legacy = crate::queries::build_jobs::get_next_job_for_builder(&pool, builder.id)
+                .await
+                .unwrap();
+            assert_eq!(legacy, Some(job));
+            set_build_job_status(&pool, job, "cancelled").await;
+        }
+    }
+
     #[test]
     fn verified_source_claim_requires_preflight_before_database_work() {
         let error = validate_verified_source_claim_preflight(
@@ -4008,6 +4394,17 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+        // The job was claimed before the registrations existed. Give it the
+        // owner environment that admission records for a job queued after
+        // them; dispatch refuses a job whose environment is not the owner.
+        let job = sqlx::query_as::<_, BuildJob>(
+            "UPDATE build_jobs SET environment_id = $2 WHERE id = $1 RETURNING *",
+        )
+        .bind(job.id)
+        .bind(preferred)
+        .fetch_one(pool)
+        .await
+        .unwrap();
         let destination =
             create_public_niks3_test_cache(pool, "preferred-cache", "https://preferred.example")
                 .await;
@@ -4052,6 +4449,144 @@ mod tests {
         assert_eq!(unchanged.status, "building");
         assert!(unchanged.dispatched_cache_destination_id.is_none());
         assert!(unchanged.cache_dispatch_recorded_at.is_none());
+    }
+
+    /// MR !340 review: a registration that moves after a job is claimed must
+    /// not release the new owner environment's cache credentials to that claim.
+    /// The selected destination is eligible for the new owner, so only the
+    /// ownership check can refuse it.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database creation privileges"]
+    async fn environment_move_after_claim_withholds_cache_dispatch(pool: PgPool) {
+        let (job, builder, destination, _flake, other) = canonical_environment_fixture(&pool).await;
+        let preferred = job.environment_id.expect("fixture job carries its owner");
+        // Assignment replaces the set: keep the original owner and add `other`.
+        crate::queries::cache_destinations::assign_environments_to_cache(
+            &pool,
+            destination.id,
+            &[preferred, other],
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE systems SET environment_id = $1 WHERE hostname = 'preferred-host'")
+            .bind(other)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = record_job_cache_dispatch(&pool, &job.id, &builder, None, Some(destination.id))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Build job environment no longer matches the configuration owner"
+        );
+        let unchanged = get_build_job_by_id(&pool, &job.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.status, "building");
+        assert!(unchanged.dispatched_cache_destination_id.is_none());
+        assert!(unchanged.cache_dispatch_recorded_at.is_none());
+        // With ownership restored, the same claim dispatches the destination.
+        sqlx::query("UPDATE systems SET environment_id = $1 WHERE hostname = 'preferred-host'")
+            .bind(job.environment_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dispatched =
+            record_job_cache_dispatch(&pool, &job.id, &builder, None, Some(destination.id))
+                .await
+                .unwrap();
+        assert_eq!(
+            dispatched.dispatched_cache_destination_id,
+            Some(destination.id)
+        );
+    }
+
+    /// MR !340 review: after an A-to-B move, a builder restricted to A cannot
+    /// claim the queued job, before or after reconciliation; a builder
+    /// restricted to B claims it after reconciliation moves it.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database creation privileges"]
+    async fn environment_move_fences_restricted_builder_claims(pool: PgPool) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/moved-claim.git",
+            "moved-claim",
+            &"b".repeat(40),
+            now,
+            "moved-config",
+            1.0,
+            now,
+        )
+        .await;
+        let environment = |name: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Uuid>(
+                    "INSERT INTO environments (name) VALUES ($1) RETURNING id",
+                )
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let (a, b) = (environment("claim-a").await, environment("claim-b").await);
+        // The job was queued while its only registration was in A; the
+        // registration has since moved to B.
+        sqlx::query("UPDATE build_jobs SET environment_id = $2 WHERE id = $1")
+            .bind(job_id)
+            .bind(a)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO systems (hostname, system_configuration_name, public_key, derivation, flake_id, environment_id, is_active)
+             SELECT 'moved-host', 'moved-config', 'test-key', '', c.flake_id, $2, TRUE
+             FROM build_jobs j JOIN derivations d ON d.id = j.derivation_id
+             JOIN commits c ON c.id = d.commit_id WHERE j.id = $1",
+        )
+        .bind(job_id)
+        .bind(b)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let builder_a = create_active_test_builder(&pool, "claim-a-builder").await;
+        let builder_b = create_active_test_builder(&pool, "claim-b-builder").await;
+        update_builder_environments(&pool, &builder_a.id, &[a])
+            .await
+            .unwrap();
+        update_builder_environments(&pool, &builder_b.id, &[b])
+            .await
+            .unwrap();
+        let claim = |builder: Uuid, environments: Vec<Uuid>| {
+            let pool = pool.clone();
+            async move {
+                claim_next_job_atomic(
+                    &pool,
+                    &builder,
+                    4,
+                    &environments,
+                    RemoteBuildExecutionStrategy::ServerDerivation,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        assert!(claim(builder_a.id, vec![a]).await.is_none());
+        assert!(
+            claim(builder_b.id, vec![b]).await.is_none(),
+            "job still carries A"
+        );
+        crate::queries::build_jobs::retire_unclaimable_queued_jobs(&pool)
+            .await
+            .unwrap();
+        assert!(claim(builder_a.id, vec![a]).await.is_none());
+        let claimed = claim(builder_b.id, vec![b])
+            .await
+            .expect("B builder claims the moved job");
+        assert_eq!((claimed.id, claimed.environment_id), (job_id, Some(b)));
     }
 
     #[sqlx::test(migrations = "./migrations")]

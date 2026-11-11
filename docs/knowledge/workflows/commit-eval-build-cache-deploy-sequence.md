@@ -143,8 +143,13 @@ sequenceDiagram
    build jobs only for derivations that passed evaluation and policy.
 
 4. **Evaluation policy and deployment policy differ.**
-   - **Evaluation policy** decides whether a system may be built (for example,
-     the CF agent must be enabled).
+   - **Evaluation policy** decides whether a configuration may be built. Active
+     external/reference registrations can admit an agentless artifact under
+     exact saved policy evidence without changing `cf_agent_enabled` or granting
+     deployment. Build scope and strict assigned checks still apply. Builder
+     claim selectors apply the same predicate without relaxing session,
+     environment or source prerequisites. [Management modes](../concepts/management-modes-and-configuration-assurance.md)
+     records pending integration proof.
    - **Deployment policy** decides which build a host runs (`auto_latest`,
      `manual`, `pinned`). Policy gates (for example CVE checks, time windows,
      and canary rollout) run before the server sets `desired_target`.

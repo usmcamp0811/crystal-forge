@@ -751,8 +751,7 @@ async fn assessment_context_with_config_and_build(
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
-        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => derivation_id,
     };
     if built {
         sqlx::query("UPDATE derivations SET store_path = $1, status_id = 10 WHERE id = $2")
@@ -2243,11 +2242,14 @@ async fn add_report_only_non_composite_assignment(pool: &PgPool, system_id: Uuid
         pool,
         &CreateDeploymentPolicyRequest {
             name: format!("report-only-assessment-policy-{}", Uuid::new_v4()),
-            policy_type: "custom_check".to_string(),
+            // Any non-composite version changes the complete compliance
+            // identity. A parser-free type keeps this authorization test
+            // independent of the bounded Nix parser subprocess, whose own
+            // contract is tested in cf-compliance policy_config.
+            policy_type: "require_packages".to_string(),
             config: serde_json::json!({
-                "expression": "true",
+                "packages": ["openssh"],
                 "description": "report-only authorization regression",
-                "field_name": "reportOnlyAuthorizationRegression",
                 "strict": true
             }),
             enabled: Some(true),
@@ -3283,8 +3285,7 @@ async fn known_uncached_target_is_blocked_without_composite_policy(pool: PgPool)
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
-        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => derivation_id,
     };
     sqlx::query("UPDATE derivations SET store_path = $1, status_id = 10 WHERE id = $2")
         .bind(&store_path)

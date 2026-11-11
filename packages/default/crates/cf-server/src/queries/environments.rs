@@ -1,3 +1,10 @@
+//! Reads environment registries and operational rollups.
+//!
+//! `system_count` counts every registration, including inactive resources and
+//! all management modes. `rollup.active_system_count` and its health partition
+//! count active managed machines only. Runtime CVEs have the same population.
+//! Flake names describe active registrations across all management modes.
+
 use crate::api::models::{
     AssignmentResponse, DeploymentPolicySummary, EnvironmentCacheSummary,
     EnvironmentComplianceSummary, EnvironmentPolicyMapEntry, EnvironmentRollup, EnvironmentSummary,

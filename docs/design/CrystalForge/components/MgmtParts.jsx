@@ -297,4 +297,39 @@ function ParentHostField({ value, onChange }) {
   );
 }
 
-Object.assign(window, { MgmtChip, ScanEvidenceChip, EvidenceCves, RuntimeLine, DeploymentCell, MgmtNotice, EvidenceBanner, EvidenceGate, NotApplicable, EvidencePipeline, RuntimeCard, ExternalOverview, EvidenceHistory, ExternalPanelBody, ModePicker, FlakeConfigFields, ParentHostField, declaredConfigs, hasCveData });
+function MultiFilter({ label, options, value, onChange, allLabel }) {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const k = (e) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", h); document.addEventListener("keydown", k);
+    return () => { document.removeEventListener("mousedown", h); document.removeEventListener("keydown", k); };
+  }, [open]);
+  const toggle = (v) => onChange(value.includes(v) ? value.filter((x) => x !== v) : [...value, v]);
+  const sel = options.filter((o) => value.includes(o.value));
+  const text = sel.length === 0 ? (allLabel || "All " + label.toLowerCase()) : sel.map((o) => o.label).join(", ");
+  return (
+    <div className="mf" ref={ref}>
+      <button type="button" className={"input filter-select mf-btn focus-ring" + (sel.length ? " active" : "")} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span className="mf-text">{sel.length ? <><span className="mf-label">{label}:</span> {text}</> : text}</span>
+        {sel.length > 1 && <span className="mf-count">{sel.length}</span>}
+      </button>
+      {open && (
+        <div className="mf-menu" role="listbox" aria-multiselectable="true">
+          <div className="mf-head"><span>{label}</span><button type="button" className="link-action" disabled={!sel.length} onClick={() => onChange([])}>Clear</button></div>
+          {options.map((o) => (
+            <label key={o.value} className="mf-opt">
+              <input type="checkbox" checked={value.includes(o.value)} onChange={() => toggle(o.value)} />
+              <span className="mf-opt-label">{o.label}</span>
+              {o.count != null && <span className="mf-opt-count">{o.count}</span>}
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+Object.assign(window, { MultiFilter, MgmtChip, ScanEvidenceChip, EvidenceCves, RuntimeLine, DeploymentCell, MgmtNotice, EvidenceBanner, EvidenceGate, NotApplicable, EvidencePipeline, RuntimeCard, ExternalOverview, EvidenceHistory, ExternalPanelBody, ModePicker, FlakeConfigFields, ParentHostField, declaredConfigs, hasCveData });

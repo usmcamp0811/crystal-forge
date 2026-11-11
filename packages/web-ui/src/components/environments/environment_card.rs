@@ -43,7 +43,7 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
     let display_auto_sync = env.auto_sync;
     let display_requires_approval = env.requires_approval;
     let display_role_assignment_count = env.role_assignment_count;
-    let total = env.health.total().max(env.system_count).max(1);
+    let total = env.health.total().max(1);
 
     let card_class = if props.flash {
         if props.attention_class.is_empty() {
@@ -111,7 +111,8 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
             }
 
             div { class: "env-card-stat",
-                div { class: "env-card-stat-num", "{env.system_count}" }
+                div { class: "env-card-stat-num", "{env.health.active}" }
+                // Active managed machines only (server rollup), as in the design.
                 div { class: "env-card-stat-label", "systems" }
                 div { style: "flex:1;" }
                 div { class: "env-card-flakes",
@@ -163,7 +164,7 @@ pub fn EnvironmentTable(props: EnvironmentTableProps) -> Element {
                 thead {
                     tr {
                         th { "Environment" }
-                        th { "Systems" }
+                        th { "Resources" }
                         th { "Health" }
                         th { "Deploy" }
                         th { "Enforcement" }
@@ -216,7 +217,7 @@ fn EnvironmentRow(props: EnvironmentRowProps) -> Element {
     let display_policy = env.default_policy;
     let display_auto_sync = env.auto_sync;
     let display_requires_approval = env.requires_approval;
-    let total = env.health.total().max(env.system_count).max(1);
+    let total = env.health.total().max(1);
 
     let row_class = if props.flash {
         if props.attention_class.is_empty() {
@@ -266,11 +267,11 @@ fn EnvironmentRow(props: EnvironmentRowProps) -> Element {
                     }
                 }
             }
-            td { class: "mono", style: "font-size:13px;", "{env.system_count}" }
+            td { class: "mono", style: "font-size:13px;", "{env.health.active}" }
             td {
                 div { style: "display:flex; align-items:center; gap:6px; min-width:140px;",
                     HealthBar { health: env.health.clone(), total, compact: true }
-                    span { class: "mono", style: "font-size:11px; color:var(--cf-text-muted);", "{env.health.healthy}/{env.system_count}" }
+                    span { class: "mono", style: "font-size:11px; color:var(--cf-text-muted);", title: "Healthy / active managed machines", "{env.health.healthy}/{env.health.total()} managed" }
                 }
             }
             td { PolicyChip { policy: display_policy } }

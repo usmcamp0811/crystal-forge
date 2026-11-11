@@ -12,8 +12,6 @@ mod policy_matrix;
 mod policy_sort_tests;
 
 use dioxus::prelude::*;
-#[cfg(target_arch = "wasm32")]
-use gloo_timers::future::TimeoutFuture;
 
 use crate::alerts::{
     NAV_BADGES, acknowledge_with_cursor_and_ids_async, attention_row_class, dismiss_attention_item,
@@ -950,7 +948,7 @@ fn EvaluationsPage(
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
-                    TimeoutFuture::new(3000).await;
+                    crate::hooks::visibility::visible_tick(3000).await;
                     if active_tab() == EvaluationsTab::ActiveQueue {
                         active_refresh.set(active_refresh() + 1);
                     } else {
@@ -3018,7 +3016,7 @@ fn EvalDrawerPolicyTab(
                     // after each response prevents overlapping requests and bounds
                     // retries even when the endpoint fails immediately.
                     #[cfg(target_arch = "wasm32")]
-                    TimeoutFuture::new(5_000).await;
+                    crate::hooks::visibility::visible_tick(5_000).await;
                     poll_again = cfg!(target_arch = "wasm32");
                 }
             }
@@ -3655,7 +3653,7 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
-                    gloo_timers::future::TimeoutFuture::new(2000).await;
+                    crate::hooks::visibility::visible_tick(2000).await;
                     if has_pending_counts() && graph_pending_polls() < GRAPH_PENDING_POLL_MAX {
                         graph_pending_polls.set(graph_pending_polls() + 1);
                         graph_refresh.set(graph_refresh() + 1);
@@ -3811,7 +3809,7 @@ fn LiveIndicator() -> Element {
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
-                    gloo_timers::future::TimeoutFuture::new(1000).await;
+                    crate::hooks::visibility::visible_tick(1000).await;
                     secs.set((secs() + 1) % 6);
                 }
             }

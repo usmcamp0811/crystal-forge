@@ -6125,6 +6125,15 @@ button.pm-col-note:hover { color: var(--cf-text-secondary); text-decoration: und
   }
 }
 
+/* Each spinner runs two infinite animations. Colour and label already carry the
+   state, so a reduced-motion preference removes the motion and its repaint cost. */
+@media (prefers-reduced-motion: reduce) {
+  .hb-pulse,
+  .hb-ring svg circle:last-child {
+    animation: none;
+  }
+}
+
 .hb-label {
   display: flex;
   flex-direction: column;
@@ -8912,3 +8921,181 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
 .cve-batch-modal .modal-foot { gap: 10px; flex-wrap: wrap; }
 .cve-batch-modal .btn:disabled { opacity: .5; cursor: not-allowed; }
 @media (max-width: 560px) { .cve-batch-two-col { grid-template-columns: minmax(0,1fr); } .cve-batch-modal .modal-foot .cve-batch-summary { flex-basis: 100%; } .cve-batch-modal .seg { flex-wrap: wrap; } }
+
+/* Management modes: approved CrystalForge/styles.css management presentation. */
+.mg-chip{gap:4px;border:1px solid transparent}
+.mg-chip.mg-managed{color:var(--cf-text-secondary);background:var(--cf-gray-bg)}
+.mg-chip.mg-external{color:var(--cf-blue);background:var(--cf-blue-bg)}
+.mg-chip.mg-reference{color:#a78bfa;background:rgba(167,139,250,.12)}
+.mg-dim{color:var(--cf-text-muted);font-size:12px}
+.mg-obs{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--cf-text-secondary)}
+.mg-copy{margin:0;font-size:13px;line-height:1.55;color:var(--cf-text-secondary)}
+.mg-notice{display:flex;gap:11px;padding:12px 14px;border-radius:10px;border:1px solid rgba(96,165,250,.25);background:rgba(96,165,250,.08);margin:0 0 12px}
+.mg-notice>svg{flex-shrink:0;margin-top:2px;color:#60a5fa}
+.mg-notice-warn{border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.08)}.mg-notice-warn>svg{color:#fbbf24}
+.mg-notice-danger{border-color:rgba(248,113,113,.3);background:rgba(248,113,113,.08)}.mg-notice-danger>svg{color:#f87171}
+.mg-notice-body{min-width:0}.mg-notice-title{font-size:13px;font-weight:600;color:var(--cf-text-primary)}
+.mg-notice-text{font-size:12px;line-height:1.55;color:var(--cf-text-secondary);margin-top:3px}
+.mg-notice-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.mg-empty{display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px;padding:44px 24px;border:1px dashed var(--cf-card-border);border-radius:12px;color:var(--cf-text-muted)}
+.mg-empty h3{margin:4px 0 0;font-size:15px;color:var(--cf-text-primary)}
+.mg-empty p{margin:0;max-width:520px;font-size:13px;line-height:1.55;color:var(--cf-text-secondary)}
+.mg-overview{display:flex;flex-direction:column;gap:16px}
+.mg-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,380px),1fr));gap:16px;align-items:start}
+.mg-pipeline{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.mg-stage{display:flex;flex-direction:column;gap:4px;text-align:left;padding:12px 14px;border:1px solid var(--cf-card-border);border-radius:10px;background:var(--cf-subtle-bg);color:inherit;font:inherit;cursor:pointer}
+.mg-stage:disabled{cursor:default}.mg-stage:not(:disabled):hover{border-color:var(--cf-brand-purple)}
+.mg-stage-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;color:var(--cf-text-muted)}
+.mg-stage-main{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:600;color:var(--cf-text-primary)}
+.mg-stage-sub{font-size:11px;color:var(--cf-text-muted)}.mg-stage-warn{font-size:11px;color:#fbbf24;line-height:1.4}
+.mg-unknown{margin-top:12px;padding:12px 14px;border:1px dashed var(--cf-card-border);border-radius:10px}
+.mg-unknown-title{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:600;color:var(--cf-text-secondary)}
+.mg-unknown p{margin:6px 0 0;font-size:12px;line-height:1.55;color:var(--cf-text-secondary)}
+.mg-obs-head{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--cf-text-muted);padding:6px 10px;background:rgba(96,165,250,.08);border-radius:8px}
+.mg-obs-head b{color:var(--cf-text-secondary)}
+.mg-picker{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:10px}
+.mg-pick{display:flex;flex-direction:column;gap:6px;text-align:left;padding:12px 14px;border:1px solid var(--cf-card-border);border-radius:10px;background:transparent;color:inherit;font:inherit;cursor:pointer}
+.mg-pick:hover{border-color:var(--cf-text-muted)}
+.mg-pick.active{border-color:var(--cf-brand-purple);background:rgba(139,92,246,.08);box-shadow:0 0 0 1px var(--cf-brand-purple) inset}
+.mg-pick-head{display:flex;align-items:center;gap:8px;font-size:13px}
+.mg-pick-desc{font-size:12px;line-height:1.5;color:var(--cf-text-secondary)}
+.mg-pick-caps{font-size:11px;color:var(--cf-text-muted)}
+.mg-menu-wrap{position:relative;display:inline-block}
+.mg-menu{position:absolute;right:0;top:calc(100% + 4px);z-index:30;width:300px;padding:6px;background:var(--cf-card-bg);border:1px solid var(--cf-card-border);border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:2px;text-align:left}
+.mg-menu-item{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-radius:8px;background:transparent;border:0;color:var(--cf-text-primary);font:inherit;cursor:pointer;text-align:left}
+.mg-menu-item:hover{background:var(--cf-subtle-bg)}
+.mg-menu-item b{display:block;font-size:12.5px}.mg-menu-item small{display:block;font-size:11px;color:var(--cf-text-muted);line-height:1.4;margin-top:2px;font-weight:400}
+.mg-menu-item svg{margin-top:2px;flex-shrink:0}
+.sys-table-mg{min-width:980px}.sys-table-mg td,.sys-table-mg th{vertical-align:middle}.sys-table-mg .chip{white-space:nowrap}.sys-table-mg td:nth-child(5),.sys-table-mg td:nth-child(7){min-width:150px}
+/* Retain full immutable identities without overflowing narrow evidence cards. */
+.mg-stage,.mg-runtime{min-width:0}
+.mg-stage-main,.mg-stage-sub,.mg-notice-text,.mg-runtime dd,.mg-obs-head{overflow-wrap:anywhere}
+.mg-evidence-cves{display:inline-flex;gap:6px;flex-wrap:wrap;align-items:center}
+/* List evidence keeps full configuration identities readable at narrow widths. */
+.mg-list-card .sys-card-head,.mg-list-card .sys-card-foot{flex-wrap:wrap;gap:10px}
+.mg-list-card .sys-card-body{grid-template-columns:repeat(2,minmax(0,1fr))}
+.mg-list-card .sys-kv-val,.mg-list-card .sys-fqdn,.mg-list-card .mg-dim{overflow-wrap:anywhere;white-space:normal}
+.mg-list-card .mg-evidence-cves{font-size:11px}
+.mg-list-preview .kv-grid dd{overflow-wrap:anywhere;white-space:normal;min-width:0}
+.mg-list-preview .mg-pipeline{grid-template-columns:minmax(0,1fr)}
+.mg-list-preview .panel-actions{flex-wrap:wrap}
+.mg-dashboard-coverage{border-top:1px solid var(--cf-card-border);padding-top:10px;margin-top:10px;font-size:12px;color:var(--cf-text-secondary)}
+.mg-dashboard-coverage h4{font-size:12px;margin:0 0 6px;color:var(--cf-text-primary)}
+.mg-dashboard-coverage p{margin:6px 0;line-height:1.5}
+.mg-dashboard-assurance{min-width:0;display:flex;flex-direction:column;gap:10px}
+.mg-dashboard-assurance>.dash-w-body{flex:none;overflow:visible}
+@media(max-width:600px){.mg-list-card .sys-card-body{grid-template-columns:minmax(0,1fr)}}
+:root[data-theme="light"] .mg-chip.mg-reference{color:#6d28d9;background:rgba(109,40,217,.09)}
+
+/* Add/Edit registration rails follow the approved management-first form layout. */
+.modal-backdrop:has(>.management-form-shell){padding:16px;grid-template-columns:minmax(0,1fr)}
+.management-form-shell{box-sizing:border-box;max-width:100%;min-width:0;width:min(1120px,96vw);height:min(88vh,900px);display:grid;grid-template-columns:236px minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto;grid-template-areas:"head head" "rail body" "foot foot";background:var(--cf-card-bg);color:var(--cf-text-primary);border:1px solid var(--cf-card-border);border-radius:14px;box-shadow:0 24px 64px rgba(0,0,0,.45);overflow:hidden}
+.management-form-shell .pe-head{grid-area:head;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:15px 18px;border-bottom:1px solid var(--cf-divider);background:color-mix(in oklab,var(--cf-page-bg) 45%,var(--cf-card-bg))}
+.management-form-shell .pe-head h2{margin:0;font-size:16px}.management-form-shell .pe-head .mg-chip{margin-left:10px}
+.management-form-shell .pe-head-title{font-size:16px;font-weight:650}.management-form-shell .pe-head-sub,.management-form-shell .pe-head>p{font-size:12px;color:var(--cf-text-muted);margin:5px 0 0}
+.management-form-shell .pe-rail{grid-area:rail;padding:14px 10px;border-right:1px solid var(--cf-divider);overflow:auto;background:color-mix(in oklab,var(--cf-page-bg) 35%,var(--cf-card-bg))}
+.management-form-shell .pe-rail-item{display:flex;align-items:center;gap:8px;width:100%;text-align:left;border:0;background:transparent;color:var(--cf-text-secondary);border-radius:7px;padding:7px 9px;font:inherit;font-size:12.5px;cursor:pointer}
+.management-form-shell .pe-rail-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.management-form-shell .pe-rail-badge{margin-left:auto;font-size:10px;color:var(--cf-text-muted);background:var(--cf-subtle-bg);border-radius:999px;padding:1px 7px}.management-form-shell .pe-rail-badge.warn{color:var(--cf-amber)}
+.management-form-shell .pe-rail-item.active{background:color-mix(in oklab,var(--cf-brand-purple) 14%,transparent);color:var(--cf-text-primary);font-weight:600}
+.management-form-shell .pe-rail-item:hover{background:var(--cf-subtle-bg)}
+.management-form-shell .pe-body{grid-area:body;min-width:0;overflow:auto;padding:18px 22px 24px}.management-form-shell fieldset{border:0;margin:0;padding:0;min-width:0}
+.management-form-shell .pe-sec-head{margin-bottom:14px}.management-form-shell .pe-sec-head h3{margin:0 0 4px;font-size:14px;font-weight:700}.management-form-shell .pe-sec-head p{font-size:11.5px;line-height:1.5;color:var(--cf-text-muted);margin:0}
+.management-form-shell .mg-picker{margin-bottom:18px}.management-form-shell .mg-notice p{font-size:12px;line-height:1.55}
+.management-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}.management-form-grid>.field{margin-top:0}.management-form-shell .field{display:flex;flex-direction:column;gap:7px;margin-bottom:16px;font-size:12px}.management-form-shell .input{width:100%;box-sizing:border-box}
+.management-form-shell .pe-foot{grid-area:foot;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 20px;border-top:1px solid var(--cf-divider)}
+.management-form-shell .pe-foot>div{display:flex;gap:8px;flex-shrink:0}.management-form-shell .pe-foot-state{font-size:11px;color:var(--cf-text-muted);overflow-wrap:anywhere}
+.management-transition-confirm{display:flex;gap:8px;align-items:flex-start;font-size:12px;line-height:1.5;margin:16px 0}.management-complete{width:min(760px,96vw);max-height:92vh;overflow:auto}.management-complete pre{white-space:pre-wrap;overflow-wrap:anywhere}
+@media(max-width:700px){.management-form-shell{grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto minmax(0,1fr) auto;grid-template-areas:"head" "rail" "body" "foot"}.management-form-shell .pe-rail,.management-form-nav{display:flex;overflow-x:auto;gap:4px}.management-form-shell .pe-rail{border-right:0;border-bottom:1px solid var(--cf-divider);padding:8px}.management-form-shell .pe-rail-item{width:auto;flex-shrink:0}.management-form-shell .pe-body{padding:16px}.management-form-shell .pe-foot{flex-wrap:wrap}.management-form-grid{grid-template-columns:minmax(0,1fr)}}
+
+/* TASK-508 Systems multi-select filters and guest grouping
+   (docs/design/CrystalForge/styles.css at 2d519abc). */
+.mf{position:relative}.mf-btn{display:inline-flex;align-items:center;gap:6px;cursor:pointer;text-align:left;white-space:nowrap;min-width:0;max-width:min(340px,100%)}
+.mf-text{overflow:hidden;text-overflow:ellipsis}.mf-label{color:var(--cf-text-muted)}
+.mf-btn.active{border-color:var(--cf-brand-purple);background:rgba(139,92,246,.08)}
+.mf-count{font-size:10px;font-weight:600;padding:1px 6px;border-radius:999px;background:var(--cf-brand-purple);color:#fff}
+.mf-menu{position:absolute;left:0;top:calc(100% + 4px);z-index:40;min-width:240px;max-height:340px;overflow:auto;padding:6px;background:var(--cf-card-bg);border:1px solid var(--cf-card-border);border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.35);scrollbar-width:thin;scrollbar-color:var(--cf-card-border) transparent}
+.mf-menu::-webkit-scrollbar{width:8px}.mf-menu::-webkit-scrollbar-thumb{background:var(--cf-card-border);border-radius:8px}
+/* Transparent layer under an open menu: a click outside the menu closes it. */
+.mf-backdrop{position:fixed;inset:0;z-index:39}
+.mf-head{display:flex;justify-content:space-between;align-items:center;padding:4px 8px 6px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;color:var(--cf-text-muted)}
+.mf-head button{background:none;border:0;padding:0;font:inherit;font-size:11px;text-transform:none;letter-spacing:0;color:var(--cf-brand-purple);cursor:pointer}
+.mf-head button:disabled{color:var(--cf-text-muted);opacity:.5;cursor:default}
+.mf-opt{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:7px;font-size:13px;color:var(--cf-text-primary);cursor:pointer}
+.mf-opt:hover{background:var(--cf-subtle-bg)}.mf-opt input{accent-color:var(--cf-brand-purple);margin:0}
+.mf-opt-label{flex:1}.mf-opt-count{font-size:11px;color:var(--cf-text-muted)}
+.btn.mf-on{color:var(--cf-brand-purple);border-color:var(--cf-brand-purple)}
+.guest-toggle{cursor:pointer;gap:4px;border:0;font:inherit;font-size:11px}
+.row-guest td:first-child{padding-left:36px;box-shadow:inset 3px 0 0 var(--cf-blue-bg)}
+.row-guest{background:color-mix(in oklab,var(--cf-subtle-bg) 50%,transparent)}
+.sys-card-guest{margin-left:14px;border-left:3px solid rgba(96,165,250,.45)}
+
+/* TASK-508 Systems table density (MR !340 UI review). Detailed provenance
+   stays in tooltips and System Detail; compact cells never wrap into tall rows. */
+.sys-table-mg .sys-host-cell .hostname{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;min-width:0}
+.sys-table-mg .sys-host-cell .hostname .hostname-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:8ch}
+.sys-table-mg .sys-host-cell .hostname > :not(.hostname-text){flex-shrink:0}
+.sys-table-mg .sys-host-cell{max-width:248px}.sys-table-mg .sys-host-cell > .min-w-0{flex:1;min-width:0}
+.sys-flake-cell{display:flex;flex-direction:column;line-height:1.3;min-width:0;max-width:120px}
+.sys-flake-cell span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sys-flake-name{font-size:12px;color:var(--cf-text-primary)}
+.sys-flake-rev{font-size:11px;color:var(--cf-text-muted)}
+.mg-cves-compact{display:flex;gap:6px;flex-wrap:wrap;align-items:center;max-width:220px}
+.mg-cves-compact.historical > .mg-cves-count{opacity:.75}
+.sys-runtime-cell{display:flex;flex-direction:column;gap:2px;font-size:12px;min-width:0;max-width:112px}
+.sys-runtime-cell > span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sys-table-mg .row-actions{flex-wrap:nowrap}
+/* A long evidence state may use a second line instead of widening the column. */
+.sys-table-mg td:nth-child(3) .chip{white-space:normal;max-width:140px;line-height:1.25}
+/* Actions stay reachable when a narrow viewport scrolls the table. The pinned
+   cell is opaque, so it repaints the row state (attention, guest, hover,
+   selection) as a layer over the card color. */
+.sys-table-mg thead th:last-child{position:sticky;right:0;z-index:1;background-color:var(--cf-card-bg);background-image:linear-gradient(var(--cf-subtle-bg),var(--cf-subtle-bg))}
+.sys-table-mg tbody td:last-child{position:sticky;right:0;box-shadow:-10px 0 10px -10px rgba(0,0,0,.35);background-color:var(--cf-card-bg);background-image:linear-gradient(var(--sys-row-tint,transparent),var(--sys-row-tint,transparent))}
+.sys-table-mg tbody tr.row-guest{--sys-row-tint:color-mix(in oklab,var(--cf-subtle-bg) 50%,transparent)}
+/* Other cells receive the 7% tint from both the row and the cell. */
+.sys-table-mg tbody tr.attention-row{--sys-row-tint:color-mix(in oklab,var(--cf-red,#ef4444) 13%,transparent)}
+.sys-table-mg tbody tr:hover{--sys-row-tint:var(--cf-hover-bg)}
+.sys-table-mg tbody tr.selected{--sys-row-tint:color-mix(in oklab,var(--cf-brand-purple) 10%,transparent)}
+/* Runtime is one short line; size the column to its content, not 150px. */
+.sys-table-mg td:nth-child(7){min-width:0}
+/* 12px horizontal cell padding (design: 14px) lets eight management columns
+   fit a 1440px desktop without hiding runtime text under the pinned actions. */
+.sys-table-mg thead th,.sys-table-mg tbody td{padding-left:12px;padding-right:12px}
+.sys-table-mg tbody tr.row-guest td:first-child{padding-left:34px}
+/* Only the reference sentence ("Not a running machine") may use a second line. */
+.sys-runtime-cell > span.sys-runtime-wrap{white-space:normal;line-height:1.3}
+/* Accessible row disclosure: a focusable info control whose panel overlays
+   the table, so detailed provenance and errors never change row height. */
+.sys-cell-inline{display:flex;align-items:center;gap:6px;min-width:0}
+.mg-row-disclosure{position:relative;flex-shrink:0}
+.mg-row-disclosure > summary{list-style:none;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:6px;color:var(--cf-text-muted);cursor:pointer}
+.mg-row-disclosure > summary::-webkit-details-marker{display:none}
+.mg-row-disclosure > summary:hover,.mg-row-disclosure[open] > summary{color:var(--cf-text-primary);background:var(--cf-subtle-bg)}
+.mg-row-disclosure-panel{position:absolute;right:0;top:calc(100% + 4px);z-index:45;width:min(340px,80vw);padding:10px 12px;background:var(--cf-card-bg);border:1px solid var(--cf-card-border);border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.35);font-size:12px;color:var(--cf-text-primary);white-space:normal;cursor:auto;text-align:left}
+.mg-row-disclosure-panel p{margin:0 0 4px}
+.mg-disclosure-kv{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:0 0 6px}
+.mg-disclosure-kv dt{color:var(--cf-text-muted)}.mg-disclosure-kv dd{margin:0;overflow-wrap:anywhere}
+.mg-cves-compact .mg-row-disclosure{margin-left:-2px}
+/* The retry control shares the status line, so a failed read keeps row height. */
+.sys-table-mg td:nth-child(3){white-space:nowrap}
+.sys-table-mg td:nth-child(3) > *{display:inline-flex;vertical-align:middle}
+.sys-table-mg .sys-retry{width:22px;height:22px;margin-left:4px}
+/* The info control stays on the chip line instead of wrapping below it. */
+.mg-cves-compact{flex-wrap:nowrap}
+/* The runtime text and its info control share the 112px runtime cap. */
+.sys-table-mg td:nth-child(7) .sys-cell-inline{display:inline-flex;max-width:130px}
+.sys-table-mg td:nth-child(7) .sys-runtime-cell{max-width:104px}
+/* The info controls add about 45px. The host column cannot give it up: the
+   hostname, mode badge and guest toggle need about 250px. Recover it from
+   cell padding (10px) and the runtime column instead. */
+.sys-table-mg thead th,.sys-table-mg tbody td{padding-left:10px;padding-right:10px}
+.sys-table-mg tbody tr.row-guest td:first-child{padding-left:32px}
+.sys-table-mg td:nth-child(7) .sys-cell-inline{max-width:114px}
+.sys-table-mg td:nth-child(7) .sys-runtime-cell{max-width:94px}
+/* Registration complete: agent snippet with an overlaid Copy control. */
+.management-snippet{position:relative;margin-top:8px}
+.management-snippet > button{position:absolute;top:6px;right:6px}
+.management-snippet > pre{margin:0;font-size:11px;line-height:1.5;background:var(--cf-page-bg);border:1px solid var(--cf-divider);border-radius:8px;padding:10px 12px;overflow:auto;white-space:pre}
+.management-complete .modal-head h2{display:flex;align-items:center;gap:8px}
+/* A wrapping runtime line uses at most two lines. */
+.sys-runtime-cell > span.sys-runtime-wrap{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}

@@ -208,6 +208,7 @@ in harness.mkScenario {
       # Restarts establish new builder sessions. Run after consumers of the
       # earlier execution-session receipts, retaining those original assertions.
       + builtins.readFile ./fragments/credential-permissions.py
+      + "\n" + builtins.readFile ./fragments/management-authority.py
   );
   browserSpecs = let
     activation = ./fragments/activation.cjs;
@@ -215,6 +216,7 @@ in harness.mkScenario {
       exports.run = ctx => require("${activation}").${method}(ctx, "${phase}");
     '';
   in {
+    management-authority = ./fragments/management-authority.cjs;
     deploy-first = wrapper "deploy" "first";
     deploy-second = wrapper "deploy" "second";
     inspect-first = wrapper "inspect" "first";

@@ -2,7 +2,10 @@
 //!
 //! Provides sidebar badge counts and the per-user dismissal contract.
 //! Counts are now "eligible undismissed canonical occurrences" opened within
-//! the last 24 hours, not mutable category baselines.
+//! the last 24 hours, not mutable category baselines. The Systems total is the
+//! active registration registry across all modes. Operational system/environment
+//! alerts require an underlying active managed machine, including immediately
+//! after a mode change while old occurrences await reconciliation.
 
 use crate::api::models::NavigationBadges;
 use crate::queries::attention;
@@ -56,6 +59,43 @@ async fn total_flakes(pool: &PgPool) -> Result<i64> {
         .context("failed to fetch flakes total")
 }
 
+// SECURITY: Filter persisted occurrences at read time as well as in the health
+// view. A mode change must not leave an old outage visible until reconciliation.
+async fn operational_attention(
+    pool: &PgPool,
+    user_id: Uuid,
+    category: &str,
+    observed_at: DateTime<Utc>,
+    is_admin: bool,
+    environment_ids: &[Uuid],
+) -> Result<(i64, Vec<String>)> {
+    let (total, keys): (i64, Option<Vec<String>>) = sqlx::query_as(
+        r#"WITH eligible AS (
+          SELECT ao.source_occurrence_key, ao.opened_at, ao.id
+          FROM attention_occurrences ao
+          JOIN systems s ON s.id::text = CASE WHEN $2='systems' THEN ao.subject_id
+            ELSE ao.metadata->>'underlying_system_id' END
+          WHERE ao.category=$2 AND ao.resolved_at IS NULL
+            AND s.is_active AND s.management_mode='managed'
+            AND ao.opened_at >= $3 - INTERVAL '24 hours' AND ao.opened_at <= $3
+            AND ($4 OR s.environment_id=ANY($5))
+            AND ($2='systems' OR ao.subject_id=s.environment_id::text)
+            AND NOT EXISTS (SELECT 1 FROM user_attention_dismissals d
+              WHERE d.occurrence_id=ao.id AND d.user_id=$1)
+        ) SELECT (SELECT COUNT(*) FROM eligible),
+          (SELECT array_agg(source_occurrence_key ORDER BY opened_at DESC,id DESC)
+           FROM (SELECT * FROM eligible ORDER BY opened_at DESC,id DESC LIMIT 1000) page)"#,
+    )
+    .bind(user_id)
+    .bind(category)
+    .bind(observed_at)
+    .bind(is_admin)
+    .bind(environment_ids)
+    .fetch_one(pool)
+    .await?;
+    Ok((total, keys.unwrap_or_default()))
+}
+
 /// Fetch all sidebar badge counts in one round-trip.
 ///
 /// Attention counts come from eligible undismissed canonical occurrences in the
@@ -66,6 +106,11 @@ async fn total_flakes(pool: &PgPool) -> Result<i64> {
 /// (`cutoff <= opened_at <= observed_at`) so that occurrences created after
 /// the cursor snapshot do not appear in the results, and the dismissal
 /// endpoint cannot reject them for opening after the cursor.
+/// Operational alerts require an underlying active managed machine. Registry
+/// totals still include active external and reference registrations.
+///
+/// # Errors
+/// Returns database errors when occurrence counts or keys cannot be read.
 pub async fn fetch_navigation_badges(
     pool: &PgPool,
     user_id: Uuid,
@@ -73,13 +118,6 @@ pub async fn fetch_navigation_badges(
     member_environment_ids: &[Uuid],
 ) -> Result<NavigationBadges> {
     let observed_at = capture_now(pool).await;
-
-    let scoped_env_ids = if is_admin {
-        Vec::new()
-    } else {
-        member_environment_ids.to_vec()
-    };
-    let envs_option = Some(scoped_env_ids.as_slice());
 
     let counts = attention::count_attention_for_user(
         pool,
@@ -96,8 +134,8 @@ pub async fn fetch_navigation_badges(
         evals_occurrence_ids,
         flakes_occurrence_ids,
         cves_occurrence_ids,
-        systems_occurrence_ids,
-        environments_occurrence_ids,
+        systems_attention,
+        environments_attention,
     ) = tokio::try_join!(
         attention::list_eligible_occurrence_keys(
             pool,
@@ -131,34 +169,34 @@ pub async fn fetch_navigation_badges(
             is_admin,
             None
         ),
-        attention::list_eligible_occurrence_keys(
+        operational_attention(
             pool,
             user_id,
             "systems",
             observed_at,
             is_admin,
-            envs_option
+            member_environment_ids
         ),
-        attention::list_eligible_occurrence_keys(
+        operational_attention(
             pool,
             user_id,
             "environments",
             observed_at,
             is_admin,
-            envs_option
+            member_environment_ids
         ),
     )?;
 
     Ok(NavigationBadges {
         observed_at: Some(observed_at),
-        systems_attention: counts.systems_attention,
+        systems_attention: systems_attention.0,
         systems_total: total_systems(pool, is_admin, member_environment_ids)
             .await
             .unwrap_or(0),
         systems_fingerprint: None,
         flakes_errored: counts.flakes_errored,
         flakes_total: total_flakes(pool).await.unwrap_or(0),
-        environments_attention: counts.environments_attention,
+        environments_attention: environments_attention.0,
         environments_total: total_environments(pool, is_admin, member_environment_ids)
             .await
             .unwrap_or(0),
@@ -169,8 +207,8 @@ pub async fn fetch_navigation_badges(
         builds_occurrence_ids,
         evals_occurrence_ids,
         flakes_occurrence_ids,
-        systems_occurrence_ids,
-        environments_occurrence_ids,
+        systems_occurrence_ids: systems_attention.1,
+        environments_occurrence_ids: environments_attention.1,
         cves_occurrence_ids,
     })
 }

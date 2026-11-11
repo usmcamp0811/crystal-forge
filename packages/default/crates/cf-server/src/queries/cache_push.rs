@@ -46,32 +46,39 @@ pub struct CachePushJob {
     pub cache_destination_source: String,
 }
 
-fn select_derivation_environment(matches: &[(uuid::Uuid, i32)]) -> Result<Option<uuid::Uuid>> {
-    let Some((environment, priority)) = matches.first() else {
-        return Ok(None);
-    };
-    anyhow::ensure!(
-        matches
-            .iter()
-            .filter(|(_, rank)| rank == priority)
-            .all(|(id, _)| id == environment),
-        "Ambiguous derivation environment"
-    );
-    Ok(Some(*environment))
+/// Reports that a derivation's registrations lie in more than one environment.
+///
+/// TEMPORARY RESTRICTION (TASK-518): a configuration shared across
+/// environments has no single owner environment for builders or cache
+/// credentials. Build admission refuses such a derivation, so this error
+/// reaches a caller only for work that was admitted before the registrations
+/// changed. Callers answer with an actionable conflict, not a server error.
+#[derive(Debug)]
+pub struct AmbiguousDerivationEnvironment;
+
+impl std::fmt::Display for AmbiguousDerivationEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // COMPATIBILITY: tests and log filters match this exact text.
+        f.write_str("Ambiguous derivation environment")
+    }
 }
+
+impl std::error::Error for AmbiguousDerivationEnvironment {}
 
 /// Resolves the canonical publication environment on the caller's connection.
 ///
-/// Uses active systems in the commit's flake. Configuration-name matches take
-/// precedence over hostname matches. Equally preferred matches must identify
-/// one environment; no matches (including no commit) select global fallback.
-/// Transactions use this query and decision before reading cache credentials,
-/// so dispatch and completion cannot accept an ambiguity rejected by the pool.
-/// This helper does not acquire destination or assignment locks.
+/// Delegates to the `derivation_environment` SQL function, the same rule that
+/// build admission and builder claims use: active systems in the commit's
+/// flake, configuration-name matches before hostname matches, and equally
+/// preferred matches must identify one environment. No match (including no
+/// commit) selects the global fallback. Transactions use this decision before
+/// reading cache credentials, so dispatch and completion cannot accept an
+/// ambiguity that admission rejected. This helper does not acquire destination
+/// or assignment locks.
 ///
 /// # Errors
-/// Returns an error for equally preferred cross-environment matches or a
-/// database query failure.
+/// Returns [`AmbiguousDerivationEnvironment`] for equally preferred
+/// cross-environment matches, or a database query failure.
 pub(crate) async fn resolve_derivation_environment<'e, E>(
     executor: E,
     commit_id: Option<i32>,
@@ -80,19 +87,14 @@ pub(crate) async fn resolve_derivation_environment<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let matches = sqlx::query_as::<_, (uuid::Uuid, i32)>(
-        r#"SELECT s.environment_id,
-                  CASE WHEN NULLIF(s.system_configuration_name, '') = $2 THEN 0 ELSE 1 END
-           FROM systems s JOIN commits c ON c.flake_id = s.flake_id
-           WHERE c.id = $1 AND s.environment_id IS NOT NULL AND s.is_active = TRUE
-             AND (s.hostname = $2 OR NULLIF(s.system_configuration_name, '') = $2)
-           ORDER BY 2"#,
-    )
-    .bind(commit_id)
-    .bind(derivation_name)
-    .fetch_all(executor)
-    .await?;
-    select_derivation_environment(&matches)
+    let (environment, ambiguous): (Option<uuid::Uuid>, bool) =
+        sqlx::query_as("SELECT environment_id, ambiguous FROM derivation_environment($1, $2)")
+            .bind(commit_id)
+            .bind(derivation_name)
+            .fetch_one(executor)
+            .await?;
+    anyhow::ensure!(!ambiguous, AmbiguousDerivationEnvironment);
+    Ok(environment)
 }
 
 /// Returns current enabled destinations eligible for a derivation's environment.
@@ -129,6 +131,34 @@ pub async fn eligible_cache_destinations_for_derivation(
         resolve_derivation_environment(pool, derivation.commit_id, &derivation.derivation_name)
             .await?;
     eligible_cache_destinations_for_environment(pool, environment).await
+}
+
+/// Returns the destination of the currently effective static cache publication.
+///
+/// This is `cache.push_to` when `cache.push_after_build` is true and the value is
+/// not blank. It returns `None` when static publication is disabled or has no
+/// destination. The rule is the one that [`select_job_destination`] and
+/// `materialization_source_for_reference` apply to a recorded `static` job, so
+/// admission of a reused artifact cannot accept a publication that execution
+/// would refuse.
+pub fn effective_static_destination(config: &CacheConfig) -> Option<String> {
+    config
+        .push_after_build
+        .then(|| config.push_to.as_deref())
+        .flatten()
+        .filter(|destination| !destination.trim().is_empty())
+        .map(str::to_owned)
+}
+
+/// Loads the static destination in force now, for admission of a reused artifact.
+///
+/// SECURITY: A configuration that cannot be loaded yields `None`, so admission
+/// accepts no static publication. A load failure can therefore only cause a
+/// rebuild; it can never adopt work.
+pub fn current_static_destination() -> Option<String> {
+    crate::config::CrystalForgeConfig::load()
+        .ok()
+        .and_then(|config| effective_static_destination(config.get_cache_config()))
 }
 
 fn select_job_destination<'a>(
@@ -1516,22 +1546,6 @@ mod niks3_tests {
         );
     }
 
-    #[test]
-    fn canonical_environment_rejects_ties_and_preserves_configuration_precedence() {
-        let a = uuid::Uuid::new_v4();
-        let b = uuid::Uuid::new_v4();
-        assert_eq!(select_derivation_environment(&[]).unwrap(), None);
-        assert_eq!(
-            select_derivation_environment(&[(a, 0), (b, 1)]).unwrap(),
-            Some(a)
-        );
-        assert_eq!(
-            select_derivation_environment(&[(a, 0), (a, 0)]).unwrap(),
-            Some(a)
-        );
-        assert!(select_derivation_environment(&[(a, 0), (b, 0)]).is_err());
-    }
-
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires verified isolated database and database creation privileges"]
     async fn niks3_queue_persists_provenance_pins_legacy_and_retains_deleted_identity(
@@ -1740,5 +1754,61 @@ mod niks3_tests {
                 .await
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod effective_static_destination_tests {
+    use super::*;
+
+    fn config(push_to: Option<&str>, push_after_build: bool) -> CacheConfig {
+        CacheConfig {
+            push_to: push_to.map(str::to_owned),
+            push_after_build,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn effective_destination_requires_publication_enabled_and_a_destination() {
+        assert_eq!(
+            effective_static_destination(&config(Some("ssh-ng://cache@host"), true)),
+            Some("ssh-ng://cache@host".to_string())
+        );
+        // Publication disabled: no static publication is effective.
+        assert_eq!(
+            effective_static_destination(&config(Some("ssh-ng://cache@host"), false)),
+            None
+        );
+        // No destination, or a blank one.
+        assert_eq!(effective_static_destination(&config(None, true)), None);
+        assert_eq!(effective_static_destination(&config(Some(""), true)), None);
+        assert_eq!(
+            effective_static_destination(&config(Some("  "), true)),
+            None
+        );
+    }
+
+    /// Admission must accept exactly what execution accepts: a recorded static job
+    /// is usable by `select_job_destination` only for the effective destination.
+    #[test]
+    fn effective_destination_matches_the_static_job_resolver() {
+        let record = "ssh-ng://cache@host";
+        for (push_to, enabled) in [
+            (Some(record), true),
+            (Some(record), false),
+            (Some("ssh-ng://cache@other"), true),
+            (None, true),
+            (Some(""), true),
+        ] {
+            let cfg = config(push_to, enabled);
+            let resolver_accepts =
+                select_job_destination("static", None, Some(record), &[], &cfg).is_ok();
+            let admission_accepts = effective_static_destination(&cfg).as_deref() == Some(record);
+            assert_eq!(
+                resolver_accepts, admission_accepts,
+                "push_to={push_to:?} push_after_build={enabled}"
+            );
+        }
     }
 }

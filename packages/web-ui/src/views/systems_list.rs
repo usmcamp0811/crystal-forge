@@ -11,11 +11,11 @@ use crate::alerts::{
 };
 
 use crate::api::models::{
-    DeploymentStatus, HealthStatus, SystemDetail, SystemHistoryEntry, SystemSummary,
-    SystemsListParams, UpdateUserPreferences,
+    ConfigurationAssurance, DeploymentStatus, HealthStatus, ManagementMode, SystemDetail,
+    SystemHistoryEntry, SystemSummary, SystemsListParams, UpdateUserPreferences,
 };
 use crate::components::environments::{normalize_color_hex, with_alpha};
-use crate::components::filters::ViewMode;
+use crate::components::filters::{FilterOption, MultiFilter, ViewMode};
 use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::icon::{Icon, IconName};
@@ -24,6 +24,10 @@ use crate::components::modals::{
     GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
+use crate::components::system::management_mode::{
+    DeploymentCell, EvidenceCves, EvidenceFreshness, MgmtChip, evidence_status,
+    selected_head_scan_freshness,
+};
 use crate::components::system::{
     EditSystemModal, PendingDeployBanner, SystemCardV2, deployment_state_label,
     key_rotation::public_key_fingerprint,
@@ -40,7 +44,7 @@ use crate::state::auth;
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::state::preferences;
 use crate::systems::adapter::{
-    SystemPublicKeyRotationOutcome, create_system_via_api, deactivate_system_via_api,
+    SystemPublicKeyRotationOutcome, create_system_request_via_api, deactivate_system_via_api,
     fallback_flake_names, load_flake_context_with_fallback, load_flake_names_with_fallback,
     load_system_deployment_progress_with_fallback, load_system_detail_with_fallback,
     load_system_history_with_fallback, load_systems_with_fallback,
@@ -63,11 +67,13 @@ fn came_from_setup() -> bool {
 }
 
 #[path = "systems_list_helpers.rs"]
-mod systems_list_helpers;
+pub(crate) mod systems_list_helpers;
 use systems_list_helpers::{
-    matches_environment, matches_flake, matches_search, matches_status, normalize_optional,
-    normalize_policy, prefers_view_from_query, remove_system_by_id, systems_missing_flake_count,
-    systems_missing_heartbeat_count, unique_environments, update_key_for_system,
+    ListedSystem, evidence_issue, group_guests, hosts_with_guests, matches_any,
+    matches_environment, matches_flake, matches_parent_search, matches_search, matches_status,
+    normalize_optional, normalize_policy, prefers_view_from_query, remove_system_by_id,
+    systems_missing_flake_count, systems_missing_heartbeat_count, unique_environments,
+    update_key_for_system,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,6 +140,7 @@ pub fn SystemsListView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
+    let can_mutate = auth::can_mutate_systems(&app_state.read().auth);
 
     let prefs_ctx = use_context::<PreferencesContext>();
     let mut default_view = prefs_ctx.default_systems_view;
@@ -159,12 +166,18 @@ pub fn SystemsListView() -> Element {
     let view_mode = use_memo(move || ViewMode::from_storage(default_view.read().clone().into()));
     let is_compact = use_memo(move || density.read().as_str() == "compact");
 
-    // Filter state — single-select values matching the design's filter bar
-    // ("all" mirrors the design's "All environments/statuses/flakes" options).
+    // Filter state: one multi-select per design filter. An empty selection
+    // means "All …". Values are OR within a filter and AND across filters.
     let mut search = use_signal(String::new);
-    let mut environment_filter = use_signal(|| "all".to_string());
-    let mut status_filter = use_signal(|| "all".to_string());
-    let mut flake_filter = use_signal(|| "all".to_string());
+    let mut environment_filter = use_signal(Vec::<String>::new);
+    let mut status_filter = use_signal(Vec::<String>::new);
+    let mut flake_filter = use_signal(Vec::<String>::new);
+    let mut mode_filter = use_signal(Vec::<String>::new);
+    let mut tag_filter = use_signal(Vec::<String>::new);
+    // Guest grouping is on by default in the design. Collapse state is keyed
+    // by host ID and is view state only.
+    let mut group_guests_enabled = use_signal(|| true);
+    let mut collapsed_hosts = use_signal(std::collections::HashSet::<Uuid>::new);
 
     use_effect(move || {
         let Some(focus) = navigation_focus() else {
@@ -175,7 +188,7 @@ pub fn SystemsListView() -> Element {
         }
 
         if let Some(flake_name) = focus.flake_name.clone() {
-            flake_filter.set(flake_name);
+            flake_filter.set(vec![flake_name]);
             search.set(String::new());
         }
         navigation_focus.set(None);
@@ -199,6 +212,54 @@ pub fn SystemsListView() -> Element {
 
     // Local mutable state for systems (allows client-side add/remove until backend supports it)
     let mut local_systems = use_signal(Vec::<SystemSummary>::new);
+    // Fetch once per registration/configuration snapshot, never per filter or heartbeat.
+    // Sequential reads bound concurrency to one. Summary DTOs do not contain assurance.
+    let evidence_targets = use_memo(move || {
+        local_systems
+            .read()
+            .iter()
+            .filter(|s| s.management_mode != ManagementMode::Managed)
+            .map(|s| {
+                (
+                    s.id,
+                    s.management_mode,
+                    s.flake_id,
+                    s.system_configuration_name.clone(),
+                    s.parent_host_id,
+                    s.environment.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    let mut evidence_resource = use_resource(move || {
+        let targets = evidence_targets();
+        async move {
+            let mut results = HashMap::<Uuid, Result<ConfigurationAssurance, String>>::new();
+            let mut observations = HashMap::new();
+            for (id, mode, ..) in &targets {
+                let (id, mode) = (*id, *mode);
+                results.insert(
+                    id,
+                    crate::api::client::fetch_configuration_assurance(&id)
+                        .await
+                        .map_err(|e| e.to_string()),
+                );
+                if mode == ManagementMode::External {
+                    observations.insert(
+                        id,
+                        crate::api::client::fetch_latest_guest_observation(&id)
+                            .await
+                            .map_err(|e| e.to_string()),
+                    );
+                }
+            }
+            (targets, results, observations)
+        }
+    });
+
+    // One schedule read classifies every selected configuration scan. A failed
+    // read leaves freshness unknown; the browser never invents an interval.
+    let scan_schedule = use_resource(crate::api::client::fetch_scanning_schedule);
 
     let mut load_error = use_signal(|| None::<String>);
     let mut api_notice = use_signal(|| None::<String>);
@@ -212,8 +273,12 @@ pub fn SystemsListView() -> Element {
                 // Will be handled by early return below
                 return;
             }
+            // INVARIANT: This effect depends on the loaded systems only. It reads
+            // NAV_BADGES with `peek`, never `read`: the acknowledgment response
+            // replaces NAV_BADGES with a new server cursor, so a subscription
+            // would rerun this effect and acknowledge again without end.
             let ack_snapshot = {
-                let badges = NAV_BADGES.read_unchecked();
+                let badges = NAV_BADGES.peek();
                 badges.observed_at.clone()
             };
             local_systems.set(result.systems.clone());
@@ -221,7 +286,7 @@ pub fn SystemsListView() -> Element {
             loading.set(false);
             if result.notice.is_none() {
                 if let Some(cursor) = ack_snapshot {
-                    let occurrence_ids = NAV_BADGES.read_unchecked().systems_occurrence_ids.clone();
+                    let occurrence_ids = NAV_BADGES.peek().systems_occurrence_ids.clone();
                     acknowledge_with_cursor_and_ids("systems", cursor, occurrence_ids);
                 }
             }
@@ -268,6 +333,8 @@ pub fn SystemsListView() -> Element {
     let mut show_add_form = use_signal(|| false);
     let mut add_error = use_signal(|| None::<String>);
     let mut draft = use_signal(NewSystemDraft::new);
+    let mut add_in_flight = use_signal(|| false);
+    let mut registration_complete = use_signal(|| None::<SystemDetail>);
     let mut pending_remove = use_signal(|| None::<SystemSummary>);
     let mut removing_in_progress = use_signal(|| false);
     let mut pending_update_key = use_signal(|| None::<SystemSummary>);
@@ -278,12 +345,11 @@ pub fn SystemsListView() -> Element {
     let mut onboarding_agent_reminder = use_signal(|| None::<String>);
     let registration_prefill = system_registration_prefill();
     use_effect(move || {
-        if let Some((hostname, configuration, flake_name, branch)) = registration_prefill.clone() {
-            let mut next = NewSystemDraft::new();
-            next.hostname = hostname;
-            next.system_configuration_name = configuration;
-            next.flake_name = flake_name;
-            next.flake_branch = branch;
+        if !auth::can_mutate_systems(&app_state.read().auth) {
+            show_add_form.set(false);
+            return;
+        }
+        if let Some(next) = registration_prefill.clone() {
             draft.set(next);
             show_add_form.set(true);
         }
@@ -297,6 +363,48 @@ pub fn SystemsListView() -> Element {
     let selected_preview_id = preview_system.read().as_ref().map(|d| d.id);
 
     let current_systems = local_systems.read().clone();
+    let (loaded_targets, mut evidence_results, mut observation_results) = evidence_resource
+        .read()
+        .as_ref()
+        .cloned()
+        .unwrap_or_default();
+    // A resource may retain its previous value while a replacement is pending.
+    // Never pair evidence or parent reports with edited registration metadata:
+    // the complete result belongs to the exact snapshot that initiated it.
+    let matching_snapshot = loaded_targets == evidence_targets();
+    if !matching_snapshot {
+        evidence_results.clear();
+        observation_results.clear();
+    }
+    let evidence_loading =
+        evidence_resource.state() == UseResourceState::Pending || !matching_snapshot;
+    let evidence_for = |id: &Uuid| evidence_results.get(id).and_then(|r| r.as_ref().ok());
+    let schedule = scan_schedule
+        .read()
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .cloned();
+    let freshness_map: HashMap<Uuid, EvidenceFreshness> = {
+        let now = chrono::Utc::now();
+        evidence_results
+            .iter()
+            .filter_map(|(id, r)| r.as_ref().ok().map(|e| (*id, e)))
+            .map(|(id, e)| (id, selected_head_scan_freshness(e, schedule.as_ref(), now)))
+            .collect()
+    };
+    let freshness_for = |id: &Uuid| {
+        freshness_map
+            .get(id)
+            .copied()
+            .unwrap_or(EvidenceFreshness::Unknown)
+    };
+    let needs_attention = |s: &SystemSummary| {
+        if s.management_mode == ManagementMode::Managed {
+            matches_status(s, "attention")
+        } else {
+            evidence_issue(evidence_for(&s.id).map(|e| evidence_status(e, freshness_for(&s.id))))
+        }
+    };
     let environments = unique_environments(&current_systems);
     let dropdown_environments = environment_names_resource
         .read_unchecked()
@@ -328,35 +436,153 @@ pub fn SystemsListView() -> Element {
             let flake_name = flake_info.map(|(_, name, _, _)| name.as_str());
             let flake_commit = flake_info.and_then(|(_, _, _, commit)| commit.as_deref());
 
-            matches_environment(system, &environment_filter.read())
-                && matches_status(system, &status_filter.read())
-                && matches_flake(flake_name, &flake_filter.read())
-                && matches_search(system, &search.read(), flake_name, flake_commit)
+            matches_any(&environment_filter.read(), |env| {
+                matches_environment(system, env)
+            }) && matches_any(&tag_filter.read(), |tag| matches_tag(&system.tags, tag))
+                && matches_any(&mode_filter.read(), |mode| {
+                    system.management_mode.as_str() == mode
+                })
+                && matches_any(&status_filter.read(), |status| {
+                    if system.management_mode != ManagementMode::Managed
+                        && matches!(status, "evidence" | "attention")
+                    {
+                        needs_attention(system)
+                    } else {
+                        matches_status(system, status)
+                    }
+                })
+                && matches_any(&flake_filter.read(), |flake| {
+                    matches_flake(flake_name, flake)
+                })
+                && (matches_search(system, &search.read(), flake_name, flake_commit)
+                    || matches_parent_search(system, &current_systems, &search.read())
+                    || searches_tags(&system.tags, &search.read()))
         })
         .cloned()
         .collect();
     let has_active_filters = !search.read().trim().is_empty()
-        || *environment_filter.read() != "all"
-        || *status_filter.read() != "all"
-        || *flake_filter.read() != "all";
+        || !environment_filter.read().is_empty()
+        || !status_filter.read().is_empty()
+        || !flake_filter.read().is_empty()
+        || !mode_filter.read().is_empty()
+        || !tag_filter.read().is_empty();
+    let mut clear_all_filters = move || {
+        search.set(String::new());
+        environment_filter.set(Vec::new());
+        status_filter.set(Vec::new());
+        flake_filter.set(Vec::new());
+        mode_filter.set(Vec::new());
+        tag_filter.set(Vec::new());
+    };
+    let listed_systems = group_guests(
+        &filtered_systems,
+        group_guests_enabled(),
+        &collapsed_hosts.read(),
+    );
+    let grouped_hosts = hosts_with_guests(&listed_systems);
+    let mut fleet_tags = std::collections::BTreeMap::<String, usize>::new();
+    for system in &current_systems {
+        for tag in &system.tags {
+            *fleet_tags.entry(tag.clone()).or_default() += 1;
+        }
+    }
+    // Design: "N managed · N external · N reference · N managed healthy ·
+    // <link>N needing attention</link>"; the count itself selects the filter.
+    let attention_count = current_systems
+        .iter()
+        .filter(|s| needs_attention(s))
+        .count();
+    // Filter options. Counts are fleet totals, as in the design, not counts
+    // within the current filtered result.
+    let option = |value: &str, label: String, count: Option<usize>| FilterOption {
+        value: value.to_owned(),
+        label,
+        count,
+    };
+    let mode_options: Vec<FilterOption> = [
+        ManagementMode::Managed,
+        ManagementMode::External,
+        ManagementMode::Reference,
+    ]
+    .into_iter()
+    .map(|mode| {
+        let count = current_systems
+            .iter()
+            .filter(|s| s.management_mode == mode)
+            .count();
+        option(mode.as_str(), mode.long_label().to_string(), Some(count))
+    })
+    .collect();
+    let environment_options: Vec<FilterOption> = dropdown_environments
+        .iter()
+        .map(|env| {
+            let count = current_systems
+                .iter()
+                .filter(|s| matches_environment(s, env))
+                .count();
+            option(env, env.clone(), Some(count))
+        })
+        .collect();
+    let evidence_issue_count = current_systems
+        .iter()
+        .filter(|s| s.management_mode != ManagementMode::Managed && needs_attention(s))
+        .count();
+    let status_options = vec![
+        option("online", "Online (managed)".into(), None),
+        option("warning", "Warning / drift".into(), None),
+        option("critical", "Critical".into(), None),
+        option("offline", "Offline".into(), None),
+        option(
+            "evidence",
+            "Evidence issues (external / reference)".into(),
+            Some(evidence_issue_count),
+        ),
+        option("attention", "Needs attention".into(), None),
+    ];
+    let flake_options: Vec<FilterOption> = registered_flakes
+        .iter()
+        .map(|flake| {
+            let count = current_systems
+                .iter()
+                .filter(|s| {
+                    let name = s
+                        .flake_id
+                        .and_then(|id| flake_context.iter().find(|(fid, ..)| *fid == id))
+                        .map(|(_, name, _, _)| name.as_str());
+                    matches_flake(name, flake)
+                })
+                .count();
+            option(flake, flake.clone(), Some(count))
+        })
+        .collect();
+    let tag_options: Vec<FilterOption> = fleet_tags
+        .iter()
+        .map(|(tag, count)| option(tag, format!("#{tag}"), Some(*count)))
+        .collect();
     let systems_subtitle = if *loading.read() {
         "Loading systems…".to_string()
     } else if load_error.read().is_some() {
         "Systems are temporarily unavailable".to_string()
     } else {
-        format!(
-            "{} systems · {} healthy · {} needing attention",
-            current_systems.len(),
+        let count = |mode| {
             current_systems
                 .iter()
-                .filter(|s| s.health_status == HealthStatus::Healthy)
-                .count(),
-            current_systems
-                .iter()
-                .filter(|s| s.health_status != HealthStatus::Healthy)
+                .filter(|s| s.management_mode == mode)
                 .count()
+        };
+        format!(
+            "{} managed · {} external · {} reference · {} managed healthy · ",
+            count(ManagementMode::Managed),
+            count(ManagementMode::External),
+            count(ManagementMode::Reference),
+            current_systems
+                .iter()
+                .filter(|s| s.management_mode == ManagementMode::Managed
+                    && s.health_status == HealthStatus::Healthy)
+                .count(),
         )
     };
+    let subtitle_ready = !*loading.read() && load_error.read().is_none();
 
     let registered_flakes_for_submit = registered_flakes.clone();
 
@@ -364,18 +590,20 @@ pub fn SystemsListView() -> Element {
 
     // Attention/flash state for alerting systems (TASK-385 follow-up).
     let has_attention_systems = filtered_systems.iter().any(|s| {
-        matches!(
-            s.health_status,
-            HealthStatus::Critical | HealthStatus::Offline
-        )
+        s.management_mode == ManagementMode::Managed
+            && matches!(
+                s.health_status,
+                HealthStatus::Critical | HealthStatus::Offline
+            )
     });
     let flash_global = should_flash("systems", has_attention_systems);
     let mut attention_classes: HashMap<Uuid, String> = HashMap::new();
     for system in &filtered_systems {
-        let is_attention = matches!(
-            system.health_status,
-            HealthStatus::Critical | HealthStatus::Offline
-        );
+        let is_attention = system.management_mode == ManagementMode::Managed
+            && matches!(
+                system.health_status,
+                HealthStatus::Critical | HealthStatus::Offline
+            );
         // The row-class dismissal identity must resolve the same way
         // dismiss_attention_item resolves its local-storage key: prefer the
         // canonical server occurrence key (which changes across episodes so
@@ -522,6 +750,9 @@ pub fn SystemsListView() -> Element {
                     p {
                         class: "page-subtitle",
                         "{systems_subtitle}"
+                        if subtitle_ready {
+                            span { class: "link-action focus-ring", role: "button", tabindex: "0", onclick: move |_| status_filter.set(vec!["attention".into()]), "{attention_count} needing attention" }
+                        }
                     }
                 }
                 div {
@@ -541,7 +772,7 @@ pub fn SystemsListView() -> Element {
                         "Export"
                     }
                     // Add system (primary) — keeps existing functionality
-                    div {
+                    if can_mutate { div {
                         class: "relative z-40",
                         button {
                             "data-testid": "add-system-button",
@@ -559,22 +790,35 @@ pub fn SystemsListView() -> Element {
                             Icon { name: IconName::Plus, size: 14 }
                             if *show_add_form.read() { "Close" } else { "Add system" }
                         }
-                    }
+                    } }
                 }
             }
 
             if !*loading.read() && load_error.read().is_none() {
                 SystemsStatStrip {
-                    systems: filtered_systems.clone(),
+                    systems: current_systems.clone(),
                     environment_colors: environment_color_pairs.clone(),
+                    configuration_critical: current_systems
+                        .iter()
+                        .filter(|s| s.management_mode != ManagementMode::Managed)
+                        .filter_map(|s| evidence_for(&s.id))
+                        .filter_map(crate::components::system::management_mode::last_good_scan)
+                        .filter_map(|scan| scan.cves.as_ref().map(|c| c.critical))
+                        .collect::<Vec<i64>>(),
+                    configuration_unavailable: current_systems
+                        .iter()
+                        .filter(|s| s.management_mode != ManagementMode::Managed)
+                        .filter(|s| evidence_for(&s.id).is_none())
+                        .count(),
                 }
             }
 
             // System Form Modal
-            if *show_add_form.read() {
+            if can_mutate && *show_add_form.read() {
                 AddSystemForm {
                     draft: draft,
                     error: add_error,
+                    submitting: add_in_flight(),
                     show_onboarding_callouts: from_setup(),
                     key_modal_open: *show_key_modal.read(),
                     on_cancel: move |_| {
@@ -583,27 +827,28 @@ pub fn SystemsListView() -> Element {
                         show_add_form.set(false);
                     },
                     on_submit: move |_| {
+                        if add_in_flight() || !auth::can_mutate_systems(&app_state.read().auth) { return; }
                         let next = draft.read().clone();
                         if let Err(message) = validate_new_system(&next, &local_systems.read(), &registered_flakes_for_submit) {
                             add_error.set(Some(message));
                             return;
                         }
                         let from_setup_active = from_setup();
-                        let first_system_in_setup = from_setup_active && local_systems.read().is_empty();
+                        let first_system_in_setup = from_setup_active && local_systems.read().is_empty() && next.management_mode == crate::api::models::ManagementMode::Managed;
+                        add_error.set(None);
+                        add_in_flight.set(true);
 
                         // Call backend API to create the system
                         spawn(async move {
-                            match create_system_via_api(
-                                next.hostname.trim().to_string(),
-                                normalize_optional(&next.system_configuration_name),
-                                next.public_key.clone(),
-                                normalize_optional(&next.environment),
-                                normalize_optional(&next.flake_name),
-                                normalize_policy(&next.deployment_policy),
-                            ).await {
+                            match create_system_request_via_api(&next.request()).await {
                                 Ok(detail) => {
+                                    registration_complete.set(Some(detail.clone()));
                                     // Convert SystemDetail to SystemSummary for the list
                                     let new_item = SystemSummary {
+                                        tags: detail.tags,
+                                        description: detail.description,
+                                        management_mode: detail.management_mode,
+                                        parent_host_id: detail.parent_host_id,
                                         id: detail.id,
                                         hostname: detail.hostname,
                                         system_configuration_name: detail.system_configuration_name,
@@ -641,6 +886,7 @@ pub fn SystemsListView() -> Element {
                                     add_error.set(Some(error_message));
                                 }
                             }
+                            add_in_flight.set(false);
                         });
                     },
                     on_generate_keys: move |_| {
@@ -655,13 +901,18 @@ pub fn SystemsListView() -> Element {
                     },
                     environments: dropdown_environments.clone(),
                     flake_names: registered_flakes.clone(),
-                    title: "Register System".to_string(),
-                    submit_label: "Save System".to_string(),
+                }
+            }
+
+            if let Some(system) = registration_complete() {
+                crate::components::forms::add_system_form::SystemRegistrationComplete {
+                    system,
+                    on_close: move |_| registration_complete.set(None),
                 }
             }
 
             // Key Pair Modal
-            if *show_key_modal.read()
+            if can_mutate && *show_key_modal.read()
                 && let Some(keys) = generated_keys.read().clone()
             {
                 KeyPairModal {
@@ -702,59 +953,75 @@ pub fn SystemsListView() -> Element {
                             oninput: move |evt| search.set(evt.value()),
                         }
                     }
-                    // Environment select (design: "All environments")
-                    select {
-                        class: "input filter-select focus-ring",
-                        style: "width: auto;",
-                        "aria-label": "Filter by environment",
-                        value: "{environment_filter.read()}",
-                        onchange: move |evt| environment_filter.set(evt.value()),
-                        option { value: "all", "All environments" }
-                        for env in dropdown_environments.clone() {
-                            option {
-                                value: "{env}",
-                                selected: *environment_filter.read() == env,
-                                "{env}"
-                            }
+                    MultiFilter {
+                        label: "Management",
+                        all_label: "All management",
+                        options: mode_options,
+                        selected: mode_filter(),
+                        on_change: move |v| mode_filter.set(v),
+                    }
+                    MultiFilter {
+                        label: "Environment",
+                        all_label: "All environments",
+                        options: environment_options,
+                        selected: environment_filter(),
+                        on_change: move |v| environment_filter.set(v),
+                    }
+                    MultiFilter {
+                        label: "Status",
+                        all_label: "All statuses",
+                        options: status_options,
+                        selected: status_filter(),
+                        on_change: move |v| status_filter.set(v),
+                    }
+                    MultiFilter {
+                        label: "Flake",
+                        all_label: "All flakes",
+                        options: flake_options,
+                        selected: flake_filter(),
+                        on_change: move |v| flake_filter.set(v),
+                    }
+                    MultiFilter {
+                        label: "Tag",
+                        all_label: "All tags",
+                        options: tag_options,
+                        selected: tag_filter(),
+                        on_change: move |v| tag_filter.set(v),
+                    }
+                    if has_active_filters {
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| clear_all_filters(),
+                            Icon { name: IconName::X, size: 11 }
+                            " Clear filters"
                         }
                     }
-                    // Status select (design: "All statuses")
-                    select {
-                        class: "input filter-select focus-ring",
-                        style: "width: auto;",
-                        "aria-label": "Filter by status",
-                        value: "{status_filter.read()}",
-                        onchange: move |evt| status_filter.set(evt.value()),
-                        option { value: "all", "All statuses" }
-                        option { value: "online", "Online" }
-                        option { value: "warning", "Warning / drift" }
-                        option { value: "critical", "Critical" }
-                        option { value: "offline", "Offline" }
+                    button {
+                        class: if group_guests_enabled() { "btn btn-ghost focus-ring xs mf-on" } else { "btn btn-ghost focus-ring xs" },
+                        "aria-pressed": "{group_guests_enabled()}",
+                        title: "Show external guests under their parent host",
+                        onclick: move |_| group_guests_enabled.toggle(),
+                        Icon { name: IconName::Rows, size: 11 }
+                        " Group guests"
                     }
-                    // Flake select (design: "All flakes")
-                    select {
-                        class: "input filter-select focus-ring",
-                        style: "width: auto;",
-                        "aria-label": "Filter by flake",
-                        value: "{flake_filter.read()}",
-                        onchange: move |evt| flake_filter.set(evt.value()),
-                        option { value: "all", "All flakes" }
-                        for flake in registered_flakes.clone() {
-                            option {
-                                value: "{flake}",
-                                selected: *flake_filter.read() == flake,
-                                "{flake}"
+                    if group_guests_enabled() && !grouped_hosts.is_empty() {
+                        {
+                            let any_collapsed = !collapsed_hosts.read().is_empty();
+                            let hosts = grouped_hosts.clone();
+                            rsx! {
+                                button {
+                                    class: "btn btn-ghost focus-ring xs",
+                                    onclick: move |_| {
+                                        if any_collapsed {
+                                            collapsed_hosts.set(Default::default());
+                                        } else {
+                                            collapsed_hosts.set(hosts.iter().copied().collect());
+                                        }
+                                    },
+                                    if any_collapsed { "Expand all" } else { "Collapse all" }
+                                }
                             }
                         }
-                    }
-                    // Tag select placeholder (design: "All tags" — requires backend tag support)
-                    select {
-                        class: "input filter-select focus-ring",
-                        style: "width: auto; opacity: 0.5;",
-                        "aria-label": "Filter by tag",
-                        title: "Tag filters are not yet available (requires backend tag support)",
-                        disabled: "true",
-                        option { value: "all", "All tags" }
                     }
                     div {
                         class: "seg",
@@ -843,18 +1110,41 @@ pub fn SystemsListView() -> Element {
                     if has_active_filters {
                         h3 { "No systems match" }
                         div { "Try clearing a filter or changing the search." }
+                        button { class: "btn btn-ghost focus-ring", style: "margin-top: 10px;", onclick: move |_| clear_all_filters(), "Clear all filters" }
                     } else {
                         h3 { "No systems yet" }
-                        div { "Use Add system to register your first managed machine." }
+                        div { "Register a managed machine, external system, or reference configuration." }
                     }
                 }
             } else if view_mode() == ViewMode::Cards {
                 div {
                     class: "cards-grid",
                     "data-testid": "systems-cards",
-                    for system in filtered_systems.clone() {
+                    for ListedSystem { system, guests, indent } in listed_systems.clone() {
                         SystemCardV2 {
+                            key: "{system.id}",
                             system: system.clone(),
+                            guests,
+                            indent,
+                            guests_collapsed: collapsed_hosts.read().contains(&system.id),
+                            on_toggle_guests: {
+                                let host = system.id;
+                                move |_| {
+                                    let mut hosts = collapsed_hosts.write();
+                                    if !hosts.remove(&host) {
+                                        hosts.insert(host);
+                                    }
+                                }
+                            },
+                            evidence: evidence_for(&system.id).cloned(),
+                            freshness: freshness_map.get(&system.id).copied(),
+                            evidence_loading,
+                            can_mutate,
+                            on_retry_evidence: move |_| evidence_resource.restart(),
+                            evidence_error: evidence_results.get(&system.id).and_then(|r| r.as_ref().err()).cloned(),
+                            observation: observation_results.get(&system.id).and_then(|r| r.as_ref().ok()).cloned().flatten(),
+                            observation_error: observation_results.get(&system.id).and_then(|r| r.as_ref().err()).cloned(),
+                            parent_label: system.parent_host_id.map(|id| current_systems.iter().find(|s| s.id == id).map(|s| s.hostname.clone()).unwrap_or_else(|| id.to_string())),
                             compact: is_compact(),
                             selected: selected_preview_id == Some(system.id),
                             environment_colors: environment_color_pairs.clone(),
@@ -880,23 +1170,13 @@ pub fn SystemsListView() -> Element {
                             },
                             on_remove: move |_| remove_system_by_id(local_systems, pending_remove, system.id),
                             on_update_key: move |_| update_key_for_system(local_systems, pending_update_key, system.id),
-                            on_edit: move |_| {
-                                let mut edit_modal_system = edit_modal_system.clone();
-                                let mut edit_modal_error = edit_modal_error.clone();
-                                spawn(async move {
-                                    edit_modal_error.set(None);
-                                    let detail = load_system_detail_with_fallback(&system.id.to_string()).await;
-                                    if let Some(detail) = detail.system {
-                                        edit_modal_system.set(Some(detail));
-                                    }
-                                });
-                            },
                             on_deploy: move |_| {
                                 // Navigate to system detail with deploy tab pre-selected,
                                 // matching the design example behaviour.
                                 #[cfg(target_arch = "wasm32")]
                                 if let Some(window) = web_sys::window() {
-                                    let url = format!("/systems/{}?tab=deploy", system.id);
+                                    let tab = if system.management_mode == ManagementMode::Managed { "deploy" } else { "cves" };
+                                    let url = format!("/systems/{}?tab={tab}", system.id);
                                     let _ = window.location().assign(&url);
                                 }
                             },
@@ -906,13 +1186,29 @@ pub fn SystemsListView() -> Element {
             } else {
                 SystemsTable {
                     systems: filtered_systems.clone(),
+                    group_guests: group_guests_enabled(),
+                    collapsed_hosts: collapsed_hosts.read().clone(),
+                    on_toggle_guests: move |host: Uuid| {
+                        let mut hosts = collapsed_hosts.write();
+                        if !hosts.remove(&host) {
+                            hosts.insert(host);
+                        }
+                    },
+                    evidence: evidence_results.clone(),
+                    freshness: freshness_map.clone(),
+                    evidence_loading,
+                    can_mutate,
+                    on_retry_evidence: move |_| evidence_resource.restart(),
+                    observations: observation_results.clone(),
+                    parent_names: current_systems.iter().map(|s| (s.id, s.hostname.clone())).collect(),
                     compact: is_compact(),
                     environment_colors: environment_color_pairs.clone(),
                     flake_context: flake_context.clone(),
                     attention_classes: attention_classes.clone(),
                     on_remove: move |id| remove_system_by_id(local_systems, pending_remove, id),
                     on_update_key: move |id| update_key_for_system(local_systems, pending_update_key, id),
-                     on_edit: move |id: uuid::Uuid| {
+                      on_edit: move |id: uuid::Uuid| {
+                          if !auth::can_mutate_systems(&app_state.read().auth) { return; }
                          let mut edit_modal_system = edit_modal_system.clone();
                          let mut edit_modal_error = edit_modal_error.clone();
                          spawn(async move {
@@ -926,7 +1222,9 @@ pub fn SystemsListView() -> Element {
                     on_deploy: move |id: uuid::Uuid| {
                         #[cfg(target_arch = "wasm32")]
                         if let Some(window) = web_sys::window() {
-                            let url = format!("/systems/{id}?tab=deploy");
+                            let managed = local_systems.read().iter().find(|s| s.id == id).is_some_and(|s| s.management_mode == ManagementMode::Managed);
+                            let tab = if managed { "deploy" } else { "cves" };
+                            let url = format!("/systems/{id}?tab={tab}");
                             let _ = window.location().assign(&url);
                         }
                     },
@@ -955,10 +1253,14 @@ pub fn SystemsListView() -> Element {
                     let detail_for_open_detail = detail.clone();
                     rsx! {
                         SystemPreviewPanel {
+                            key: "{detail.id}-{detail.management_mode.as_str()}-{detail.updated_at.timestamp_micros()}",
                             detail: detail.clone(),
+                            parent_label: detail.parent_host_id.map(|id| current_systems.iter().find(|s| s.id == id).map(|s| s.hostname.clone()).unwrap_or_else(|| id.to_string())),
                             environment_colors: environment_color_pairs.clone(),
+                            can_mutate,
                             on_close: move |_| preview_system.set(None),
                             on_edit: move |_| {
+                                if !auth::can_mutate_systems(&app_state.read().auth) { return; }
                                 edit_modal_error.set(None);
                                 edit_modal_system.set(Some(detail_for_edit.clone()));
                                 preview_system.set(None);
@@ -980,7 +1282,7 @@ pub fn SystemsListView() -> Element {
             }
 
             // Remove Confirmation Dialog
-            if let Some(system) = pending_remove.read().clone() {
+            if let Some(system) = pending_remove.read().clone().filter(|_| can_mutate) {
                 RemoveSystemDialog {
                     hostname: system.hostname.clone(),
                     environment: system.environment.clone(),
@@ -1013,7 +1315,7 @@ pub fn SystemsListView() -> Element {
             }
 
             // Update Public Key Modal
-            if let Some(system) = pending_update_key.read().clone() {
+            if let Some(system) = pending_update_key.read().clone().filter(|_| can_mutate) {
                 UpdatePublicKeyModal {
                     system_id: system.id,
                     hostname: system.hostname.clone(),
@@ -1066,7 +1368,7 @@ pub fn SystemsListView() -> Element {
             }
 
             // Edit System Modal
-            if let Some(detail) = edit_modal_system.read().clone() {
+            if let Some(detail) = edit_modal_system.read().clone().filter(|_| can_mutate) {
                 EditSystemModal {
                     system: detail.clone(),
                     flake_names: registered_flakes.clone(),
@@ -1080,7 +1382,9 @@ pub fn SystemsListView() -> Element {
                         edit_modal_system.set(None)
                     },
                     on_save: move |request: crate::api::models::UpdateSystemRequest| {
+                        if !auth::can_mutate_systems(&app_state.read().auth) { return; }
                         let system_id = detail.id;
+                        edit_modal_error.set(None);
                         spawn(async move {
                             match update_system_via_api(
                                 system_id,
@@ -1091,14 +1395,27 @@ pub fn SystemsListView() -> Element {
                                     let mut values = local_systems.read().clone();
                                      if let Some(pos) = values.iter().position(|s| s.id == system_id) {
                                          values[pos].hostname = updated_detail.hostname.clone();
+                                         values[pos].management_mode = updated_detail.management_mode;
+                                         values[pos].parent_host_id = updated_detail.parent_host_id;
+                                         values[pos].fqdn = updated_detail.fqdn.clone();
+                                         values[pos].tags = updated_detail.tags.clone();
+                                         values[pos].description = updated_detail.description.clone();
+                                         values[pos].heartbeat_interval_secs = updated_detail.heartbeat_interval_secs;
+                                         values[pos].effective_heartbeat_interval_secs = updated_detail.effective_heartbeat_interval_secs;
+                                         values[pos].health_status = updated_detail.health_status;
+                                         values[pos].deployment_status = updated_detail.deployment_status;
+                                         values[pos].pipeline_stage = updated_detail.pipeline_stage.clone();
                                          values[pos].system_configuration_name = updated_detail.system_configuration_name.clone();
                                         values[pos].environment = updated_detail.environment.clone();
                                         values[pos].deployment_policy = updated_detail.deployment_policy.clone();
                                         values[pos].flake_id = updated_detail.flake.as_ref().map(|flake| flake.id);
                                          local_systems.set(values);
                                      }
-                                     edit_modal_error.set(None);
-                                     edit_modal_system.set(None);
+                                      edit_modal_error.set(None);
+                                      if preview_system.read().as_ref().is_some_and(|system| system.id == system_id) {
+                                          preview_system.set(Some(updated_detail.clone()));
+                                      }
+                                      edit_modal_system.set(None);
                                  }
                                  Err(error_message) => {
                                      edit_modal_error.set(Some(error_message));
@@ -1138,46 +1455,60 @@ pub fn SystemsListView() -> Element {
     }
 }
 
-fn system_registration_prefill() -> Option<(String, String, String, String)> {
+fn system_registration_prefill() -> Option<NewSystemDraft> {
     let search = web_sys::window()?.location().search().ok()?;
-    let values = search
-        .trim_start_matches('?')
-        .split('&')
-        .filter_map(|part| part.split_once('='))
-        .map(|(key, value)| {
-            let decoded: String = js_sys::decode_uri_component(value)
-                .unwrap_or_else(|_| value.into())
-                .into();
-            (key, decoded)
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-    if values.get("add").map(String::as_str) != Some("1") {
-        return None;
+    crate::components::forms::add_system_form::registration_prefill(&search)
+}
+
+fn matches_tag(tags: &[String], selected: &str) -> bool {
+    selected.is_empty() || tags.iter().any(|tag| tag == selected)
+}
+
+fn searches_tags(tags: &[String], search: &str) -> bool {
+    let query = search.trim().to_lowercase();
+    tags.iter().any(|tag| tag.to_lowercase().contains(&query))
+}
+
+#[cfg(test)]
+mod metadata_filter_tests {
+    use super::*;
+
+    #[test]
+    fn tag_filter_is_exact_and_search_is_case_insensitive() {
+        let tags = vec!["web".into(), "stig-enforced".into()];
+        assert!(matches_tag(&tags, ""));
+        assert!(!matches_tag(&tags, "all"));
+        assert!(matches_tag(&["all".into()], "all"));
+        assert!(matches_tag(&tags, "web"));
+        assert!(!matches_tag(&tags, "Web"));
+        assert!(!matches_tag(&tags, "we"));
+        assert!(!matches_tag(&[], "web"));
+        assert!(searches_tags(&tags, " ENFORCED "));
+        assert!(!searches_tags(&tags, "builder"));
     }
-    let hostname = values.get("hostname")?.clone();
-    let configuration = values
-        .get("configuration")
-        .cloned()
-        .unwrap_or_else(|| hostname.clone());
-    let flake_name = values.get("flake_name")?.clone();
-    let branch = values.get("branch").cloned().unwrap_or_default();
-    Some((hostname, configuration, flake_name, branch))
 }
 
 #[component]
 fn SystemPreviewPanel(
     detail: SystemDetail,
+    /// Hostname of the associated parent, when one is registered and visible.
+    #[props(default)]
+    parent_label: Option<String>,
     #[props(default)] environment_colors: Vec<(String, String)>,
+    #[props(default)] can_mutate: bool,
     on_close: EventHandler<()>,
     on_edit: EventHandler<()>,
     on_open_detail: EventHandler<()>,
     on_deploy: EventHandler<()>,
 ) -> Element {
+    if detail.management_mode != ManagementMode::Managed {
+        return rsx! { ConfigurationPreviewPanel { detail, parent_label, can_mutate, on_close, on_edit, on_open_detail } };
+    }
     let mut now_tick = use_signal(chrono::Utc::now);
     use_effect(move || {
         spawn(async move {
             loop {
-                gloo_timers::future::TimeoutFuture::new(1000).await;
+                crate::hooks::visibility::visible_tick(1000).await;
                 now_tick.set(chrono::Utc::now());
             }
         });
@@ -1197,7 +1528,7 @@ fn SystemPreviewPanel(
         let mut deployment_progress_poll_tick = deployment_progress_poll_tick.clone();
         move || async move {
             loop {
-                gloo_timers::future::TimeoutFuture::new(4_000).await;
+                crate::hooks::visibility::visible_tick(4_000).await;
                 deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1);
             }
         }
@@ -1230,6 +1561,7 @@ fn SystemPreviewPanel(
         HealthStatus::Warning => "#fbbf24",
         HealthStatus::Critical => "#f87171",
         HealthStatus::Offline => "#6b7280",
+        HealthStatus::Unknown => "#6b7280",
     };
 
     let heartbeat_interval_sec = detail.effective_heartbeat_interval_secs as i64;
@@ -1326,6 +1658,7 @@ fn SystemPreviewPanel(
                                 HealthStatus::Warning => ChipVariant::Warning,
                                 HealthStatus::Critical => ChipVariant::Critical,
                                 HealthStatus::Offline => ChipVariant::Unknown,
+                                HealthStatus::Unknown => ChipVariant::Unknown,
                             },
                             show_dot: false,
                             "{detail.health_status.label()}"
@@ -1386,6 +1719,7 @@ fn SystemPreviewPanel(
                             show_dot: false,
                             "policy: {detail.deployment_policy}"
                         }
+                        for tag in &detail.tags { span { class: "chip chip-unknown", "#{tag}" } }
                     }
                 }
 
@@ -1493,18 +1827,194 @@ fn SystemPreviewPanel(
                     Icon { name: IconName::ArrowRight, size: 12 }
                     "Open full detail"
                 }
-                button {
+                if can_mutate { button {
                     class: "btn btn-ghost focus-ring",
                     onclick: move |_| on_edit.call(()),
                     Icon { name: IconName::Gear, size: 12 }
                     "Edit"
-                }
-                button {
+                } }
+                if can_mutate { button {
                     class: "btn btn-primary focus-ring",
                     onclick: move |_| on_deploy.call(()),
                     Icon { name: IconName::Deploy, size: 12 }
                     "Deploy"
+                } }
+            }
+        }
+    }
+}
+
+/// Formats one evidence stage as the approved compact "state · age" value.
+fn evidence_stage_label(state: &str, at: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    match at {
+        Some(at) => format!(
+            "{state} · {}",
+            format_relative_time_from(chrono::Utc::now(), at)
+        ),
+        None => state.to_string(),
+    }
+}
+
+/// Compact nonmanaged side-panel body (design `ExternalPanelBody`).
+///
+/// Configuration evidence and the latest stored host observation are loaded
+/// and shown independently; neither implies the other.
+#[component]
+fn ConfigurationPreviewPanel(
+    detail: SystemDetail,
+    parent_label: Option<String>,
+    can_mutate: bool,
+    on_close: EventHandler<()>,
+    on_edit: EventHandler<()>,
+    on_open_detail: EventHandler<()>,
+) -> Element {
+    let id = detail.id;
+    let mode = detail.management_mode;
+    let mut evidence = use_resource(move || async move {
+        crate::api::client::fetch_configuration_assurance(&id).await
+    });
+    let mut observation = use_resource(move || async move {
+        if mode == ManagementMode::External {
+            crate::api::client::fetch_latest_guest_observation(&id).await
+        } else {
+            Ok(None)
+        }
+    });
+    // Retain successful reads only within this registration epoch. A failed
+    // reload must not turn previously loaded evidence into an absence claim.
+    let schedule = use_resource(crate::api::client::fetch_scanning_schedule);
+    let mut last_evidence = use_signal(|| None::<ConfigurationAssurance>);
+    let mut last_observation = use_signal(|| None::<crate::api::models::GuestObservationRow>);
+    use_effect(move || {
+        if let Some(Ok(value)) = evidence.read().as_ref() {
+            last_evidence.set(Some(value.clone()));
+        }
+        if let Some(Ok(value)) = observation.read().as_ref() {
+            last_observation.set(value.clone());
+        }
+    });
+    let flake = detail
+        .flake
+        .as_ref()
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| "Not linked".into());
+    let config = detail
+        .system_configuration_name
+        .clone()
+        .unwrap_or_else(|| detail.hostname.clone());
+    rsx! {
+        div { class: "side-panel-backdrop", onclick: move |_| on_close.call(()) }
+        aside { class: "side-panel mg-list-preview", role: "dialog", "aria-modal": "true", "aria-label": "Configuration preview", "data-testid": "systems-side-panel",
+            div { class: "panel-head",
+                div { class: "panel-title", h2 { "{detail.hostname}" } }
+                button { class: "btn-icon focus-ring", "aria-label": "Close", onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } }
+            }
+            div { class: "panel-body",
+                section { class: "panel-section",
+                    div { style: "display:flex;gap:8px;flex-wrap:wrap;",
+                        if let Some(env) = &detail.environment { span { class: "chip chip-info", "{env}" } }
+                        MgmtChip { mode }
+                        // The same assurance status the card and table show, from the
+                        // same schedule-aware freshness. Absent until evidence loads.
+                        if let Some(Ok(value)) = evidence.read().as_ref() {
+                            crate::components::system::ScanEvidenceChip {
+                                status: crate::components::system::management_mode::evidence_status(
+                                    value,
+                                    selected_head_scan_freshness(
+                                        value,
+                                        schedule.read().as_ref().and_then(|r| r.as_ref().ok()),
+                                        chrono::Utc::now(),
+                                    ),
+                                ),
+                            }
+                        }
+                        DeploymentCell { mode, status: detail.deployment_status }
+                        for tag in &detail.tags { span { class: "chip chip-unknown", "#{tag}" } }
+                    }
                 }
+                section { class: "panel-section", h3 { "Configuration" }
+                    dl { class: "kv-grid",
+                        dt { "Flake" } dd { "{flake}#{config}" }
+                        match evidence.read().as_ref() {
+                            Some(Ok(value)) => rsx! {
+                                dt { "Branch" } dd { {value.branch.clone().unwrap_or_else(|| "Unavailable".into())} }
+                                dt { "Revision" } dd { {value.selected_revision.as_ref().map(|r| r.sha.get(..7).unwrap_or(&r.sha).to_string()).unwrap_or_else(|| "Unavailable".into())} }
+                                dt { "Message" } dd { style: "white-space:normal;font-family:var(--font-sans);", {value.selected_revision.as_ref().and_then(|r| r.message.clone()).unwrap_or_else(|| "—".into())} }
+                            },
+                            Some(Err(_)) => rsx! { dt { "Revision" } dd { "Unavailable" } },
+                            None => rsx! { dt { "Revision" } dd { "Loading…" } },
+                        }
+                        if let Some(parent) = &parent_label { dt { "Parent host" } dd { "{parent}" } }
+                    }
+                }
+                section { class: "panel-section", h3 { "Evidence" }
+                    match evidence.read().as_ref() {
+                        None => rsx! { p { class: "mg-dim", role: "status", "Loading configuration evidence…" } },
+                        Some(Err(error)) => rsx! { p { class: "mg-dim", role: "status", "Configuration evidence unavailable: {error}" } },
+                        Some(Ok(value)) => {
+                            let build = value.selected_artifact.as_ref().map(|a| match &a.build {
+                                Some(job) => evidence_stage_label(&job.state, job.completed_at),
+                                None => a.state.clone(),
+                            }).unwrap_or_else(|| "not built".into());
+                            let scan = value.latest_terminal_scan.as_ref().or(value.selected_scan.as_ref())
+                                .map(|s| evidence_stage_label(&s.state, s.completed_at))
+                                .unwrap_or_else(|| "no scan".into());
+                            rsx! { dl { class: "kv-grid",
+                                dt { "Evaluation" } dd { {evidence_stage_label(&value.evaluation.state, value.evaluation.completed_at)} }
+                                dt { "Build" } dd { "{build}" }
+                                dt { "Scan" } dd { "{scan}" }
+                            } }
+                        }
+                    }
+                }
+                section { class: "panel-section", h3 { "Runtime" }
+                    if mode == ManagementMode::Reference { div { class: "mg-dim", "Not a running machine." } }
+                    else {
+                        match observation.read().as_ref() {
+                            // SECURITY: a parent-reported unit state is neither guest
+                            // health nor proof that the scanned configuration runs.
+                            Some(Ok(Some(report))) => rsx! { span { class: "mg-obs", title: "Parent-reported unit state; not guest health or configuration attestation",
+                                span { class: "chip-dot", style: if report.unit_active_state.as_deref() == Some("active") { "background:#60a5fa" } else { "background:#fbbf24" } }
+                                {format!("host-observed · unit {} · {}", report.unit_active_state.as_deref().unwrap_or("unknown"), format_relative_time_from(chrono::Utc::now(), report.observed_at))}
+                            } },
+                            None => rsx! { span { class: "mg-dim", "Loading host observation…" } },
+                            Some(Ok(None)) => rsx! { span { class: "mg-dim", "Runtime unknown · no applicable host observation" } },
+                            Some(Err(error)) => rsx! { p { class: "mg-dim", role: "status", "Host observation unavailable: {error}" }
+                                if let Some(report) = last_observation() { p { class: "mg-dim", "Previously loaded host observation · unit {report.unit_active_state.as_deref().unwrap_or(\"unknown\")} · {report.observed_at.to_rfc3339()}. Current runtime state is not verified." } }
+                                button { class: "btn btn-ghost xs focus-ring", onclick: move |_| observation.restart(), "Retry observation read" }
+                            },
+                        }
+                    }
+                }
+                section { class: "panel-section", h3 { "CVE exposure" }
+                    match evidence.read().as_ref() {
+                        Some(Ok(value)) if crate::components::system::management_mode::last_good_scan(value).is_some() => rsx! {
+                            EvidenceCves {
+                                evidence: value.clone(),
+                                freshness: selected_head_scan_freshness(
+                                    value,
+                                    schedule.read().as_ref().and_then(|r| r.as_ref().ok()),
+                                    chrono::Utc::now(),
+                                ),
+                            }
+                        },
+                        None => rsx! { div { class: "mg-dim", "Loading…" } },
+                        Some(Ok(_)) => rsx! { div { class: "mg-dim", "No sealed CVE findings are available." } },
+                        Some(Err(error)) => rsx! { p { class: "mg-dim", role: "status", "CVE evidence unavailable: {error}" }
+                            if let Some(value) = last_evidence() {
+                                if let Some(scan) = crate::components::system::management_mode::last_good_scan(&value) {
+                                    if let Some(counts) = &scan.cves { p { class: "mg-dim", "Previously loaded scan {scan.scan_id} at revision {scan.revision.sha}: {counts.critical} critical · {counts.high} high · {counts.total} total. The latest read failed; these are retained configuration findings." } }
+                                }
+                            }
+                            button { class: "btn btn-ghost xs focus-ring", onclick: move |_| evidence.restart(), "Retry evidence read" }
+                        },
+                    }
+                }
+            }
+            div { class: "panel-actions",
+                button { class: "btn btn-ghost focus-ring", onclick: move |_| on_open_detail.call(()), "Open full detail" }
+                if can_mutate { button { class: "btn btn-ghost focus-ring", onclick: move |_| on_edit.call(()), "Edit" } }
+                a { class: "btn btn-primary focus-ring", href: "/systems/{id}?tab=cves", Icon { name: IconName::Shield, size: 12 } " View CVEs" }
             }
         }
     }
@@ -1612,23 +2122,48 @@ pub fn export_systems_oscal(systems: &[crate::api::models::SystemSummary]) {
     let mut components = Vec::new();
     for sys in systems {
         let env = sys.environment.as_deref().unwrap_or("unknown").to_string();
-        let health = sys.health_status.label();
-        let deploy = sys.deployment_status.label();
-        let last_seen = sys
-            .last_seen
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_else(|| "never".to_string());
+        let managed = sys.management_mode == ManagementMode::Managed;
+        let health = if managed {
+            sys.health_status.label()
+        } else if sys.management_mode == ManagementMode::Reference {
+            "not-applicable"
+        } else {
+            "unknown"
+        };
+        let deploy = if managed {
+            sys.deployment_status.label()
+        } else if sys.management_mode == ManagementMode::External {
+            "deployed externally"
+        } else {
+            "not deployed"
+        };
+        let last_seen = if !managed {
+            "not-applicable".into()
+        } else {
+            sys.last_seen
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| "never".to_string())
+        };
         let nixos = sys
             .nixos_version
             .as_deref()
             .unwrap_or("unknown")
             .to_string();
         let ip = sys.primary_ip.as_deref().unwrap_or("unknown").to_string();
-        let cve_crit = sys.cve_counts.critical;
-        let cve_high = sys.cve_counts.high;
-        let cve_med = sys.cve_counts.medium;
-        let cve_low = sys.cve_counts.low;
-        let cve_total = sys.cve_counts.total();
+        // Summaries have no configuration assurance. Never export old runtime
+        // counts as a nonmanaged configuration scan result.
+        let count = |value: i64| {
+            if managed {
+                value.to_string()
+            } else {
+                "unknown".into()
+            }
+        };
+        let cve_crit = count(sys.cve_counts.critical);
+        let cve_high = count(sys.cve_counts.high);
+        let cve_med = count(sys.cve_counts.medium);
+        let cve_low = count(sys.cve_counts.low);
+        let cve_total = count(sys.cve_counts.total());
         let policy = &sys.deployment_policy;
         let uuid = sys.id;
 
@@ -1637,8 +2172,9 @@ pub fn export_systems_oscal(systems: &[crate::api::models::SystemSummary]) {
           "uuid": "{uuid}",
           "type": "software",
           "title": "{hostname}",
-          "description": "NixOS system managed by Crystal Forge",
+          "description": "NixOS registration tracked by Crystal Forge",
           "props": [
+            {{ "name": "management-mode",      "value": "{mode}" }},
             {{ "name": "hostname",             "value": "{hostname}" }},
             {{ "name": "environment",          "value": "{env}" }},
             {{ "name": "ip-address",           "value": "{ip}" }},
@@ -1657,6 +2193,7 @@ pub fn export_systems_oscal(systems: &[crate::api::models::SystemSummary]) {
           "status": {{ "state": "{health}" }}
         }}"#,
             uuid = uuid,
+            mode = sys.management_mode.as_str(),
             hostname = sys.hostname,
             env = env,
             ip = ip,
@@ -1675,8 +2212,15 @@ pub fn export_systems_oscal(systems: &[crate::api::models::SystemSummary]) {
 
     let components_json = components.join(",\n");
     let total = systems.len();
-    let critical_hosts = systems.iter().filter(|s| s.cve_counts.critical > 0).count();
-    let total_crit_cves: i64 = systems.iter().map(|s| s.cve_counts.critical).sum();
+    let critical_hosts = systems
+        .iter()
+        .filter(|s| s.management_mode == ManagementMode::Managed && s.cve_counts.critical > 0)
+        .count();
+    let total_crit_cves: i64 = systems
+        .iter()
+        .filter(|s| s.management_mode == ManagementMode::Managed)
+        .map(|s| s.cve_counts.critical)
+        .sum();
 
     let json = format!(
         r#"{{
@@ -1686,7 +2230,7 @@ pub fn export_systems_oscal(systems: &[crate::api::models::SystemSummary]) {
     "last-modified": "{iso_now}",
     "version": "1.0",
     "oscal-version": "1.1.2",
-    "remarks": "Automated system inventory exported from Crystal Forge fleet management. Contains {total} managed NixOS systems. {critical_hosts} host(s) with critical CVEs ({total_crit_cves} critical CVEs total)."
+    "remarks": "Contains {total} registrations across all management modes. {critical_hosts} managed host(s) with critical runtime CVEs ({total_crit_cves} critical runtime CVEs total). Configuration scan counts are not included."
   }},
   "system-security-plan": {{
     "uuid": "cf-export-{ts}",

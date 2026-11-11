@@ -4,7 +4,8 @@ use dioxus::prelude::*;
 
 use crate::api::models::FleetHealthSummary;
 
-/// Fleet health rollup: big healthy count, stacked usage bar, and 4 stat tiles.
+/// Renders server-authoritative active managed health and its denominator.
+/// External/reference registrations are excluded by the server, not inferred here.
 #[component]
 pub fn FleetHealthBreakdown(
     health: FleetHealthSummary,
@@ -49,7 +50,7 @@ pub fn FleetHealthBreakdown(
                 }
                 span {
                     style: "font-size:14px; color: var(--cf-text-muted);",
-                    "of {total} healthy"
+                    "of {total} active managed healthy"
                 }
             }
 

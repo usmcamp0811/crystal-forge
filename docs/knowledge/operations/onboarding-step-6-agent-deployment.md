@@ -20,7 +20,13 @@ sources:
 
 # Step 6: Deploy Agent
 
-The **Crystal Forge Agent** runs on each managed NixOS system as `root`. It reports system state, receives deployment targets, and activates them. Without the agent running, Crystal Forge cannot monitor or deploy to the system.
+The **Crystal Forge Agent** runs on each managed NixOS system as `root`. It
+reports system state, receives deployment targets, and activates them. Without
+the agent, Crystal Forge cannot directly observe managed runtime state or deploy
+to that machine. External/reference configuration assurance needs no agent;
+skip this enrollment step for those modes. An external guest can have separate
+parent-reported unit evidence, which is not guest health or attestation. See
+[management modes](../concepts/management-modes-and-configuration-assurance.md).
 
 ## Before you start
 

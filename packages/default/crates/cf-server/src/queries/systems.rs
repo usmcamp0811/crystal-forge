@@ -21,7 +21,7 @@ const RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL: &str = r#"
 SELECT d.store_path AS store_path
 FROM systems s
 JOIN commits c ON c.flake_id = s.flake_id
-JOIN derivations d ON d.commit_id = c.id
+JOIN view_derivation_execution_evidence d ON d.commit_id = c.id
 WHERE s.id = $1
   AND LOWER(c.git_commit_hash) = LOWER($2)
   AND c.source_archived = false
@@ -35,7 +35,7 @@ WHERE s.id = $1
   AND EXISTS (
       SELECT 1
       FROM cache_push_jobs cpj
-      WHERE cpj.derivation_id = d.id
+       WHERE cpj.derivation_id = d.execution_derivation_id
         AND cpj.status = 'completed'
         AND cpj.store_path = d.store_path
   )
@@ -51,32 +51,32 @@ SELECT
     EXISTS (
         SELECT 1
         FROM cache_push_jobs cpj
-        WHERE cpj.derivation_id = d.id
+        WHERE cpj.derivation_id = d.execution_derivation_id
           AND cpj.status = 'completed'
           AND cpj.store_path = d.store_path
     ) AS has_completed_cache_push,
     EXISTS (
         SELECT 1
         FROM cache_push_jobs cpj
-        WHERE cpj.derivation_id = d.id
+        WHERE cpj.derivation_id = d.execution_derivation_id
           AND cpj.status IN ('pending', 'in_progress')
     ) AS has_active_cache_push,
     EXISTS (
         SELECT 1
         FROM cache_push_jobs cpj
-        WHERE cpj.derivation_id = d.id
+        WHERE cpj.derivation_id = d.execution_derivation_id
           AND cpj.status = 'failed'
           AND cpj.attempts >= 5
     ) AS has_permanent_cache_failure,
     EXISTS (
         SELECT 1
         FROM build_jobs bj
-        WHERE bj.derivation_id = d.id
+        WHERE bj.derivation_id = d.execution_derivation_id
           AND bj.status IN ('queued', 'building', 'cancelling')
     ) AS has_active_build_job
 FROM systems s
 JOIN commits c ON c.flake_id = s.flake_id
-JOIN derivations d ON d.commit_id = c.id
+JOIN view_derivation_execution_evidence d ON d.commit_id = c.id
 WHERE s.id = $1
   AND LOWER(c.git_commit_hash) = LOWER($2)
   AND c.source_archived = false
@@ -91,8 +91,9 @@ const DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL: &str = "UPDATE systems
          updated_at = NOW()
      WHERE is_active = TRUE
        AND hostname <> $1
-       AND public_key = $2
-     RETURNING hostname";
+        AND public_key = $2
+        AND id = ANY($3)
+      RETURNING hostname";
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct SystemCommitRow {
@@ -114,6 +115,8 @@ pub struct SystemCommitRow {
 /// server-issued deployment identity, then a unique legacy derivation mapping.
 /// Every tier fails closed for an empty store path, an explicit generation/store
 /// mismatch, a non-full commit SHA, or ambiguous identity.
+/// A reused configuration certificate records requested source, not runtime Git.
+/// Such a certificate or request cannot label the observation with its revision.
 ///
 /// # Errors
 ///
@@ -140,7 +143,7 @@ pub async fn resolve_observational_current_revision(
           JOIN LATERAL (
             SELECT state.generation, state.store_path,
                    state.generation_matches_current_store_path, state.timestamp, state.id
-            FROM system_states state
+            FROM view_agent_current_system_states state
             WHERE state.hostname = target.hostname
             ORDER BY state.timestamp DESC, state.id DESC
             LIMIT 1
@@ -163,7 +166,9 @@ pub async fn resolve_observational_current_revision(
             ON derivation.id = retained.derivation_id
            AND derivation.commit_id = retained.commit_id
            AND BTRIM(derivation.derivation_name) = target.configuration_name
-           AND derivation.derivation_type = 'nixos'
+            AND derivation.derivation_type = 'nixos'
+            AND derivation.reused_from_derivation_id IS NULL
+            AND derivation.reused_build_job_id IS NULL
            AND COALESCE(derivation.store_path, derivation.expected_store_path) = observed.store_path
           JOIN commits commit
             ON commit.id = retained.commit_id
@@ -198,7 +203,9 @@ pub async fn resolve_observational_current_revision(
           JOIN derivations derivation
             ON derivation.id = deployment.requested_derivation_id
            AND derivation.commit_id = deployment.requested_commit_id
-           AND derivation.derivation_type = 'nixos'
+            AND derivation.derivation_type = 'nixos'
+            AND derivation.reused_from_derivation_id IS NULL
+            AND derivation.reused_build_job_id IS NULL
            AND derivation.derivation_name = target.configuration_name
            AND COALESCE(derivation.store_path, derivation.expected_store_path) = observed.store_path
         ),
@@ -209,7 +216,9 @@ pub async fn resolve_observational_current_revision(
           HAVING COUNT(*) = 1
         ),
         legacy_candidates AS (
-          SELECT DISTINCT commit.id, commit.git_commit_hash
+          SELECT DISTINCT commit.id, commit.git_commit_hash,
+                 (derivation.reused_from_derivation_id IS NULL
+                  AND derivation.reused_build_job_id IS NULL) AS unaliased_source
           FROM system_target target
           JOIN observation observed
             ON observed.store_path IS NOT NULL
@@ -227,7 +236,7 @@ pub async fn resolve_observational_current_revision(
         legacy AS (
           SELECT MIN(git_commit_hash) AS revision
           FROM legacy_candidates
-          HAVING COUNT(*) = 1
+          HAVING COUNT(*) = 1 AND BOOL_AND(unaliased_source)
         )
         SELECT COALESCE(
           (SELECT revision FROM retained),
@@ -278,13 +287,91 @@ pub async fn update_hostname(pool: &PgPool, system: &System, new_hostname: &str)
     Ok(())
 }
 
-pub async fn update_public_key(pool: &PgPool, system_id: Uuid, new_public_key: &str) -> Result<()> {
-    sqlx::query("UPDATE systems SET public_key = $1, updated_at = NOW() WHERE id = $2")
-        .bind(new_public_key)
-        .bind(system_id)
-        .execute(pool)
-        .await?;
-    Ok(())
+/// Rotates the agent key of an active managed registration.
+///
+/// Returns `true` when the key was replaced and `false` when the registration is
+/// not an active managed system, in which case nothing changes.
+///
+/// CONCURRENCY: Holds the system-row lock across the revoked-key lookup and
+/// update. Mode conversion takes the same lock before recording revocation.
+/// A conversion cannot revoke a key between this lookup and the write, even
+/// if the registration leaves managed mode and returns with a fresh key.
+///
+/// # Errors
+/// Returns database errors or [`REVOKED_AGENT_KEY_MESSAGE`] when the key was
+/// revoked for this registration. Neither error commits a key change.
+pub async fn update_public_key(
+    pool: &PgPool,
+    system_id: Uuid,
+    new_public_key: &str,
+) -> Result<bool> {
+    update_public_key_guarded(pool, system_id, new_public_key, None).await
+}
+
+/// Rotates a key only if the registration still belongs to the environment
+/// against which the caller authorized this mutation. `None` binds an
+/// unscoped registration, rather than acting as a wildcard.
+///
+/// The environment check, revoked-key check and write share the system-row
+/// lock. Returns false without a write if the environment changed or the
+/// registration is not active and managed. Callers still own RBAC validation.
+///
+/// # Errors
+/// Returns database errors or [`REVOKED_AGENT_KEY_MESSAGE`] for a revoked key.
+///
+/// # Examples
+/// ```no_run
+/// # async fn rotate(pool: &sqlx::PgPool, id: uuid::Uuid,
+/// #     authorized_environment: Option<uuid::Uuid>, key: &str) -> anyhow::Result<()> {
+/// let changed = crystal_forge::queries::systems::update_public_key_for_environment(
+///     pool, id, key, authorized_environment,
+/// ).await?;
+/// // A concurrent move returns false; re-read and reauthorize before retrying.
+/// # let _ = changed;
+/// # Ok(()) }
+/// ```
+pub async fn update_public_key_for_environment(
+    pool: &PgPool,
+    system_id: Uuid,
+    new_public_key: &str,
+    expected_environment: Option<Uuid>,
+) -> Result<bool> {
+    update_public_key_guarded(pool, system_id, new_public_key, Some(expected_environment)).await
+}
+
+async fn update_public_key_guarded(
+    pool: &PgPool,
+    system_id: Uuid,
+    new_public_key: &str,
+    expected_environment: Option<Option<Uuid>>,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let registration: Option<(bool, Option<Uuid>)> = sqlx::query_as(
+        "SELECT management_mode = 'managed' AND is_active, environment_id
+         FROM systems WHERE id=$1 FOR UPDATE",
+    )
+    .bind(system_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((true, environment)) = registration else {
+        return Ok(false);
+    };
+    if expected_environment.is_some_and(|expected| expected != environment) {
+        return Ok(false);
+    }
+    if agent_key_was_revoked_tx(&mut tx, system_id, new_public_key).await? {
+        anyhow::bail!("{REVOKED_AGENT_KEY_MESSAGE}");
+    }
+    let updated = sqlx::query(
+        "UPDATE systems SET public_key = $1, updated_at = NOW()
+         WHERE id = $2 AND management_mode = 'managed' AND is_active",
+    )
+    .bind(new_public_key)
+    .bind(system_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(updated.rows_affected() == 1)
 }
 
 /// How an update should treat the `fqdn` column.
@@ -454,6 +541,10 @@ where
     Ok(())
 }
 
+/// Returns a registration, including nonmanaged resources with no agent key.
+///
+/// # Errors
+/// Returns an error for database failures or invalid stored field values.
 pub async fn get_by_hostname(pool: &PgPool, hostname: &str) -> Result<Option<System>> {
     let system = sqlx::query_as::<_, System>("SELECT * FROM systems WHERE hostname = $1")
         .bind(hostname)
@@ -483,9 +574,11 @@ const INSERT_SYSTEM_SQL: &str = r#"
         updated_at,
         desired_target,
         desired_target_set_at,
-        deployment_policy
+        deployment_policy,
+        management_mode,
+        parent_host_id
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8, CASE WHEN $8::text IS NULL THEN NULL ELSE NOW() END, $9)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8, CASE WHEN $8::text IS NULL THEN NULL ELSE NOW() END, $9, $10, $11)
     ON CONFLICT (hostname) DO UPDATE SET
         environment_id = EXCLUDED.environment_id,
         is_active = EXCLUDED.is_active,
@@ -502,22 +595,60 @@ const INSERT_SYSTEM_SQL: &str = r#"
         END,
         deployment_policy = EXCLUDED.deployment_policy,
         updated_at = NOW()
+    WHERE systems.management_mode = 'managed'
+      AND EXCLUDED.management_mode = 'managed'
+      AND (systems.agent_enrolled_at IS NULL OR systems.public_key = EXCLUDED.public_key)
     RETURNING *
     "#;
 
+/// Signals that reconciliation rejected a mode or enrollment authority conflict.
+///
+/// Returned through [`anyhow::Error`] by [`insert_system`] only when its final
+/// SQL authority predicate rejects the update. Callers can downcast this error
+/// to distinguish authority conflicts from validation or database failures.
+/// Mode changes and enrolled key changes require a separate authorized path.
+#[derive(Debug)]
+pub struct SystemReconciliationModeConflict;
+
+impl std::fmt::Display for SystemReconciliationModeConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("System reconciliation conflicts with management mode or enrollment authority")
+    }
+}
+
+impl std::error::Error for SystemReconciliationModeConflict {}
+
+/// Inserts a registration or reconciles an existing managed registration.
+///
+/// Mode transitions and updates to nonmanaged registrations require a separate
+/// authorized path. The conflict predicate checks the locked database row so
+/// config reconciliation cannot race a conversion and restore agent authority.
+/// Once enrolled, the persisted canonical key must match the incoming typed key.
+/// Before enrollment, legacy declarative key reconciliation remains permitted.
+/// Reconciliation preserves operator tags, notes, address, and reachability.
+///
+/// # Errors
+/// Returns [`SystemReconciliationModeConflict`] through [`anyhow::Error`] for a
+/// mode or enrollment authority conflict. Invalid storage invariants and database
+/// failures propagate as separate errors.
 pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
+    // SECURITY: Check persisted authority under the upsert row lock. An early
+    // read alone cannot prevent stale config from undoing fresh enrollment.
     let inserted = sqlx::query_as::<_, System>(INSERT_SYSTEM_SQL)
         .bind(&system.hostname)
         .bind(system.environment_id)
         .bind(system.is_active)
-        .bind(&system.public_key.to_base64())
+        .bind(&system.public_key)
         .bind(system.flake_id)
         .bind(&system.derivation)
         .bind(&system.system_configuration_name)
         .bind(&system.desired_target)
         .bind(&system.deployment_policy)
-        .fetch_one(pool)
-        .await?;
+        .bind(system.management_mode)
+        .bind(system.parent_host_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or(SystemReconciliationModeConflict)?;
     Ok(inserted)
 }
 
@@ -599,7 +730,8 @@ pub async fn get_agent_desired_target_by_hostname(
     hostname: &str,
 ) -> Result<Option<String>> {
     let row = sqlx::query_as::<_, AgentDesiredTargetRow>(
-        "SELECT id, deployment_policy, desired_target, desired_target_set_at FROM systems WHERE hostname = $1",
+        "SELECT id, deployment_policy, desired_target, desired_target_set_at FROM systems
+         WHERE hostname = $1 AND management_mode='managed' AND is_active",
     )
     .bind(hostname)
     .fetch_optional(pool)
@@ -817,6 +949,8 @@ pub async fn list_configuration_names_for_flake(
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct SystemAccessRow {
+    /// Identifies deployment authority for early API rejection.
+    pub management_mode: crate::models::systems::ManagementMode,
     pub id: Uuid,
     pub hostname: String,
     pub environment_id: Option<Uuid>,
@@ -829,7 +963,7 @@ pub struct SystemAccessRow {
 
 pub async fn list_system_access_rows(pool: &PgPool) -> Result<Vec<SystemAccessRow>> {
     let rows = sqlx::query_as::<_, SystemAccessRow>(
-        "SELECT s.id,
+        "SELECT s.id, s.management_mode,
                 s.hostname,
                 s.environment_id,
                 e.name AS environment,
@@ -850,7 +984,7 @@ pub async fn find_system_access_row(
     system_id: Uuid,
 ) -> Result<Option<SystemAccessRow>> {
     let row = sqlx::query_as::<_, SystemAccessRow>(
-        "SELECT s.id,
+        "SELECT s.id, s.management_mode,
                 s.hostname,
                 s.environment_id,
                 e.name AS environment,
@@ -976,9 +1110,11 @@ pub async fn reserve_explicit_deployment_request(
         commit_sha: String,
         request_action: String,
         deployment_id: Option<Uuid>,
+        state: String,
     }
 
     let mut tx = pool.begin().await?;
+    lock_deployment_authority_tx(&mut tx, system_id).await?;
     let inserted = sqlx::query(
         "INSERT INTO deployment_request_reservations (
              system_id, request_id, requested_commit_id, request_action
@@ -1001,7 +1137,7 @@ pub async fn reserve_explicit_deployment_request(
 
     let reservation = sqlx::query_as::<_, ReservationRow>(
         "SELECT reservation.system_id, commit.git_commit_hash AS commit_sha,
-                reservation.request_action, reservation.deployment_id
+                reservation.request_action, reservation.deployment_id, reservation.state
          FROM deployment_request_reservations reservation
          JOIN commits commit ON commit.id = reservation.requested_commit_id
          WHERE reservation.request_id = $1
@@ -1011,6 +1147,10 @@ pub async fn reserve_explicit_deployment_request(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| anyhow::anyhow!("deployment target is not active for this system"))?;
+    anyhow::ensure!(
+        reservation.state != "invalidated",
+        "Deployment request was invalidated by authority revocation; use a new request ID"
+    );
 
     if reservation.system_id != system_id
         || reservation.commit_sha != target
@@ -1041,21 +1181,24 @@ pub async fn update_explicit_deployment_request_state(
     state: &str,
     deployment_id: Option<Uuid>,
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    lock_deployment_authority_tx(&mut tx, system_id).await?;
     let result = sqlx::query(
         "UPDATE deployment_request_reservations
          SET state = $3, deployment_id = COALESCE($4, deployment_id), updated_at = NOW()
-         WHERE system_id = $1 AND request_id = $2",
+         WHERE system_id = $1 AND request_id = $2 AND state <> 'invalidated'",
     )
     .bind(system_id)
     .bind(request_id)
     .bind(state)
     .bind(deployment_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
     anyhow::ensure!(
         result.rows_affected() == 1,
         "deployment request reservation does not exist"
     );
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1101,7 +1244,8 @@ pub async fn convert_auto_latest_system_to_manual_for_request(
 ) -> Result<ManualPolicyConversion> {
     let mut tx = pool.begin().await?;
     let policy = sqlx::query_scalar::<_, String>(
-        "SELECT deployment_policy FROM systems WHERE id = $1 FOR UPDATE",
+        "SELECT deployment_policy FROM systems WHERE id = $1
+         AND management_mode='managed' AND is_active FOR UPDATE",
     )
     .bind(system_id)
     .fetch_optional(&mut *tx)
@@ -1126,7 +1270,7 @@ pub async fn convert_auto_latest_system_to_manual_for_request(
         let updated = sqlx::query(
             "UPDATE deployment_request_reservations
              SET state = 'conversion_persisted', updated_at = NOW()
-             WHERE system_id = $1 AND request_id = $2",
+              WHERE system_id = $1 AND request_id = $2 AND state <> 'invalidated'",
         )
         .bind(system_id)
         .bind(request_id)
@@ -1232,7 +1376,8 @@ pub async fn queue_manual_deployment_atomic(
     // Finalization holds the same first lock while publishing and binding.
     lock_snapshot_writer_tx(&mut tx).await?;
     let policy = sqlx::query_scalar::<_, String>(
-        "SELECT deployment_policy FROM systems WHERE id = $1 FOR UPDATE",
+        "SELECT deployment_policy FROM systems WHERE id = $1
+         AND management_mode='managed' AND is_active FOR UPDATE",
     )
     .bind(system_id)
     .fetch_one(&mut *tx)
@@ -1241,6 +1386,7 @@ pub async fn queue_manual_deployment_atomic(
         policy == expected_policy,
         "deployment policy changed while the request was being planned"
     );
+    reject_invalidated_request_tx(&mut tx, system_id, Some(request_identity)).await?;
     #[derive(sqlx::FromRow)]
     struct ExistingRequest {
         id: Uuid,
@@ -1419,6 +1565,45 @@ pub async fn queue_manual_deployment_atomic(
     })
 }
 
+// SECURITY: Every deployment writer must check authority under the row lock
+// before replaying durable results or creating any deployment side effect.
+async fn lock_deployment_authority_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    system_id: Uuid,
+) -> Result<()> {
+    let authority = sqlx::query_as::<_, (crate::models::systems::ManagementMode, bool)>(
+        "SELECT management_mode, is_active FROM systems WHERE id=$1 FOR UPDATE",
+    )
+    .bind(system_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    anyhow::ensure!(
+        authority.0.permits_deployment() && authority.1,
+        "Deployment requires an active managed system"
+    );
+    Ok(())
+}
+
+async fn reject_invalidated_request_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    system_id: Uuid,
+    identity: Option<&str>,
+) -> Result<()> {
+    let invalidated = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM deployment_request_reservations
+         WHERE system_id=$1 AND ('explicit:' || request_id::text)=$2 AND state='invalidated')",
+    )
+    .bind(system_id)
+    .bind(identity)
+    .fetch_one(&mut **tx)
+    .await?;
+    anyhow::ensure!(
+        !invalidated,
+        "Deployment request was invalidated by authority revocation; use a new request ID"
+    );
+    Ok(())
+}
+
 async fn set_resolved_system_deployment_target_with_source(
     pool: &PgPool,
     system_id: Uuid,
@@ -1434,10 +1619,8 @@ async fn set_resolved_system_deployment_target_with_source(
     // reciprocal artifact/deployment row as absent. The row lock then serializes
     // retries because the schema has no partial unique constraint.
     lock_snapshot_writer_tx(&mut tx).await?;
-    sqlx::query_scalar::<_, Uuid>("SELECT id FROM systems WHERE id = $1 FOR UPDATE")
-        .bind(system_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    lock_deployment_authority_tx(&mut tx, system_id).await?;
+    reject_invalidated_request_tx(&mut tx, system_id, request_identity).await?;
 
     let existing_id = sqlx::query_scalar::<_, Uuid>(
         "SELECT id
@@ -1546,26 +1729,87 @@ pub async fn deactivate_system(pool: &PgPool, system_id: Uuid) -> Result<()> {
     Ok(())
 }
 
-/// Deactivate any *other* active systems that share the same public key.
+/// Deactivates other active systems sharing the current signer's public key.
 ///
 /// This is a safety hotfix for hostname-renamed/re-joined agents where the same
 /// agent keypair ends up attached to multiple active system rows, which can
 /// cause stale duplicate hosts to remain critical/offline in health views.
 ///
-/// Returns the list of hostnames that were deactivated.
+/// The caller must hold snapshot-writer and derivation locks, but no POA&M
+/// finding or system-row locks. Sorted POA&M lock levels for the requesting
+/// system and duplicates precede the enrollment recheck and row updates.
+/// A savepoint contains cleanup errors so ingestion can remain
+/// best-effort. Success commits only with the caller's observation transaction.
+///
+/// # Errors
+/// Returns an error without deactivating registrations when the signer was
+/// renamed, revoked or re-enrolled, or when locking or persistence fails.
 pub async fn deactivate_duplicate_active_systems_by_public_key(
-    pool: &PgPool,
-    current_hostname: &str,
-    public_key_base64: &str,
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    verified: &System,
 ) -> Result<Vec<String>> {
-    let deactivated_hostnames =
-        sqlx::query_scalar::<_, String>(DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL)
-            .bind(current_hostname)
-            .bind(public_key_base64)
-            .fetch_all(pool)
+    use sqlx::Acquire;
+    let mut cleanup = tx.begin().await?;
+    let result = async {
+        let key = verified.public_key.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Agent enrollment has no key"))?.to_base64();
+        let duplicates: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM systems WHERE is_active AND hostname<>$1 AND public_key=$2 ORDER BY id",
+        )
+        .bind(&verified.hostname).bind(&key).fetch_all(&mut *cleanup).await?;
+        let system_ids = duplicates.iter().copied().chain([verified.id]).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+        // CONCURRENCY: Lock each level for the complete set before descending
+        // to the next level. Calling the single-system helper repeatedly would
+        // acquire a duplicate's canonical CVE key after another system sentinel.
+        sqlx::query(
+            "SELECT lock_poam_cve_key(key.canonical_cve_id) FROM (
+                SELECT canonical_cve_id FROM poam_cve_findings WHERE system_id=ANY($1)
+                UNION
+                SELECT disposition.canonical_cve_id FROM systems system
+                JOIN cve_environment_dispositions disposition ON disposition.environment_id=system.environment_id
+                  AND disposition.state='scheduled' AND disposition.retired_at IS NULL
+                WHERE system.id=ANY($1) ORDER BY canonical_cve_id
+             ) key",
+        ).bind(&system_ids).execute(&mut *cleanup).await?;
+        for id in &system_ids {
+            crate::services::composite_enforcement::lock_poam_system_key_tx(&mut cleanup, *id).await?;
+        }
+        sqlx::query(
+            "SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id) FROM (
+                SELECT system_id,policy_lineage_id FROM poam_findings WHERE system_id=ANY($1)
+                ORDER BY system_id,policy_lineage_id
+             ) key",
+        ).bind(&system_ids).execute(&mut *cleanup).await?;
+        sqlx::query(
+            "SELECT lock_poam_cve_finding_key(key.system_id,key.canonical_cve_id,key.canonical_package_name) FROM (
+                SELECT system_id,canonical_cve_id,canonical_package_name FROM poam_cve_findings WHERE system_id=ANY($1)
+                ORDER BY system_id,canonical_cve_id,canonical_package_name
+             ) key",
+        ).bind(&system_ids).execute(&mut *cleanup).await?;
+        sqlx::query("SELECT id FROM systems WHERE id=ANY($1) ORDER BY id FOR UPDATE")
+            .bind(&system_ids)
+            .execute(&mut *cleanup)
             .await?;
-
-    Ok(deactivated_hostnames)
+        // SECURITY: This lock also binds hostname to UUID. Reusing an old name
+        // for a new registration cannot redirect an authenticated request.
+        anyhow::ensure!(
+            crate::queries::system_states::lock_agent_enrollment_tx(&mut cleanup, verified).await?.is_some(),
+            "Agent enrollment was revoked before duplicate cleanup"
+        );
+        let deactivated = sqlx::query_scalar::<_, String>(DEACTIVATE_DUPLICATE_ACTIVE_SYSTEMS_SQL)
+            .bind(&verified.hostname).bind(&key).bind(&duplicates).fetch_all(&mut *cleanup).await?;
+        Ok(deactivated)
+    }.await;
+    match result {
+        Ok(deactivated) => {
+            cleanup.commit().await?;
+            Ok(deactivated)
+        }
+        Err(error) => {
+            cleanup.rollback().await?;
+            Err(error)
+        }
+    }
 }
 
 pub async fn list_recent_commits_for_system(
@@ -1784,10 +2028,24 @@ pub async fn resolve_system_deployment_target(
                 WHERE d.store_path = $1
                   AND d.derivation_type = 'nixos'
                   AND (d.cf_agent_enabled IS FALSE OR d.policy_requirements_met IS FALSE)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM systems subject
+                      JOIN commits binding_commit ON binding_commit.flake_id=subject.flake_id
+                      JOIN view_derivation_execution_evidence binding ON binding.commit_id=binding_commit.id
+                      JOIN evaluation_snapshot_selections selection ON selection.commit_id=binding.commit_id
+                        AND selection.configuration_name=binding.derivation_name
+                      WHERE subject.id=$2 AND binding.id<>d.id
+                        AND binding.derivation_name=COALESCE(NULLIF(BTRIM(subject.system_configuration_name),''),subject.hostname)
+                        AND derivations_share_evidence_scope(binding.id,d.id)
+                        AND binding.store_path=$1 AND binding.cf_agent_enabled IS TRUE
+                        AND binding.policy_requirements_met IS TRUE AND binding.error_message IS NULL
+                        AND evaluation_deployment_artifact_matches(selection.current_snapshot_id,binding.id,true)
+                  )
             )
             "#,
         )
         .bind(target)
+        .bind(system_id)
         .fetch_one(pool)
         .await?;
 
@@ -1948,6 +2206,16 @@ pub async fn get_user_environment_membership_ids(
 /// Row type for view_system_detail
 #[derive(Debug, sqlx::FromRow)]
 pub struct SystemDetailRow {
+    /// Declared pin SHA for a managed `pinned` registration; not a target.
+    pub pinned_commit: Option<String>,
+    /// Contains operator labels joined from the registration, not runtime views.
+    pub tags: Vec<String>,
+    /// Contains optional operator notes; excluded from audit payloads.
+    pub description: Option<String>,
+    /// Reports persisted deployment authority, not inferred runtime state.
+    pub management_mode: crate::models::systems::ManagementMode,
+    /// Identifies the associated managed host for external resources.
+    pub parent_host_id: Option<Uuid>,
     pub id: Uuid,
     pub hostname: String,
     pub fqdn: Option<String>,
@@ -2023,7 +2291,8 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     let row = sqlx::query_as::<_, SystemDetailRow>(
-        "SELECT vsd.*, s.public_key
+        "SELECT vsd.*, s.public_key, s.management_mode, s.parent_host_id, s.tags, s.description,
+                (SELECT c.git_commit_hash FROM commits c WHERE c.id = s.pinned_commit_id) AS pinned_commit
          FROM view_system_detail vsd
          JOIN systems s ON s.id = vsd.id
          WHERE vsd.id = $1",
@@ -2037,6 +2306,14 @@ where
 /// Row type for view_system_list
 #[derive(Debug, sqlx::FromRow)]
 pub struct SystemListRow {
+    /// Contains operator labels for display, search, and filtering.
+    pub tags: Vec<String>,
+    /// Contains optional operator notes.
+    pub description: Option<String>,
+    /// Reports persisted deployment authority.
+    pub management_mode: crate::models::systems::ManagementMode,
+    /// Identifies the associated managed host for external resources.
+    pub parent_host_id: Option<Uuid>,
     pub id: Uuid,
     pub hostname: String,
     pub system_configuration_name: Option<String>,
@@ -2061,7 +2338,7 @@ pub struct SystemListRow {
 /// Fetch all active systems from view_system_list
 pub async fn list_systems_from_view(pool: &PgPool) -> Result<Vec<SystemListRow>> {
     let rows = sqlx::query_as::<_, SystemListRow>(
-        "SELECT vsl.*, s.flake_id, s.system_configuration_name
+        "SELECT vsl.*, s.flake_id, s.system_configuration_name, s.management_mode, s.parent_host_id, s.tags, s.description
          FROM view_system_list vsl
          JOIN systems s ON s.id = vsl.id
          ORDER BY vsl.hostname",
@@ -2074,6 +2351,10 @@ pub async fn list_systems_from_view(pool: &PgPool) -> Result<Vec<SystemListRow>>
 /// Filter options for systems list (used at query layer).
 #[derive(Debug, Clone, Default)]
 pub struct SystemsListFilter {
+    /// Matches one exact case-sensitive operator label before pagination.
+    pub tag: Option<String>,
+    /// Restricts deployment authority before pagination and counting.
+    pub management_mode: Option<crate::models::systems::ManagementMode>,
     pub search: Option<String>,
     pub environment: Option<String>,
 }
@@ -2127,18 +2408,13 @@ pub async fn list_systems_scoped(
     sort: &SystemsSort,
     pagination: &Pagination,
 ) -> Result<(Vec<SystemListRow>, i64)> {
-    // First get the total count
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM view_system_list")
-        .fetch_one(pool)
-        .await?;
-
     // Build the base query
     let order_by = match sort.field {
         SystemsSortField::Hostname => {
             if sort.descending {
-                "hostname DESC"
+                "vsl.hostname DESC, vsl.id"
             } else {
-                "hostname ASC"
+                "vsl.hostname ASC, vsl.id"
             }
         }
     };
@@ -2162,89 +2438,47 @@ pub async fn list_systems_scoped(
         }
     });
 
-    // Build patterns for binding (clone to avoid borrow issues)
-    let search_bind = search_pattern.clone();
-    let env_bind = env_pattern.clone();
-
-    // Execute query based on filter combinations
-    let rows = match (&search_pattern, &env_pattern, is_admin, environment_ids.is_empty()) {
-        // No filters - simple case
-        (None, None, _, _) => {
-            sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT vsl.*, s.flake_id, s.system_configuration_name
-                 FROM view_system_list vsl
-                 JOIN systems s ON s.id = vsl.id
-                 ORDER BY {} OFFSET $1 LIMIT $2",
-                order_by
-            ))
-            .bind(pagination.offset as i32)
-            .bind(pagination.limit as i32)
-            .fetch_all(pool)
-            .await?
-        }
-        // Only search filter
-        (Some(_), None, _, _) => {
-            sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT vsl.*, s.flake_id, s.system_configuration_name
-                 FROM view_system_list vsl
-                 JOIN systems s ON s.id = vsl.id
-                 WHERE vsl.hostname ILIKE $1 ORDER BY {} OFFSET $2 LIMIT $3",
-                order_by
-            ))
-            .bind(search_bind.as_deref().unwrap())
-            .bind(pagination.offset as i32)
-            .bind(pagination.limit as i32)
-            .fetch_all(pool)
-            .await?
-        }
-        // Only environment filter
-        (None, Some(_), _, _) => {
-            sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT vsl.*, s.flake_id, s.system_configuration_name
-                 FROM view_system_list vsl
-                 JOIN systems s ON s.id = vsl.id
-                 WHERE vsl.environment ILIKE $1 ORDER BY {} OFFSET $2 LIMIT $3",
-                order_by
-            ))
-            .bind(env_bind.as_deref().unwrap())
-            .bind(pagination.offset as i32)
-            .bind(pagination.limit as i32)
-            .fetch_all(pool)
-            .await?
-        }
-        // Both search and environment filters
-        (Some(_), Some(_), _, _) => {
-            sqlx::query_as::<_, SystemListRow>(&format!(
-                "SELECT vsl.*, s.flake_id, s.system_configuration_name
-                 FROM view_system_list vsl
-                 JOIN systems s ON s.id = vsl.id
-                 WHERE vsl.hostname ILIKE $1 AND vsl.environment ILIKE $2 ORDER BY {} OFFSET $3 LIMIT $4",
-                order_by
-            ))
-            .bind(search_bind.as_deref().unwrap())
-            .bind(env_bind.as_deref().unwrap())
-            .bind(pagination.offset as i32)
-            .bind(pagination.limit as i32)
-            .fetch_all(pool)
-            .await?
-        }
-    };
-
-    // For non-admin users, filter by environment membership in memory
-    // (This is a simplified approach - in production you'd want to push this to the DB)
-    let filtered_rows = if is_admin || environment_ids.is_empty() {
-        rows
-    } else {
-        rows.into_iter()
-            .filter(|_row| {
-                // Keep rows where environment_id is in the allowed list
-                // Note: SystemListRow may not have environment_id, so we need to check differently
-                true // Simplified - actual filtering would require joining environment info
-            })
-            .collect()
-    };
-
-    Ok((filtered_rows, total))
+    // SECURITY: Empty membership is an empty scope, never administrator access.
+    // Use identical predicates for the page and its pre-pagination total.
+    let scope = "FROM view_system_list vsl JOIN systems s ON s.id=vsl.id
+        WHERE ($1 OR s.environment_id=ANY($2))
+          AND ($3::text IS NULL OR vsl.hostname ILIKE $3 OR s.fqdn ILIKE $3
+               OR s.system_configuration_name ILIKE $3
+               OR EXISTS (SELECT 1 FROM unnest(s.tags) tag WHERE tag ILIKE $3))
+          AND ($4::text IS NULL OR vsl.environment ILIKE $4)
+          AND ($5::text IS NULL OR s.management_mode=$5)
+          AND ($6::text IS NULL OR $6=ANY(s.tags))";
+    let mode = filter.management_mode.map(|mode| mode.as_str());
+    let tag = filter
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty());
+    let total = sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) {scope}"))
+        .bind(is_admin)
+        .bind(environment_ids)
+        .bind(&search_pattern)
+        .bind(&env_pattern)
+        .bind(mode)
+        .bind(tag)
+        .fetch_one(pool)
+        .await?;
+    let rows = sqlx::query_as::<_, SystemListRow>(&format!(
+        "SELECT vsl.*, s.flake_id, s.system_configuration_name,
+                s.management_mode, s.parent_host_id, s.tags, s.description {scope}
+         ORDER BY {order_by} OFFSET $7 LIMIT $8"
+    ))
+    .bind(is_admin)
+    .bind(environment_ids)
+    .bind(&search_pattern)
+    .bind(&env_pattern)
+    .bind(mode)
+    .bind(tag)
+    .bind(i64::from(pagination.offset))
+    .bind(i64::from(pagination.limit))
+    .fetch_all(pool)
+    .await?;
+    Ok((rows, total))
 }
 
 /// Get environment ID by name.
@@ -2254,6 +2488,218 @@ pub async fn get_environment_id_by_name(pool: &PgPool, name: &str) -> Result<Opt
         .fetch_optional(pool)
         .await?;
     Ok(id)
+}
+
+/// Revalidates mutation authority while holding the actor's role and scope rows.
+/// Callers lock environment scope before calling this function.
+/// # Errors
+/// Returns an error for inactive actors, insufficient roles or inaccessible scope.
+pub async fn authorize_system_write_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    user_id: Uuid,
+    environments: &[Option<Uuid>],
+) -> Result<()> {
+    use crate::models::auth_identity::AuthRole;
+    let active = sqlx::query_scalar::<_, bool>("SELECT is_active FROM users WHERE id=$1 FOR SHARE")
+        .bind(user_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    let roles = sqlx::query_scalar::<_, AuthRole>(
+        "SELECT role FROM user_role_assignments WHERE user_id=$1 ORDER BY role FOR SHARE",
+    )
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let memberships = sqlx::query_scalar::<_, Uuid>(
+        "SELECT environment_id FROM user_environment_memberships WHERE user_id=$1 ORDER BY environment_id FOR SHARE")
+        .bind(user_id)
+        .fetch_all(&mut **tx)
+        .await?;
+    anyhow::ensure!(
+        active == Some(true)
+            && (roles.contains(&AuthRole::Admin)
+                || (roles.contains(&AuthRole::Operator)
+                    && environments
+                        .iter()
+                        .all(|id| id.is_some_and(|id| memberships.contains(&id))))),
+        "System environment is not authorized"
+    );
+    Ok(())
+}
+
+/// Validates an external association under the caller's environment write lock.
+///
+/// The environment lock serializes host moves and mode changes with association
+/// edits. A cross-environment parent is rejected without acquiring its row lock.
+/// # Errors
+/// Returns an error for self, nonmanaged, inactive or cross-environment parents.
+pub async fn validate_parent_host_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    system_id: Uuid,
+    mode: crate::models::systems::ManagementMode,
+    parent: Option<Uuid>,
+    environment: Option<Uuid>,
+) -> Result<()> {
+    let Some(parent) = parent else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        mode == crate::models::systems::ManagementMode::External
+            && parent != system_id
+            && environment.is_some(),
+        "Invalid parent host association"
+    );
+    let valid = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM systems WHERE id=$1 AND environment_id=$2
+           AND management_mode='managed' AND is_active FOR SHARE",
+    )
+    .bind(parent)
+    .bind(environment)
+    .fetch_optional(&mut **tx)
+    .await?;
+    anyhow::ensure!(
+        valid.is_some(),
+        "Parent host must be active, managed and in the same environment"
+    );
+    Ok(())
+}
+
+/// Writes credential-free system metadata audit within the owning transaction.
+/// # Errors
+/// Returns an error when the audit cannot be persisted; callers must roll back.
+pub async fn audit_system_metadata_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    actor: Uuid,
+    system_id: Uuid,
+    action: &str,
+    metadata: serde_json::Value,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO admin_audit_events
+        (actor_user_id, actor_identifier, action, target, metadata)
+        SELECT id, email, $2, $3, $4 FROM users WHERE id=$1",
+    )
+    .bind(actor)
+    .bind(action)
+    .bind(system_id.to_string())
+    .bind(metadata)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Error text for an enrollment that presents a key revoked for the system.
+pub const REVOKED_AGENT_KEY_MESSAGE: &str =
+    "This agent key was revoked when the system left managed mode; enroll a new key";
+
+/// Returns true when `key` equals a key that a transition out of managed mode
+/// revoked for `system_id`.
+///
+/// Keys compare in canonical base64 form, because conversion stores the
+/// normalized key and rotation stores the trimmed input. A recorded key that no
+/// longer parses compares by its trimmed text.
+///
+/// # Errors
+/// Returns database errors.
+pub async fn agent_key_was_revoked_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    system_id: Uuid,
+    key: &str,
+) -> Result<bool> {
+    use crate::models::public_key::PublicKey;
+    let canonical = |value: &str| {
+        PublicKey::from_base64(value.trim(), "")
+            .map(|k| k.to_base64())
+            .ok()
+    };
+    let candidate = canonical(key).unwrap_or_else(|| key.trim().to_owned());
+    let revoked: Vec<String> =
+        sqlx::query_scalar("SELECT public_key FROM system_revoked_agent_keys WHERE system_id = $1")
+            .bind(system_id)
+            .fetch_all(&mut **tx)
+            .await?;
+    Ok(revoked
+        .iter()
+        .any(|entry| canonical(entry).unwrap_or_else(|| entry.trim().to_owned()) == candidate))
+}
+
+/// Changes authority under the metadata writer's existing system-row lock.
+///
+/// Callers must validate enrollment, parent and policy before calling. Revocation
+/// supersedes pending instructions and tombstones reservations in the same
+/// transaction as key/target removal. Historical scans and events are retained.
+/// This function never queues deployment work. It cancels queued builds that the
+/// new authority makes unclaimable and keeps completed build and scan history.
+///
+/// SECURITY: Leaving managed records the revoked key in
+/// `system_revoked_agent_keys` before the key is cleared, in this transaction.
+/// A `new_key` that was revoked for this system is refused, so a conversion back
+/// into managed cannot restore the revoked agent identity.
+/// # Errors
+/// Returns persistence errors, or an error when `new_key` was revoked for this
+/// system; callers must roll back the metadata transaction.
+pub async fn update_management_authority_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    system_id: Uuid,
+    mode: crate::models::systems::ManagementMode,
+    parent: Option<Uuid>,
+    new_key: Option<&str>,
+) -> Result<()> {
+    if let Some(key) = new_key
+        && agent_key_was_revoked_tx(tx, system_id, key).await?
+    {
+        anyhow::bail!("{REVOKED_AGENT_KEY_MESSAGE}");
+    }
+    if !mode.permits_deployment() {
+        sqlx::query(
+            "INSERT INTO system_revoked_agent_keys (system_id, public_key)
+             SELECT id, BTRIM(public_key) FROM systems
+             WHERE id = $1 AND management_mode = 'managed' AND public_key IS NOT NULL
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(system_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE systems SET management_mode=$2, parent_host_id=$3,
+        public_key=CASE WHEN $2='managed' THEN COALESCE($4,public_key) ELSE NULL END,
+        desired_target=CASE WHEN $2='managed' THEN desired_target ELSE NULL END,
+        desired_derivation_id=CASE WHEN $2='managed' THEN desired_derivation_id ELSE NULL END,
+        desired_target_set_at=CASE WHEN $2='managed' THEN desired_target_set_at ELSE NULL END,
+        updated_at=NOW() WHERE id=$1",
+    )
+    .bind(system_id)
+    .bind(mode)
+    .bind(parent)
+    .bind(new_key)
+    .execute(&mut **tx)
+    .await?;
+    if !mode.permits_deployment() {
+        sqlx::query(
+            "UPDATE pending_system_deployments SET status='superseded', completed_at=NOW()
+            WHERE system_id=$1 AND status='pending'",
+        )
+        .bind(system_id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            "UPDATE deployment_request_reservations SET state='invalidated', updated_at=NOW()
+            WHERE system_id=$1 AND state <> 'invalidated'",
+        )
+        .bind(system_id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query("DELETE FROM composite_legacy_desired_targets WHERE system_id=$1")
+            .bind(system_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    // A queued agentless build stays admitted only while an external or
+    // reference registration names it. Cancel it in this transaction when this
+    // change removes that registration's qualification.
+    crate::queries::build_jobs::retire_unclaimable_queued_jobs_tx(tx).await?;
+    Ok(())
 }
 
 /// Get environment IDs by names.
@@ -2274,10 +2720,12 @@ pub async fn get_environment_ids_by_names(pool: &PgPool, names: &[String]) -> Re
 
 /// Get flake ID by name.
 pub async fn get_flake_id_by_name(pool: &PgPool, name: &str) -> Result<Option<i32>> {
-    let id = sqlx::query_scalar::<_, i32>("SELECT id FROM flakes WHERE name = $1")
-        .bind(name)
-        .fetch_optional(pool)
-        .await?;
+    let id = sqlx::query_scalar::<_, i32>(
+        "SELECT id FROM flakes WHERE name = $1 AND deleted_at IS NULL",
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await?;
     Ok(id)
 }
 
@@ -2294,6 +2742,632 @@ mod tests {
     use sqlx::Executor;
     use uuid::Uuid;
 
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database and database creation privileges"]
+    async fn duplicate_cleanup_rechecks_enrollment_and_rolls_back_with_observation(pool: PgPool) {
+        let (_, old_key) = crate::test_utils::crypto::test_public_key_base64();
+        let new_key =
+            PublicKey::from_verifying_key(SigningKey::from_bytes(&[87; 32]).verifying_key())
+                .to_base64();
+        for transition in ["rotation", "reference", "reenrollment"] {
+            let hostname = format!("cleanup-{transition}");
+            sqlx::query("INSERT INTO systems(hostname,public_key,derivation) VALUES($1,$2,'')")
+                .bind(&hostname)
+                .bind(&old_key)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let verified = get_by_hostname(&pool, &hostname).await.unwrap().unwrap();
+            if transition == "rotation" {
+                update_public_key(&pool, verified.id, &new_key)
+                    .await
+                    .unwrap();
+            } else {
+                sqlx::query(
+                    "UPDATE systems SET management_mode='reference',public_key=NULL WHERE id=$1",
+                )
+                .bind(verified.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+                if transition == "reenrollment" {
+                    // Same-key re-enrollment must still fence the old request.
+                    sqlx::query(
+                        "UPDATE systems SET management_mode='managed',public_key=$2 WHERE id=$1",
+                    )
+                    .bind(verified.id)
+                    .bind(&old_key)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                }
+            }
+            let duplicate = format!("duplicate-{transition}");
+            sqlx::query("INSERT INTO systems(hostname,public_key,derivation) VALUES($1,$2,'')")
+                .bind(&duplicate)
+                .bind(&old_key)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            lock_snapshot_writer_tx(&mut tx).await.unwrap();
+            assert!(
+                deactivate_duplicate_active_systems_by_public_key(&mut tx, &verified)
+                    .await
+                    .is_err()
+            );
+            // Savepoint rollback leaves the observation transaction usable.
+            let active: bool =
+                sqlx::query_scalar("SELECT is_active FROM systems WHERE hostname=$1")
+                    .bind(&duplicate)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            assert!(active);
+            tx.commit().await.unwrap();
+        }
+        let verified = get_by_hostname(&pool, "duplicate-rotation")
+            .await
+            .unwrap()
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        lock_snapshot_writer_tx(&mut tx).await.unwrap();
+        let deactivated = deactivate_duplicate_active_systems_by_public_key(&mut tx, &verified)
+            .await
+            .unwrap();
+        assert!(deactivated.contains(&"duplicate-reference".into()));
+        tx.rollback().await.unwrap();
+        assert!(
+            get_by_hostname(&pool, "duplicate-reference")
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active,
+            "a failed observation must roll back duplicate deactivation"
+        );
+        let mut tx = pool.begin().await.unwrap();
+        lock_snapshot_writer_tx(&mut tx).await.unwrap();
+        sqlx::query("CREATE FUNCTION reject_test_duplicate_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture cleanup write failure'; END; $$")
+            .execute(&mut *tx).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_test_duplicate_cleanup BEFORE UPDATE OF is_active ON systems FOR EACH ROW WHEN (NEW.hostname='duplicate-reference' AND NOT NEW.is_active) EXECUTE FUNCTION reject_test_duplicate_cleanup()")
+            .execute(&mut *tx).await.unwrap();
+        assert!(
+            deactivate_duplicate_active_systems_by_public_key(&mut tx, &verified)
+                .await
+                .is_err()
+        );
+        let active: bool = sqlx::query_scalar(
+            "SELECT bool_and(is_active) FROM systems WHERE hostname LIKE 'duplicate-%'",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        assert!(
+            active,
+            "a cleanup SQL error must roll back every deactivation and leave ingestion usable"
+        );
+        tx.rollback().await.unwrap();
+    }
+
+    /// Key rotation applies only to an active managed registration. The mode check
+    /// shares the statement with the write, so a conversion cannot be overwritten.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB; never use the preview database"]
+    async fn key_rotation_applies_only_to_an_active_managed_registration(pool: PgPool) {
+        let (_, old_key) = crate::test_utils::crypto::test_public_key_base64();
+        let new_key =
+            PublicKey::from_verifying_key(SigningKey::from_bytes(&[91; 32]).verifying_key())
+                .to_base64();
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems(hostname,public_key,derivation) VALUES('rotating',$1,'') RETURNING id",
+        )
+        .bind(&old_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let stored = |pool: PgPool| async move {
+            sqlx::query_scalar::<_, Option<String>>("SELECT public_key FROM systems WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+
+        assert!(update_public_key(&pool, id, &new_key).await.unwrap());
+        assert_eq!(
+            stored(pool.clone()).await.as_deref(),
+            Some(new_key.as_str())
+        );
+
+        // A converted registration holds no key and receives none.
+        sqlx::query("UPDATE systems SET management_mode='reference',public_key=NULL WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!update_public_key(&pool, id, &old_key).await.unwrap());
+        assert_eq!(stored(pool.clone()).await, None);
+
+        // Re-enrolled with a new key, a rotation that arrives later still applies,
+        // but an inactive registration is left alone.
+        sqlx::query("UPDATE systems SET management_mode='managed',public_key=$2 WHERE id=$1")
+            .bind(id)
+            .bind(&old_key)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE systems SET is_active=false WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!update_public_key(&pool, id, &new_key).await.unwrap());
+        assert_eq!(
+            stored(pool.clone()).await.as_deref(),
+            Some(old_key.as_str())
+        );
+        assert!(
+            !update_public_key(&pool, Uuid::new_v4(), &new_key)
+                .await
+                .unwrap(),
+            "an unknown system is not rotated"
+        );
+    }
+
+    /// Reports are keyed by hostname text, so a registration that takes over a
+    /// used hostname must not inherit that hostname's earlier reports as current
+    /// evidence. Covers registration and rename (migration 0327).
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB; never use the preview database"]
+    async fn registration_and_rename_start_a_new_observation_boundary(pool: PgPool) {
+        async fn current(pool: &PgPool, hostname: &str) -> i64 {
+            sqlx::query_scalar(
+                "SELECT count(*) FROM view_agent_current_system_states WHERE hostname=$1",
+            )
+            .bind(hostname)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        }
+        async fn report(pool: &PgPool, hostname: &str, age: &str) {
+            sqlx::query(
+                "INSERT INTO system_states(hostname,change_reason,store_path,generation,
+                    generation_matches_current_store_path,timestamp)
+                 VALUES($1,'startup',$2,3,true,now()-$3::interval)",
+            )
+            .bind(hostname)
+            .bind(format!("/nix/store/{}-{hostname}", "a".repeat(32)))
+            .bind(age)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        async fn boundary(pool: &PgPool, id: Uuid) -> Option<chrono::DateTime<chrono::Utc>> {
+            sqlx::query_scalar("SELECT agent_enrolled_at FROM systems WHERE id=$1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+
+        // A hostname with history but no registration, as after a removal.
+        report(&pool, "reused-host", "1 hour").await;
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems(hostname,public_key,derivation) VALUES('reused-host','fixture-key','') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let registered = boundary(&pool, id).await;
+        assert!(
+            registered.is_some(),
+            "a managed registration owns a boundary"
+        );
+        assert_eq!(
+            current(&pool, "reused-host").await,
+            0,
+            "the earlier registration's report is history, not current evidence"
+        );
+        // A report stored after the registration is current.
+        report(&pool, "reused-host", "0 seconds").await;
+        assert_eq!(current(&pool, "reused-host").await, 1);
+
+        // Metadata edits and key changes keep the boundary.
+        sqlx::query(
+            "UPDATE systems SET description='edited',public_key='fixture-key-2' WHERE id=$1",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(boundary(&pool, id).await, registered);
+        // Callers cannot move it.
+        sqlx::query("UPDATE systems SET agent_enrolled_at=now()-interval '1 day' WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(boundary(&pool, id).await, registered);
+
+        // A rename onto a name with history starts a new boundary.
+        report(&pool, "taken-name", "2 hours").await;
+        sqlx::query("UPDATE systems SET hostname='taken-name' WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(boundary(&pool, id).await > registered);
+        assert_eq!(
+            current(&pool, "taken-name").await,
+            0,
+            "history under the new name belongs to its earlier user"
+        );
+
+        // A hostname with no report has no history to exclude, so its first
+        // report is current without a boundary. A rename onto such a name keeps
+        // the boundary the registration already had.
+        let fresh: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems(hostname,public_key,derivation) VALUES('fresh-host','fixture-key','') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(boundary(&pool, fresh).await, None);
+        let before_rename = boundary(&pool, id).await;
+        sqlx::query("UPDATE systems SET hostname='unused-name' WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(boundary(&pool, id).await, before_rename);
+
+        // Nonmanaged registrations hold no boundary.
+        let reference: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems(hostname,management_mode,derivation) VALUES('golden','reference','') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(boundary(&pool, reference).await, None);
+    }
+
+    /// A rotation waiting behind conversion must recheck revocation after the
+    /// conversion commits. Observe the actual PostgreSQL lock wait rather than
+    /// assuming a spawned task has reached the write.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn management_mode_rotation_waiting_on_conversion_cannot_restore_revoked_key(
+        pool: PgPool,
+    ) {
+        use crate::models::systems::ManagementMode;
+        let system = make_test_system(&pool, "rotation-conversion-race").await;
+        let old_key = system.public_key.as_ref().unwrap().to_base64();
+        let mut conversion = pool.begin().await.unwrap();
+        let owner: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *conversion)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM systems WHERE id=$1 FOR UPDATE")
+            .bind(system.id)
+            .execute(&mut *conversion)
+            .await
+            .unwrap();
+        update_management_authority_tx(
+            &mut conversion,
+            system.id,
+            ManagementMode::Reference,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let fresh_key = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(
+                ed25519_dalek::SigningKey::from_bytes(&[78; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            )
+        };
+        update_management_authority_tx(
+            &mut conversion,
+            system.id,
+            ManagementMode::Managed,
+            None,
+            Some(&fresh_key),
+        )
+        .await
+        .unwrap();
+        let rotation_pool = pool.clone();
+        let rotation =
+            tokio::spawn(
+                async move { update_public_key(&rotation_pool, system.id, &old_key).await },
+            );
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                     WHERE $1 = ANY(pg_blocking_pids(pid))
+                       AND query LIKE '%management_mode = ''managed'' AND is_active%')",
+                )
+                .bind(owner)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if blocked {
+                    break;
+                }
+                assert!(
+                    !rotation.is_finished(),
+                    "rotation must wait for the system-row lock"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rotation must reach the row lock");
+        conversion.commit().await.unwrap();
+        let error = rotation.await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), REVOKED_AGENT_KEY_MESSAGE);
+        let stored: String = sqlx::query_scalar("SELECT public_key FROM systems WHERE id=$1")
+            .bind(system.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, fresh_key);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB; never use the preview database"]
+    async fn management_mode_revocation_blocks_replay_and_cleans_pending_atomically(pool: PgPool) {
+        use crate::models::systems::ManagementMode;
+        let system = make_test_system(&pool, "revocation-host").await;
+        let flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes(name,repo_url) VALUES('revocation','https://example.test/revocation') RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        let sha = "a".repeat(40);
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits(flake_id,git_commit_hash,commit_timestamp) VALUES($1,$2,NOW()) RETURNING id")
+            .bind(flake_id).bind(&sha).fetch_one(&pool).await.unwrap();
+        sqlx::query(
+            "UPDATE systems SET flake_id=$2, desired_target=$3,
+            desired_target_set_at=NOW(), deployment_policy='auto_latest' WHERE id=$1",
+        )
+        .bind(system.id)
+        .bind(flake_id)
+        .bind("/nix/store/revocation-system")
+        .execute(&pool)
+        .await
+        .unwrap();
+        let request_id = Uuid::new_v4();
+        reserve_explicit_deployment_request(&pool, system.id, request_id, &sha, "deploy")
+            .await
+            .unwrap();
+        let identity = format!("explicit:{request_id}");
+        let pending: Uuid = sqlx::query_scalar(
+            "INSERT INTO pending_system_deployments(system_id,target_store_path,
+             requested_commit_id,request_identity,request_action)
+             VALUES($1,'/nix/store/revocation-system',$2,$3,'deploy') RETURNING id",
+        )
+        .bind(system.id)
+        .bind(commit_id)
+        .bind(&identity)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO composite_legacy_desired_targets(system_id,target_store_path)
+            VALUES($1,'/nix/store/revocation-system') ON CONFLICT DO NOTHING",
+        )
+        .bind(system.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        lock_deployment_authority_tx(&mut tx, system.id)
+            .await
+            .unwrap();
+        update_management_authority_tx(&mut tx, system.id, ManagementMode::External, None, None)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT status FROM pending_system_deployments WHERE id=$1"
+            )
+            .bind(pending)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            "pending"
+        );
+
+        let mut tx = pool.begin().await.unwrap();
+        lock_deployment_authority_tx(&mut tx, system.id)
+            .await
+            .unwrap();
+        update_management_authority_tx(&mut tx, system.id, ManagementMode::External, None, None)
+            .await
+            .unwrap();
+        let replay_pool = pool.clone();
+        let replay_sha = sha.clone();
+        let replay_identity = identity.clone();
+        let waiting_replay = tokio::spawn(async move {
+            queue_manual_deployment_atomic(
+                &replay_pool,
+                system.id,
+                &replay_sha,
+                "manual_deploy",
+                &replay_identity,
+                "deploy",
+                "auto_latest",
+            )
+            .await
+        });
+        tx.commit().await.unwrap();
+        assert!(waiting_replay.await.unwrap().is_err());
+        let revoked: (
+            Option<String>,
+            Option<String>,
+            Option<i32>,
+            Option<DateTime<Utc>>,
+        ) = sqlx::query_as(
+            "SELECT public_key,desired_target,desired_derivation_id,desired_target_set_at
+                FROM systems WHERE id=$1",
+        )
+        .bind(system.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(revoked, (None, None, None, None));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT status FROM pending_system_deployments WHERE id=$1"
+            )
+            .bind(pending)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            "superseded"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT state FROM deployment_request_reservations WHERE request_id=$1"
+            )
+            .bind(request_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            "invalidated"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM composite_legacy_desired_targets WHERE system_id=$1"
+            )
+            .bind(system.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0
+        );
+        assert!(
+            convert_auto_latest_system_to_manual_for_request(&pool, system.id, Some(request_id))
+                .await
+                .is_err()
+        );
+        assert!(
+            reserve_explicit_deployment_request(&pool, system.id, Uuid::new_v4(), &sha, "deploy")
+                .await
+                .is_err()
+        );
+        assert!(
+            set_resolved_system_deployment_target_with_source(
+                &pool,
+                system.id,
+                "/nix/store/revocation-system",
+                "bypass",
+                None,
+                Some(&identity)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            get_agent_desired_target_by_hostname(&pool, &system.hostname)
+                .await
+                .unwrap(),
+            None
+        );
+        // Re-enrollment cannot revive an earlier authority's request identity.
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM systems WHERE id=$1 FOR UPDATE")
+            .bind(system.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE systems SET deployment_policy='manual' WHERE id=$1")
+            .bind(system.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        // The revoked identity cannot re-enroll: the old key is refused, in
+        // canonical and in whitespace-padded form, and nothing changes.
+        let old_key = system.public_key.as_ref().unwrap().to_base64();
+        let revoked: Vec<String> = sqlx::query_scalar(
+            "SELECT public_key FROM system_revoked_agent_keys WHERE system_id=$1",
+        )
+        .bind(system.id)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        assert_eq!(revoked.len(), 1, "leaving managed records the revoked key");
+        for presented in [old_key.clone(), format!("  {old_key}\n")] {
+            assert!(
+                agent_key_was_revoked_tx(&mut tx, system.id, &presented)
+                    .await
+                    .unwrap()
+            );
+        }
+        let refused = update_management_authority_tx(
+            &mut tx,
+            system.id,
+            ManagementMode::Managed,
+            None,
+            Some(&old_key),
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.to_string().contains("revoked"), "{refused}");
+        tx.rollback().await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE systems SET deployment_policy='manual' WHERE id=$1")
+            .bind(system.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let fresh_key = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(
+                ed25519_dalek::SigningKey::from_bytes(&[77_u8; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            )
+        };
+        assert!(
+            !agent_key_was_revoked_tx(&mut tx, system.id, &fresh_key)
+                .await
+                .unwrap()
+        );
+        update_management_authority_tx(
+            &mut tx,
+            system.id,
+            ManagementMode::Managed,
+            None,
+            Some(&fresh_key),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        assert!(
+            reserve_explicit_deployment_request(&pool, system.id, request_id, &sha, "deploy")
+                .await
+                .is_err()
+        );
+        assert!(
+            queue_manual_deployment_atomic(
+                &pool,
+                system.id,
+                &sha,
+                "manual_deploy",
+                &identity,
+                "deploy",
+                "manual"
+            )
+            .await
+            .is_err()
+        );
+    }
+
     async fn make_test_system(pool: &PgPool, hostname: &str) -> System {
         let key = SigningKey::from_bytes(&[42u8; 32]);
         let public_key = PublicKey::from_verifying_key(key.verifying_key());
@@ -2303,7 +3377,10 @@ mod tests {
             hostname: hostname.to_string(),
             environment_id: None,
             is_active: true,
-            public_key,
+            management_mode: crate::models::systems::ManagementMode::Managed,
+            agent_enrolled_at: None,
+            public_key: Some(public_key),
+            parent_host_id: None,
             flake_id: None,
             derivation: String::new(),
             system_configuration_name: None,
@@ -3643,16 +4720,15 @@ mod tests {
         ]
         .concat();
 
-        // Every *detail* field must still come from the view. The single
-        // additional column is systems.public_key, which the view does not
-        // expose and which is only used to derive the read-only agent key
-        // fingerprint (TASK-435) — never to recompute a projected field.
+        // Runtime detail fields, including generation, come from the view.
+        // Enrollment and management metadata are joined from the registration;
+        // these columns must not independently derive runtime observations.
         assert!(
             source.contains(
-                "SELECT vsd.*, s.public_key\n         FROM view_system_detail vsd\n         JOIN systems s ON s.id = vsd.id"
+                "SELECT vsd.*, s.public_key, s.management_mode, s.parent_host_id, s.tags, s.description,\n                (SELECT c.git_commit_hash FROM commits c WHERE c.id = s.pinned_commit_id) AS pinned_commit\n         FROM view_system_detail vsd\n         JOIN systems s ON s.id = vsd.id"
             ),
             "system detail query should source all detail fields from view_system_detail, \
-             joining systems only for the public key"
+              joining systems only for enrollment and management metadata"
         );
         assert!(
             !source.contains(&legacy_regex_expr),
