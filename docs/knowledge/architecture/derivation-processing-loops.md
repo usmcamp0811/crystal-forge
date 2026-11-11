@@ -121,11 +121,9 @@ pipeline.
 - **Interval:** `vulnix.poll_interval` (default 60 seconds).
 - **Action:** stale-scan recovery, prerequisite reconciliation, operator-queued
   scans, post-build scans, and periodic rescans, governed by the persisted scan
-  schedule policy. Builders that opt in with
-  `services.crystal-forge.build.cve_scanning_enabled = true` can also claim
-  scans through `/api/v1/builders/:id/cve-scans/claim`, so a scan runs either
-  on the server or on a builder. The option defaults to `false`; with the
-  default, only the server runs scans.
+  schedule policy. Builders can also claim scans through
+  `/api/v1/builders/:id/cve-scans/claim`, so a scan runs either on the server
+  or on a builder.
 
 ### Deployment policy manager
 

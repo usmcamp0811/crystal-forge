@@ -91,7 +91,7 @@ flowchart LR
     Built["Build completes and publishes"] --> Sched["Server scan scheduling<br/>(scan schedule policy)"]
     Sched --> Where{"Who runs the scan?"}
     Where -->|"server-local vulnix executor<br/>when enabled and vulnix is available"| Local["Server scan loop"]
-    Where -->|"opted-in builder claims a leased scan<br/>through the API"| Remote["Builder-side scan"]
+    Where -->|"builder claims a leased scan<br/>through the API"| Remote["Builder-side scan"]
     Local --> Store["Scan results and exact evidence"]
     Remote -->|"request: submit results"| Store
     Store --> DB[("PostgreSQL")]
@@ -100,9 +100,7 @@ flowchart LR
 
 The server's scan loop always recovers expired remote scan leases and
 reconciles scan prerequisites. It runs vulnix itself only when the local
-executor is enabled and vulnix is available. Builder-side scanning is opt-in
-through `services.crystal-forge.build.cve_scanning_enabled`, which defaults to
-`false`. See
+executor is enabled and vulnix is available. See
 [Exact-CVE evidence authority](../cves/exact-cve-evidence-authority-and-inventory-reads.md).
 
 ## 4. Drift detection
