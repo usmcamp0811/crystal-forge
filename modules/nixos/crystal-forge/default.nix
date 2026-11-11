@@ -1261,14 +1261,17 @@ in {
 
       cve_scanning_enabled = lib.mkOption {
         type = lib.types.bool;
-        default = true;
+        default = false;
         description = lib.mdDoc ''
           Advertise structured CVE scan support from the existing Crystal Forge
           builder service.
 
-          The option defaults to `true` when `build.enable` starts the builder.
-          Set it to `false` to keep build execution enabled while making the
-          builder ineligible for CVE scan leases. Scans use one fixed concurrent
+          Builder CVE scanning is opt-in. The option defaults to `false`, so the
+          builder runs builds but is ineligible for CVE scan leases. Scans then
+          run only in the server-local vulnix executor, when that executor is
+          enabled. Set the option to `true` to let this builder claim CVE scan
+          leases, including the scan of its own build output directly after a
+          build. Scans use one fixed concurrent
           slot. A post-build scan and cache push can run concurrently, but the
           builder does not claim another build until both outcomes settle. Scan
           failure does not change a successful build outcome.

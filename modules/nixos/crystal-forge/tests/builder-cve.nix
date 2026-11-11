@@ -25,7 +25,7 @@
       ];
     };
   defaults = evaluated null;
-  optedOut = evaluated false;
+  optedIn = evaluated true;
   evaluatedStrategies = remoteExecutionStrategy: supportedExecutionStrategies:
     inputs.nixpkgs.lib.nixosSystem {
       inherit system;
@@ -59,16 +59,17 @@
     ["source_re_evaluate_verified"]);
 in
   # Evaluate after the flake package namespace exists; no build is needed.
-  assert defaults.config.services.crystal-forge.build.cve_scanning_enabled;
-  assert !optedOut.config.services.crystal-forge.build.cve_scanning_enabled;
+  # Builder CVE scanning is opt-in: the default advertises no scanner.
+  assert !defaults.config.services.crystal-forge.build.cve_scanning_enabled;
+  assert optedIn.config.services.crystal-forge.build.cve_scanning_enabled;
   assert compatibleStrategies.assertion;
   assert !incompatibleStrategies.assertion;
   assert defaults.config.systemd.services.crystal-forge-builder != {};
-  assert optedOut.config.systemd.services.crystal-forge-builder != {};
+  assert optedIn.config.systemd.services.crystal-forge-builder != {};
   assert defaults.config.systemd.services.crystal-forge-builder.environment
-    .CRYSTAL_FORGE__BUILDER__CVE_SCANNING_ENABLED == "true";
-  assert optedOut.config.systemd.services.crystal-forge-builder.environment
     .CRYSTAL_FORGE__BUILDER__CVE_SCANNING_ENABLED == "false";
+  assert optedIn.config.systemd.services.crystal-forge-builder.environment
+    .CRYSTAL_FORGE__BUILDER__CVE_SCANNING_ENABLED == "true";
   assert lib.elem pkgs.vulnix
     defaults.config.systemd.services.crystal-forge-builder.path;
   true
