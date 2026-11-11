@@ -14,16 +14,27 @@ function cveGroupClick(sel, list, e) {
 }
 function cveGroupSelN(sel, list) { return sel ? list.filter(c => sel.has(c.id)).length : 0; }
 
+function MultiSeg({ value, onChange, options, allLabel }) {
+  const toggle = (v) => onChange(value.includes(v) ? value.filter((x) => x !== v) : [...value, v]);
+  return (
+    <div className="seg" role="group">
+      <button className={value.length === 0 ? "active" : ""} onClick={() => onChange([])}>{allLabel}</button>
+      {options.map((o) => { const on = value.includes(o.v); return <button key={o.v} aria-pressed={on} className={"ms-opt" + (on ? " ms-on" : "")} data-k={o.v} onClick={() => toggle(o.v)}>{on && <Icon name="check" size={11} />}{o.l}</button>; })}
+    </div>
+  );
+}
+
 function CvesView({ onOpenSystem, focus, onClearFocus }) {
   const [query, setQuery] = React.useState("");
-  const [sevFilter, setSevFilter] = React.useState("all");
-  const [fixFilter, setFixFilter] = React.useState("all");
-  const [acceptFilter, setAcceptFilter] = React.useState("all");
+  const [sevFilter, setSevFilter] = React.useState([]);
+  const [fixFilter, setFixFilter] = React.useState([]);
+  const [acceptFilter, setAcceptFilter] = React.useState([]);
   const [pkgFilter, setPkgFilter] = React.useState("all");
   const [sort, setSort] = React.useState("severity");
   const [groupMode, setGroupModeState] = React.useState(() => { try { return localStorage.getItem("cf.cves.group") || "package"; } catch { return "package"; } }); // 'package' | 'env' | 'system' | 'flat'
   const setGroupMode = (m) => { setGroupModeState(m); try { localStorage.setItem("cf.cves.group", m); } catch {} };
-  const [envFilter, setEnvFilter] = React.useState("all");
+  const [envList, setEnvList] = React.useState([]);
+  const envFilter = envList.length === 1 ? envList[0] : "all";
   const [expandedPkg, setExpandedPkg] = React.useState(null);
   const [selectedCve, setSelectedCve] = React.useState(null);
   const sel = useMultiSelect();
@@ -42,13 +53,11 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
   const packages = React.useMemo(() => [...new Set(CVES.map((c) => c.pkg))], []);
 
   let filtered = CVES.filter((c) => {
-    if (sevFilter !== "all" && c.severity !== sevFilter) return false;
-    if (fixFilter === "available" && c.fix !== "available") return false;
-    if (fixFilter === "pending" && c.fix !== "pending") return false;
-    if (fixFilter === "exploited" && !c.exploited) return false;
-    if (acceptFilter !== "all" && c.acceptance !== acceptFilter) return false;
+    if (sevFilter.length && !sevFilter.includes(c.severity)) return false;
+    if (fixFilter.length && !fixFilter.some((f) => f === "exploited" ? c.exploited : c.fix === f)) return false;
+    if (acceptFilter.length && !acceptFilter.includes(c.acceptance)) return false;
     if (pkgFilter !== "all" && c.pkg !== pkgFilter) return false;
-    if (envFilter !== "all" && !c.affected.some(id => (SYSTEMS.find(s => s.id === id) || {}).environment === envFilter)) return false;
+    if (envList.length && !c.affected.some(id => envList.includes((SYSTEMS.find(s => s.id === id) || {}).environment))) return false;
     if (query) {
       const q = query.toLowerCase();
       if (!c.id.toLowerCase().includes(q) &&
@@ -81,7 +90,7 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn btn-ghost focus-ring"><Icon name="sync" size={14} /> Rescan fleet</button>
-          <CveExportMenuButton list={filtered} scope={envFilter !== "all" ? envFilter : null} />
+          <CveExportMenuButton list={filtered} scope={envList.length ? envList.join(", ") : null} />
         </div>
       </div>
 
@@ -124,37 +133,9 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
           <Icon name="search" />
           <input className="input focus-ring" placeholder="Search CVE / package / title…" value={query} onChange={(e) => setQuery(e.target.value)} />
         </div>
-        <div className="seg">
-          {[
-          { v: "all", l: "All" },
-          { v: "critical", l: "Critical" },
-          { v: "high", l: "High" },
-          { v: "medium", l: "Medium" },
-          { v: "low", l: "Low" }].
-          map((o) =>
-          <button key={o.v} className={sevFilter === o.v ? "active" : ""} onClick={() => setSevFilter(o.v)}>{o.l}</button>
-          )}
-        </div>
-        <div className="seg">
-          {[
-          { v: "all", l: "Any status" },
-          { v: "available", l: "Has patch" },
-          { v: "pending", l: "No patch" },
-          { v: "exploited", l: "Exploited" }].
-          map((o) =>
-          <button key={o.v} className={fixFilter === o.v ? "active" : ""} onClick={() => setFixFilter(o.v)}>{o.l}</button>
-          )}
-        </div>
-        <div className="seg">
-          {[
-          { v: "all", l: "Any triage" },
-          { v: "outstanding", l: "Outstanding" },
-          { v: "scheduled", l: "Scheduled" },
-          { v: "accepted", l: "Accepted" }].
-          map((o) =>
-          <button key={o.v} className={acceptFilter === o.v ? "active" : ""} onClick={() => setAcceptFilter(o.v)}>{o.l}</button>
-          )}
-        </div>
+        <MultiSeg value={sevFilter} onChange={setSevFilter} allLabel="All" options={[{ v: "critical", l: "Critical" }, { v: "high", l: "High" }, { v: "medium", l: "Medium" }, { v: "low", l: "Low" }]} />
+        <MultiSeg value={fixFilter} onChange={setFixFilter} allLabel="Any status" options={[{ v: "available", l: "Has patch" }, { v: "pending", l: "No patch" }, { v: "exploited", l: "Exploited" }]} />
+        <MultiSeg value={acceptFilter} onChange={setAcceptFilter} allLabel="Any triage" options={[{ v: "outstanding", l: "Outstanding" }, { v: "scheduled", l: "Scheduled" }, { v: "accepted", l: "Accepted" }]} />
         <div style={{ position: "relative", maxWidth: 200 }}>
           <input
             list="cve-pkg-list"
@@ -176,10 +157,7 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
             </button>
           }
         </div>
-        <select className="input filter-select focus-ring" style={{ width: "auto" }} value={envFilter} onChange={(e) => setEnvFilter(e.target.value)}>
-          <option value="all">All environments</option>
-          {ENVIRONMENTS.map((e) => <option key={e.name} value={e.name}>{e.name}</option>)}
-        </select>
+        <MultiFilter label="Environment" allLabel="All environments" value={envList} onChange={setEnvList} options={ENVIRONMENTS.map((e) => ({ value: e.name, label: e.name }))} />
         <span className="filter-count" style={{ marginLeft: "auto", marginRight: 0 }}>Group</span>
         <div className="seg">
           {[
@@ -222,7 +200,7 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
         onSelectCve={setSelectedCve}
         seenNew={seenNew} /> :
       groupMode === "env" || groupMode === "system" ?
-      <CveEnvGroups cves={filtered} nested={groupMode === "system"} envFilter={envFilter}
+      <CveEnvGroups cves={filtered} nested={groupMode === "system"} envFilter={envList}
         onSelectCve={setSelectedCve} onOpenSystem={onOpenSystem} seenNew={seenNew} /> :
 
       <div className="card" style={{ overflow: "hidden" }}>
@@ -260,7 +238,7 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
         <button type="button" className="btn btn-primary xs focus-ring" onClick={() => setBatchOpen(true)}><Icon name="shield" size={12} /> Triage {sel.size} together</button>
       </BulkBar>
       {batchOpen && window.CveBatchTriageModal && selList.length > 0 &&
-      <window.CveBatchTriageModal cves={selList} defaultEnvs={envFilter !== "all" ? [envFilter] : null}
+      <window.CveBatchTriageModal cves={selList} defaultEnvs={envList.length ? envList : null}
         onClose={() => setBatchOpen(false)}
         onSubmit={(out) => {
           selList.forEach(c => { if (out.has(c.id)) cveApplyFleetDispositions(c, out.get(c.id)); });
@@ -425,7 +403,7 @@ function CveEnvGroups({ cves, nested, envFilter, onSelectCve, onOpenSystem, seen
     const m = new Map();
     cves.forEach((c) => c.affected.forEach((id) => {
       const sys = sysById.get(id);
-      if (!sys || (envFilter !== "all" && sys.environment !== envFilter)) return;
+      if (!sys || (envFilter.length && !envFilter.includes(sys.environment))) return;
       if (!m.has(sys.environment)) m.set(sys.environment, { cves: new Set(), hosts: new Map() });
       const e = m.get(sys.environment);
       e.cves.add(c);

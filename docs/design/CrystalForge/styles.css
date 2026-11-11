@@ -4642,3 +4642,8 @@ tr.cve-row-new { background-color: color-mix(in oklab, var(--cf-red) 9%, transpa
 .mf-head button:disabled{color:var(--cf-text-muted);opacity:.5;cursor:default}
 .mf-menu{scrollbar-width:thin;scrollbar-color:var(--cf-card-border) transparent}
 .mf-menu::-webkit-scrollbar{width:8px}.mf-menu::-webkit-scrollbar-thumb{background:var(--cf-card-border);border-radius:8px}
+
+.seg .ms-opt{display:inline-flex;align-items:center;gap:5px}
+.seg .ms-opt.ms-on{--ms:var(--cf-brand-purple);color:var(--ms);background:color-mix(in oklab,var(--ms) 16%,transparent);box-shadow:0 0 0 1px var(--ms) inset;font-weight:600}
+.seg .ms-opt.ms-on[data-k="critical"]{--ms:#f87171}.seg .ms-opt.ms-on[data-k="high"]{--ms:#fbbf24}.seg .ms-opt.ms-on[data-k="medium"]{--ms:#60a5fa}.seg .ms-opt.ms-on[data-k="low"]{--ms:#9ca3af}
+.seg .ms-opt.ms-on[data-k="available"]{--ms:#34d399}.seg .ms-opt.ms-on[data-k="exploited"]{--ms:#f87171}.seg .ms-opt.ms-on[data-k="outstanding"]{--ms:#f87171}.seg .ms-opt.ms-on[data-k="scheduled"]{--ms:#60a5fa}.seg .ms-opt.ms-on[data-k="accepted"]{--ms:#34d399}
