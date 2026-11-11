@@ -360,9 +360,14 @@ function CveBar({ cves }) {
 }
 
 // System card
-function SystemCard({ sys, compact, flash, pendingApproval, onOpen, onDeploy, onEdit }) {
+function GuestToggle({ guests, collapsed, onToggle }) {
+  if (!guests) return null;
+  return <button type="button" className="chip chip-unknown guest-toggle focus-ring" aria-expanded={!collapsed} title={collapsed ? "Show external guests" : "Hide external guests"} onClick={(e) => { e.stopPropagation(); onToggle(); }}><Icon name="chevron-down" size={10} style={{ transform: collapsed ? "rotate(-90deg)" : "none" }} />{guests} guest{guests > 1 ? "s" : ""}</button>;
+}
+
+function SystemCard({ sys, compact, flash, pendingApproval, onOpen, onDeploy, onEdit, guests, collapsed, onToggleGuests, indent }) {
   return (
-    <div className={`sys-card${flash ? " attention-flash" : ""}`} style={compact ? { padding: 12, gap: 8 } : null} onClick={() => onOpen(sys)}>
+    <div className={`sys-card${flash ? " attention-flash" : ""}${indent ? " sys-card-guest" : ""}`} style={compact ? { padding: 12, gap: 8 } : null} onClick={() => onOpen(sys)}>
       <div className="status-rail" style={{ "--status-color": sys.statusColor }} />
       <div className="sys-card-head">
         <div className="sys-title">
@@ -418,6 +423,7 @@ function SystemCard({ sys, compact, flash, pendingApproval, onOpen, onDeploy, on
 
       <div className="sys-card-foot">
         <div className="chips-row">
+          <GuestToggle guests={guests} collapsed={collapsed} onToggle={onToggleGuests} />
           <StatusChip sys={sys} />
           <DeploymentCell sys={sys} />
           {isManagedSys(sys) ? <CveChips cves={sys.cves} compact /> : <EvidenceCves sys={sys} compact />}
@@ -440,14 +446,14 @@ function SystemCard({ sys, compact, flash, pendingApproval, onOpen, onDeploy, on
 }
 
 // Table row
-function SystemRow({ sys, compact, selected, flash, pendingApproval, onOpen, onDeploy, onEdit }) {
+function SystemRow({ sys, compact, selected, flash, pendingApproval, onOpen, onDeploy, onEdit, guests, collapsed, onToggleGuests, indent }) {
   return (
-    <tr className={`${selected ? "selected" : ""}${flash ? " attention-flash" : ""}`} onClick={() => onOpen(sys)}>
+    <tr className={`${selected ? "selected" : ""}${flash ? " attention-flash" : ""}${indent ? " row-guest" : ""}`} onClick={() => onOpen(sys)}>
       <td>
         <div className="sys-host-cell">
           <span className="status-dot" style={{ "--status-color": sys.statusColor }} />
           <div style={{ minWidth: 0 }}>
-            <div className="hostname" style={{ display: "flex", alignItems: "center", gap: 6 }}>{sys.hostname}<MgmtChip sys={sys} /></div>
+            <div className="hostname" style={{ display: "flex", alignItems: "center", gap: 6 }}>{sys.hostname}<MgmtChip sys={sys} /><GuestToggle guests={guests} collapsed={collapsed} onToggle={onToggleGuests} /></div>
             <div className="fqdn truncate">{sys.fqdn}</div>
           </div>
         </div>

@@ -2476,7 +2476,7 @@ async fn list_bundle_systems_for_version_scoped(
             FROM systems s
             JOIN LATERAL (
                 SELECT ss.store_path, ss.generation
-                FROM system_states ss
+                FROM view_agent_current_system_states ss
                 WHERE ss.hostname = s.hostname
                 ORDER BY ss.timestamp DESC, ss.id DESC
                 LIMIT 1
@@ -4287,7 +4287,7 @@ async fn effective_policy_rollups_with_evidence_batch(
         FROM systems s
         JOIN LATERAL (
             SELECT ss.store_path, ss.generation
-            FROM system_states ss
+            FROM view_agent_current_system_states ss
             WHERE ss.hostname = s.hostname
             ORDER BY ss.timestamp DESC, ss.id DESC
             LIMIT 1
@@ -5205,7 +5205,7 @@ async fn assessment_context<'e>(
         FROM systems s
         JOIN LATERAL (
             SELECT ss.store_path, ss.generation
-            FROM system_states ss
+            FROM view_agent_current_system_states ss
             WHERE ss.hostname = s.hostname
             ORDER BY ss.timestamp DESC, ss.id DESC
             LIMIT 1

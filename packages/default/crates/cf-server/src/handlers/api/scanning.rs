@@ -212,6 +212,7 @@ pub async fn get_scanning_scan_records(
                     .rows
                     .into_iter()
                     .map(|row| ScanningScanRecordResponse {
+                        management_modes: row.management_modes,
                         scan_id: row.scan_id,
                         derivation_id: row.derivation_id,
                         hostname: row.hostname,
@@ -321,6 +322,7 @@ fn scan_queue_row_to_response(
     r: crate::queries::scanning::ScanQueueRow,
 ) -> ScanningQueueItemResponse {
     ScanningQueueItemResponse {
+        management_modes: r.management_modes,
         derivation_id: r.derivation_id,
         rescan_eligible: r.rescan_eligible,
         scan_id: r.scan_id, // Option<Uuid>: None for never-scanned deployed configs
@@ -395,6 +397,7 @@ pub async fn get_scanning_systems(
             Json(
                 rows.into_iter()
                     .map(|r| ScanningSystemsItemResponse {
+                        management_mode: r.management_mode,
                         system_id: r.system_id,
                         hostname: r.hostname,
                         flake_name: r.flake_name,
@@ -883,6 +886,42 @@ mod tests {
     #[test]
     fn default_limit_is_fifty() {
         assert_eq!(default_limit(), 50);
+    }
+
+    #[test]
+    fn scan_queue_response_preserves_shared_modes_and_registration_identity() {
+        use crate::models::systems::ManagementMode;
+
+        let response = scan_queue_row_to_response(crate::queries::scanning::ScanQueueRow {
+            management_modes: vec![ManagementMode::External, ManagementMode::Reference],
+            derivation_id: 42,
+            rescan_eligible: true,
+            scan_id: None,
+            hostname: "registered-reference".into(),
+            flake_name: Some("shared-flake".into()),
+            commit_hash: Some("exact-revision".into()),
+            status: "never_scanned".into(),
+            completed_at: None,
+            scheduled_at: None,
+            critical_count: 0,
+            high_count: 0,
+            medium_count: 0,
+            freshness: "archived".into(),
+            is_current: false,
+            is_latest_per_flake: true,
+            source_trigger: None,
+        });
+        let mut json = serde_json::to_value(response).unwrap();
+        assert_eq!(
+            json["management_modes"],
+            serde_json::json!(["external", "reference"])
+        );
+        assert_eq!(json["hostname"], "registered-reference");
+        assert_eq!(json["is_current"], false);
+        assert_eq!(json["derivation_id"], 42);
+        json.as_object_mut().unwrap().remove("management_modes");
+        let legacy: ScanningQueueItemResponse = serde_json::from_value(json).unwrap();
+        assert!(legacy.management_modes.is_empty());
     }
 
     fn record_params() -> ScanningRecordParams {

@@ -10,7 +10,7 @@ tags:
   - environments
   - dashboard
   - admin
-implementation_status: implemented
+implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
   at: 2026-10-04T21:00:00-05:00
@@ -229,6 +229,13 @@ Cache publication has its own record. `cache_push_jobs.status` takes `pending`, 
 
 Environments group systems logically.
 
+Registry and operational counts have different units. Environment `system_count`
+counts every registration, including inactive resources and all management
+modes. `rollup.active_system_count` and its health partition count active managed
+machines only; runtime CVEs use that population. Flake names include active
+registrations in all modes. TASK-508 metric integration proof remains pending;
+see [management modes](../concepts/management-modes-and-configuration-assurance.md).
+
 ### Endpoints
 
 | Method | Endpoint | Role | Description |
@@ -250,6 +257,13 @@ The environment handlers use `authenticated_user_roles`, `highest_role`, and `Ro
 ## Dashboard API
 
 Aggregated fleet data.
+
+`total_systems`, fleet-health and deployment-status partitions count visible
+active managed machines. Runtime `cve_summary` sums distinct Current-authorized
+CVEs per such machine; zero is not proof that every machine is scanned.
+Recent deployments and deployment activity exclude nonmanaged resources.
+Reference configurations and unobserved external systems are not offline
+machines. Build/evaluation activity remains artifact activity across modes.
 
 ### Endpoints
 

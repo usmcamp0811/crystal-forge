@@ -5,12 +5,19 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use crate::api::models::{DeploymentStatus, HealthStatus, SystemSummary};
+use crate::api::models::{
+    ConfigurationAssurance, DeploymentStatus, GuestObservationRow, HealthStatus, ManagementMode,
+    SystemSummary,
+};
 use crate::components::chips::{Chip, ChipVariant, EnvBadge, StatusDot};
 use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::icon::{Icon, IconName};
 use crate::components::system::helpers::deployment_state_label;
+use crate::components::system::management_mode::{
+    CompactEvidenceCves, DeploymentCell, EvidenceFreshness, MgmtChip, RowDisclosure,
+    ScanEvidenceChip, evidence_status, evidence_status_color,
+};
 use crate::components::tables::{SortDirection, SortableHeader};
 
 /// Column that can be sorted in the systems table.
@@ -33,6 +40,27 @@ pub enum SystemsSortColumn {
 pub fn SystemsTable(
     /// Systems to display
     systems: Vec<SystemSummary>,
+    /// Contains bounded configuration reads keyed by resource identity.
+    #[props(default)]
+    evidence: HashMap<Uuid, Result<ConfigurationAssurance, String>>,
+    /// Selected-scan freshness from the real schedule; missing keys are unknown.
+    #[props(default)]
+    freshness: HashMap<Uuid, EvidenceFreshness>,
+    /// Indicates a pending evidence snapshot, independent of operational health.
+    #[props(default)]
+    evidence_loading: bool,
+    /// Retries the owning list's evidence and observation reads.
+    #[props(default)]
+    on_retry_evidence: Option<EventHandler<()>>,
+    /// Permits mutation controls for the current authenticated role.
+    #[props(default)]
+    can_mutate: bool,
+    /// Resolves parent identities without inferring guest health.
+    #[props(default)]
+    parent_names: HashMap<Uuid, String>,
+    /// Contains stored parent reports or read failures, independent of guest health.
+    #[props(default)]
+    observations: HashMap<Uuid, Result<Option<GuestObservationRow>, String>>,
     /// Called when user clicks remove on a system
     on_remove: EventHandler<Uuid>,
     /// Called when user clicks update key on a system
@@ -59,6 +87,15 @@ pub fn SystemsTable(
     /// Populated by the caller via `attention_row_class()`.
     #[props(default)]
     attention_classes: HashMap<Uuid, String>,
+    /// Groups external guests under their managed parent host after sorting.
+    #[props(default)]
+    group_guests: bool,
+    /// Hosts whose grouped guests are hidden.
+    #[props(default)]
+    collapsed_hosts: std::collections::HashSet<Uuid>,
+    /// Shows or hides the grouped guests of one host.
+    #[props(default)]
+    on_toggle_guests: Option<EventHandler<Uuid>>,
 ) -> Element {
     let mut sort_column = use_signal(|| None::<SystemsSortColumn>);
     let mut sort_direction = use_signal(|| SortDirection::Asc);
@@ -108,13 +145,19 @@ pub fn SystemsTable(
         }
         sorted
     };
+    // Sorting orders hosts; grouping then keeps each guest under its host.
+    let listed_systems = crate::views::systems_list::systems_list_helpers::group_guests(
+        &sorted_systems,
+        group_guests,
+        &collapsed_hosts,
+    );
 
     let current_col = *sort_column.read();
     let current_dir = *sort_direction.read();
     let table_class = if compact {
-        "sys-table compact"
+        "sys-table sys-table-mg compact"
     } else {
-        "sys-table"
+        "sys-table sys-table-mg"
     };
 
     rsx! {
@@ -138,13 +181,20 @@ pub fn SystemsTable(
                             th { "Flake · commit" }
                             th { "Deploy" }
                             th { "CVEs" }
-                            th { "Heartbeat" }
+                            th { "Heartbeat / runtime" }
                             // Actions — empty header, right-aligned
                             th { style: "text-align: right;", " " }
                         }
                     }
                     tbody {
-                        for system in sorted_systems {
+                        for crate::views::systems_list::systems_list_helpers::ListedSystem { system, guests, indent } in listed_systems {
+                            {let managed = system.management_mode == ManagementMode::Managed;
+                            let guest_class = if indent { " row-guest" } else { "" };
+                            let row_freshness = freshness.get(&system.id).copied().unwrap_or(EvidenceFreshness::Unknown);
+                            let guests_collapsed = collapsed_hosts.contains(&system.id);
+                            let host_id = system.id;
+                            let assurance = evidence.get(&system.id).and_then(|r| r.as_ref().ok());
+                            rsx! {
                             tr {
                                 class: {
                                     // Compute row class including attention state.
@@ -156,8 +206,8 @@ pub fn SystemsTable(
                                     attention_classes
                                         .get(&system.id)
                                         .filter(|s| !s.is_empty())
-                                        .map(|ac| format!("{base} {ac}"))
-                                        .unwrap_or_else(|| base.to_string())
+                                        .map(|ac| format!("{base} {ac}{guest_class}"))
+                                        .unwrap_or_else(|| format!("{base}{guest_class}"))
                                 },
                                 onclick: move |_| {
                                     on_open.call(system.id);
@@ -167,18 +217,42 @@ pub fn SystemsTable(
                                     div {
                                         class: "sys-host-cell",
                                         StatusDot {
-                                            color: status_color(&system.health_status).to_string(),
+                                            // Nonmanaged: configuration evidence status, never guest health.
+                                            color: if managed {
+                                                status_color(&system.health_status).to_string()
+                                            } else {
+                                                assurance
+                                                    .map(|value| evidence_status_color(evidence_status(value, row_freshness)))
+                                                    .unwrap_or("var(--cf-gray-dot)")
+                                                    .to_string()
+                                            },
                                             large: false,
                                         }
                                         div {
                                             class: "min-w-0",
                                             div {
                                                 class: "hostname",
-                                                "{system.hostname}"
+                                                span { class: "hostname-text", title: "{system.hostname}", "{system.hostname}" }
+                                                MgmtChip { mode: system.management_mode }
+                                                crate::components::system::system_card_v2::GuestToggle {
+                                                    guests,
+                                                    collapsed: guests_collapsed,
+                                                    on_toggle: on_toggle_guests.map(|handler| {
+                                                        EventHandler::new(move |_| handler.call(host_id))
+                                                    }),
+                                                }
                                             }
-                                            div {
-                                                class: "fqdn truncate",
-                                                "{derived_fqdn(&system)}"
+                                            // Identity line: FQDN or configuration, then tags. One truncated line
+                                            // keeps tagged rows at the same height; the full text is the tooltip.
+                                            {
+                                                let identity = if managed {
+                                                    derived_fqdn(&system)
+                                                } else {
+                                                    system.system_configuration_name.clone().unwrap_or_else(|| system.hostname.clone())
+                                                };
+                                                let tags = system.tags.iter().map(|tag| format!("#{tag}")).collect::<Vec<_>>().join(" ");
+                                                let line = if tags.is_empty() { identity } else { format!("{identity} · {tags}") };
+                                                rsx! { div { class: "fqdn truncate", title: "{line}", "{line}" } }
                                             }
                                         }
                                     }
@@ -200,10 +274,41 @@ pub fn SystemsTable(
                                 }
                                 // Status
                                 td {
+                                    if managed {
                                     Chip {
                                         variant: health_chip_variant(&system.health_status),
                                         show_dot: true,
                                         "{system.health_status.label()}"
+                                    }
+                                    } else if let Some(value) = assurance {
+                                        // The current selected-revision state. Older scan counts in the CVE
+                                        // column carry their own provenance marker.
+                                        ScanEvidenceChip { status: evidence_status(value, row_freshness) }
+                                    } else {
+                                        // The compact label keeps the row short. The raw read error is in
+                                        // an accessible disclosure, not only in a `title` attribute.
+                                        div { class: "sys-cell-inline",
+                                            span { class: "chip chip-unknown", role: "status",
+                                                if evidence_loading { "Loading evidence…" } else { "Evidence unavailable" }
+                                            }
+                                            if let Some(Err(error)) = evidence.get(&system.id) {
+                                                RowDisclosure { label: "Evidence read error",
+                                                    p { "Configuration evidence unavailable: {error}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !managed && (evidence.get(&system.id).is_some_and(Result::is_err) || observations.get(&system.id).is_some_and(Result::is_err)) {
+                                        if let Some(retry) = on_retry_evidence {
+                                            button {
+                                                class: "btn-icon focus-ring sys-retry",
+                                                title: "Retry evidence reads",
+                                                "aria-label": "Retry evidence reads",
+                                                disabled: evidence_loading,
+                                                onclick: move |event| { event.stop_propagation(); retry.call(()); },
+                                                Icon { name: IconName::Sync, size: 12 }
+                                            }
+                                        }
                                     }
                                 }
                                 // Flake · commit (design sub-line: "{commit} · {branch}")
@@ -220,37 +325,42 @@ pub fn SystemsTable(
                                                     })
                                             })
                                             .unwrap_or_else(|| ("—".to_string(), "—".to_string(), None));
-                                        let flake_commit_short = flake_commit
+                                        // Managed rows show the flake's latest commit and branch. Nonmanaged
+                                        // rows show the exact selected revision and its branch. Both are
+                                        // shortened here; the full values are in the tooltip.
+                                        let (commit_full, branch) = if managed {
+                                            (flake_commit.clone(), flake_branch.clone())
+                                        } else {
+                                            (
+                                                assurance.and_then(|e| e.selected_revision.as_ref()).map(|r| r.sha.clone()),
+                                                assurance.and_then(|e| e.branch.clone()).unwrap_or(flake_branch.clone()),
+                                            )
+                                        };
+                                        let commit_short = commit_full
                                             .as_deref()
                                             .map(|hash| hash.chars().take(8).collect::<String>())
-                                            .unwrap_or_else(|| "—".to_string());
+                                            .unwrap_or_else(|| if managed { "—".to_string() } else { "no revision".to_string() });
+                                        let target = if managed {
+                                            flake_name.clone()
+                                        } else {
+                                            format!("{flake_name}#{}", system.system_configuration_name.as_deref().unwrap_or(&system.hostname))
+                                        };
+                                        let title = format!("{target}\n{} · {branch}", commit_full.as_deref().unwrap_or(&commit_short));
                                         rsx! {
-                                            div {
-                                                style: "display: flex; flex-direction: column; line-height: 1.3;",
-                                                span {
-                                                    class: "mono",
-                                                    style: "font-size: 12px; color: var(--cf-text-primary)",
-                                                    "{flake_name}"
-                                                }
-                                                span {
-                                                    class: "mono",
-                                                    style: "font-size: 11px; color: var(--cf-text-muted)",
-                                                    "{flake_commit_short} · {flake_branch}"
-                                                }
+                                            div { class: "sys-flake-cell", title: "{title}",
+                                                span { class: "mono sys-flake-name", "{target}" }
+                                                span { class: "mono sys-flake-rev", "{commit_short} · {branch}" }
                                             }
                                         }
                                     }
                                 }
                                 // Deploy (design lowercase state labels)
                                 td {
-                                    Chip {
-                                        variant: deployment_chip_variant(&system.deployment_status),
-                                        show_dot: false,
-                                        "{deployment_state_label(&system.deployment_status)}"
-                                    }
+                                    DeploymentCell { mode: system.management_mode, status: system.deployment_status }
                                 }
                                 // CVEs (design: crit / high / med-when-comfortable / clean)
                                 td {
+                                    if managed {
                                     div {
                                         style: "display: flex; gap: 6px; flex-wrap: wrap;",
                                         if system.cve_counts.critical > 0 {
@@ -269,9 +379,13 @@ pub fn SystemsTable(
                                             span { class: "chip chip-healthy", "✓ clean" }
                                         }
                                     }
+                                    } else if let Some(value) = assurance {
+                                        CompactEvidenceCves { evidence: value.clone(), freshness: row_freshness }
+                                    } else { span { class: "chip chip-unknown", if evidence_loading { "loading…" } else { "unavailable" } } }
                                 }
                                 // Heartbeat countdown
                                 td {
+                                    if managed {
                                     {
                                         let last_seen_text = system
                                             .last_seen
@@ -312,24 +426,66 @@ pub fn SystemsTable(
                                             }
                                         }
                                     }
+                                    } else {
+                                        // One compact runtime state, as designed, plus the parent name. The
+                                        // details (observation time and unit, or the reason the state is
+                                        // unknown, including read errors) are in an accessible disclosure.
+                                        {
+                                            let external = system.management_mode == ManagementMode::External;
+                                            let (line, title) = match observations.get(&system.id) {
+                                                _ if !external => ("Not a running machine".to_string(), String::new()),
+                                                Some(Ok(Some(report))) => (
+                                                    format!(
+                                                        "host-observed · unit {} · {}",
+                                                        report.unit_active_state.as_deref().unwrap_or("unknown"),
+                                                        crate::components::system::system_card_v2::ago(report.observed_at)
+                                                    ),
+                                                    format!(
+                                                        "Host-observed {} at {}. A host unit observation, not guest health or configuration attestation.",
+                                                        report.unit,
+                                                        report.observed_at.to_rfc3339()
+                                                    ),
+                                                ),
+                                                // Nothing more to disclose: the visible label is the full state.
+                                                Some(Ok(None)) => ("Runtime unknown".into(), String::new()),
+                                                Some(Err(error)) => ("Runtime unknown".into(), format!("Host observation unavailable: {error}")),
+                                                None if evidence_loading => ("Loading…".into(), String::new()),
+                                                None => ("Runtime unknown".into(), "Host observation unavailable".into()),
+                                            };
+                                            let observed = matches!(observations.get(&system.id), Some(Ok(Some(_)))) && external;
+                                            rsx! {
+                                                div { class: "sys-cell-inline",
+                                                    div { class: "sys-runtime-cell",
+                                                        span { class: if observed { "mg-obs sys-runtime-wrap" } else if external { "mg-dim" } else { "mg-dim sys-runtime-wrap" }, "{line}" }
+                                                        if let Some(parent) = system.parent_host_id {
+                                                            span { class: "mg-dim", "on {parent_names.get(&parent).cloned().unwrap_or_else(|| parent.to_string())}" }
+                                                        }
+                                                    }
+                                                    if !title.is_empty() {
+                                                        RowDisclosure { label: "Runtime details", p { "{title}" } }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 // Row actions: Deploy | Update Key | Edit
                                 td {
                                     div {
                                         class: "row-actions",
                                         // Deploy
-                                        button {
+                                        if !managed || can_mutate { button {
                                             class: "btn-icon focus-ring",
-                                            title: "Deploy",
-                                            "aria-label": "Deploy",
+                                            title: if managed { "Deploy" } else { "Open evidence" },
+                                            "aria-label": if managed { "Deploy" } else { "Open evidence" },
                                             onclick: move |evt| {
                                                 evt.stop_propagation();
                                                 on_deploy.call(system.id);
                                             },
-                                            Icon { name: IconName::Deploy, size: 14 }
-                                        }
+                                            Icon { name: if managed { IconName::Deploy } else { IconName::Shield }, size: 14 }
+                                        } }
                                         // Existing public-key update flow
-                                        button {
+                                        if managed && can_mutate { button {
                                             class: "btn-icon focus-ring",
                                             title: "Update Key",
                                             "aria-label": "Update Key",
@@ -339,9 +495,9 @@ pub fn SystemsTable(
                                                 on_update_key.call(system.id);
                                             },
                                             Icon { name: IconName::Key, size: 14 }
-                                        }
+                                        } }
                                         // Edit
-                                        button {
+                                        if can_mutate { button {
                                             class: "btn-icon focus-ring",
                                             title: "Edit",
                                             "aria-label": "Edit",
@@ -350,10 +506,11 @@ pub fn SystemsTable(
                                                 on_edit.call(system.id);
                                             },
                                             Icon { name: IconName::Gear, size: 14 }
-                                        }
+                                        } }
                                     }
                                 }
                             }
+                            }}
                         }
                     }
                 }
@@ -450,6 +607,7 @@ fn status_color(health: &HealthStatus) -> &'static str {
         HealthStatus::Warning => "#fbbf24",
         HealthStatus::Critical => "#f87171",
         HealthStatus::Offline => "#6b7280",
+        HealthStatus::Unknown => "#6b7280",
     }
 }
 
@@ -459,6 +617,7 @@ fn health_chip_variant(health: &HealthStatus) -> ChipVariant {
         HealthStatus::Warning => ChipVariant::Warning,
         HealthStatus::Critical => ChipVariant::Critical,
         HealthStatus::Offline => ChipVariant::Unknown,
+        HealthStatus::Unknown => ChipVariant::Unknown,
     }
 }
 

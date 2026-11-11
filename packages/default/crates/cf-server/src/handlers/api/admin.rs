@@ -788,6 +788,8 @@ fn parse_audit_action(value: &str) -> Option<AuditAction> {
         "system_deploy_requested" => Some(AuditAction::SystemDeployRequested),
         "system_rollback_requested" => Some(AuditAction::SystemRollbackRequested),
         "system_key_rotated" => Some(AuditAction::SystemKeyRotated),
+        "system_created" => Some(AuditAction::SystemCreated),
+        "system_updated" => Some(AuditAction::SystemUpdated),
         "cve_scan_requested" => Some(AuditAction::CveScanRequested),
         "session_invalidated" => Some(AuditAction::SessionInvalidated),
         _ => None,
@@ -976,6 +978,8 @@ fn action_to_str(action: AuditAction) -> &'static str {
         AuditAction::SystemDeployRequested => "system_deploy_requested",
         AuditAction::SystemRollbackRequested => "system_rollback_requested",
         AuditAction::SystemKeyRotated => "system_key_rotated",
+        AuditAction::SystemCreated => "system_created",
+        AuditAction::SystemUpdated => "system_updated",
         AuditAction::CveScanRequested => "cve_scan_requested",
         AuditAction::SessionInvalidated => "session_invalidated",
     }
@@ -1435,6 +1439,15 @@ mod tests {
 
     #[test]
     fn parses_extended_audit_actions() {
+        for (value, action) in [
+            ("system_created", AuditAction::SystemCreated),
+            ("system_updated", AuditAction::SystemUpdated),
+        ] {
+            assert_eq!(parse_audit_action(value), Some(action));
+            assert_eq!(action_to_str(action), value);
+            assert_eq!(parse_action_filter(value).unwrap(), Some(action));
+            assert_eq!(serde_json::to_value(action).unwrap(), value);
+        }
         assert_eq!(
             parse_audit_action("user_created"),
             Some(AuditAction::UserCreated)

@@ -162,7 +162,7 @@ pub fn SidebarNav() -> Element {
             // This count is not an attention notification. Use the actor-scoped
             // POA&M dashboard, never loaded register rows or design fixtures.
             poam_overdue.set(poam_api::dashboard_summary().await.ok().map(|s| s.overdue));
-            gloo_timers::future::TimeoutFuture::new(30_000).await;
+            crate::hooks::visibility::visible_tick(30_000).await;
         }
     });
     // NAV_BADGES is the sole source of truth for badge visibility and counts
@@ -297,7 +297,7 @@ pub fn SidebarNav() -> Element {
                     badge_count: if systems_attention > 0 { Some(systems_attention) } else { None },
                     badge_attention: systems_attention > 0,
                     badge_hidden: !badge_visible("systems", systems_attention, systems_attention > 0),
-                    badge_title: Some(format!("{} of {} systems need attention (critical or offline)", systems_attention, badges.systems_total)),
+                    badge_title: Some(format!("{} active managed machines need attention (critical or offline) · {} active registered resources across all modes", systems_attention, badges.systems_total)),
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -344,7 +344,7 @@ pub fn SidebarNav() -> Element {
                     badge_attention: environments_attention > 0,
                     badge_hidden: !badge_visible("environments", environments_attention, environments_attention > 0),
                     badge_title: Some(if environments_attention > 0 {
-                        format!("{} of {} environments have critical or offline systems", environments_attention, badges.environments_total)
+                        format!("{} of {} environments have critical or offline managed machines", environments_attention, badges.environments_total)
                     } else {
                         format!("{} deployment environments", badges.environments_total)
                     }),

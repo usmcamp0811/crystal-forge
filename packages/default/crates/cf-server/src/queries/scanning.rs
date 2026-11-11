@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row};
 use uuid::Uuid;
 
+use crate::models::systems::ManagementMode;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanSchedulePolicyRow {
     pub on_build: bool,
@@ -39,11 +41,14 @@ pub struct ScanStatsRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanQueueRow {
+    /// Contains distinct active registration modes for this exact flake/config.
+    /// A shared artifact has no single registration owner.
+    pub management_modes: Vec<ManagementMode>,
     /// Identifies the exact derivation represented by this row.
     pub derivation_id: i32,
     /// Is `true` when the derivation has a built store path that can be scanned.
     pub rescan_eligible: bool,
-    /// `None` when the system has been deployed but never scanned.
+    /// Is absent when the exact derivation has never been scanned.
     pub scan_id: Option<Uuid>,
     pub hostname: String,
     pub flake_name: Option<String>,
@@ -57,8 +62,9 @@ pub struct ScanQueueRow {
     pub medium_count: i32,
     /// Freshness class derived from the most recent completed scan:
     /// `deployed` (<=24h), `recent` (<=30d), or `archived` (older/never).
+    /// These age labels do not establish runtime deployment.
     pub freshness: String,
-    /// True when this is the latest scan row for its derivation.
+    /// Is true only for an exact active managed runtime deployment.
     pub is_current: bool,
     /// True when this derivation's commit is the latest known commit for its flake.
     pub is_latest_per_flake: bool,
@@ -68,6 +74,8 @@ pub struct ScanQueueRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanSystemRow {
+    /// Contains the mode of this registered resource, not an artifact owner.
+    pub management_mode: ManagementMode,
     pub system_id: Uuid,
     pub hostname: String,
     pub flake_name: Option<String>,
@@ -122,6 +130,9 @@ impl ScanRecordCollection {
 /// One exact persisted scan lifecycle for admin scanning views.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanRecordRow {
+    /// Contains distinct active registration modes for this exact flake/config.
+    /// System-scoped history includes only the selected registration's mode.
+    pub management_modes: Vec<ManagementMode>,
     /// Identifies the immutable scan lifecycle.
     pub scan_id: Uuid,
     /// Identifies the exact scanned derivation.
@@ -133,7 +144,7 @@ pub struct ScanRecordRow {
     /// Contains the exact commit hash when available.
     pub commit_hash: Option<String>,
     /// Is true when this derivation is the exact current deployment of an
-    /// active system with matching flake and configuration identity.
+    /// active managed system with matching flake and configuration identity.
     pub is_current: bool,
     /// Is true when this derivation belongs to the position-0 commit in its
     /// flake's ready branch snapshot.
@@ -426,8 +437,11 @@ pub async fn update_scan_schedule_policy_with_recovery(
 
 /// Returns operational scan counts without removing historical scan evidence.
 ///
-/// Current deployments, recoverable successful builds, and active scan requests
-/// form the coverage population. A terminal failure is actionable only while
+/// Managed deployments, built external/reference artifacts at the ready branch
+/// head, recoverable successful builds, and active scan requests form the
+/// coverage population. Configuration artifacts need no heartbeat and remain
+/// covered after post-build recovery ends. Shared artifacts count once.
+/// A terminal failure is actionable only while
 /// its derivation remains in that population and its latest scan is unarchived.
 ///
 /// # Errors
@@ -449,7 +463,7 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
             FROM systems system
             JOIN LATERAL (
                 SELECT state.store_path
-                FROM system_states state
+                FROM view_agent_current_system_states state
                 WHERE state.hostname = system.hostname
                 ORDER BY state.timestamp DESC NULLS LAST, state.id DESC
                 LIMIT 1
@@ -461,7 +475,32 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
                     NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname
                 )
                 AND NULLIF(BTRIM(derivation.store_path), '') = current_state.store_path
+            WHERE system.is_active AND system.management_mode = 'managed'
+        ),
+        configuration_artifacts AS (
+            -- INVARIANT: Count the physical artifact that actually executed.
+            -- A reused head carrier (0322) has no own build or store path;
+            -- its build output and scans belong to the execution source. One
+            -- physical artifact counts once however many carriers reuse it.
+            SELECT DISTINCT derivation.execution_derivation_id AS derivation_id
+            FROM systems system
+            JOIN flakes flake ON flake.id = system.flake_id
+                AND flake.snapshot_ready_at IS NOT NULL
+            JOIN flake_branch_commit_snapshot head ON head.flake_id = flake.id
+                AND head.position = 0
+            JOIN commits commit ON commit.id = head.commit_id
+                AND commit.flake_id = system.flake_id
+            JOIN view_derivation_execution_evidence derivation ON derivation.commit_id = commit.id
+                AND derivation.derivation_type = 'nixos'
+                AND derivation.derivation_name = COALESCE(
+                    NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname
+                )
+            JOIN derivation_statuses status ON status.id = derivation.execution_status_id
+                AND status.name IN ('build-complete', 'complete')
             WHERE system.is_active
+              AND system.management_mode IN ('external', 'reference')
+              AND NULLIF(BTRIM(derivation.store_path), '') IS NOT NULL
+              AND NULLIF(BTRIM(derivation.derivation_path), '') IS NOT NULL
         ),
         recoverable_builds AS (
             SELECT DISTINCT job.derivation_id
@@ -490,6 +529,8 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
         ),
         operational AS (
             SELECT derivation_id FROM current_deployed
+            UNION
+            SELECT derivation_id FROM configuration_artifacts
             UNION
             SELECT derivation_id FROM recoverable_builds
             UNION
@@ -622,15 +663,22 @@ pub async fn get_scan_records(
         SELECT
             scan.id AS scan_id, scan.derivation_id,
             derivation.derivation_name AS hostname,
+            ARRAY(SELECT DISTINCT system.management_mode FROM systems system
+              WHERE system.is_active AND system.flake_id=commit.flake_id
+                AND COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname)=derivation.derivation_name
+                AND ($2::uuid IS NULL OR system.id=$2)
+              ORDER BY system.management_mode) AS management_modes,
             flake.name AS flake_name, commit.git_commit_hash AS commit_hash,
             EXISTS (
               SELECT 1 FROM systems system
               WHERE system.is_active
+                AND system.management_mode='managed'
+                AND ($2::uuid IS NULL OR system.id=$2)
                 AND system.flake_id=commit.flake_id
                 AND COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname)=derivation.derivation_name
                 AND derivation.store_path IS NOT NULL AND BTRIM(derivation.store_path)<>''
                 AND derivation.store_path=(
-                  SELECT state.store_path FROM system_states state
+                  SELECT state.store_path FROM view_agent_current_system_states state
                   WHERE state.hostname=system.hostname
                   ORDER BY state.timestamp DESC NULLS LAST,state.id DESC LIMIT 1)
             ) AS is_current,
@@ -685,6 +733,7 @@ pub async fn get_scan_records(
                 .map(|value| crate::security::snapshot_redaction::redact_text(&value))
                 .map(|value| value.chars().take(2048).collect());
             ScanRecordRow {
+                management_modes: row.get("management_modes"),
                 scan_id: row.get("scan_id"),
                 derivation_id: row.get("derivation_id"),
                 hostname: row.get("hostname"),
@@ -732,16 +781,23 @@ const COMPLETED_RECORDS_CTE: &str = r#"
         SELECT
             scan.id AS scan_id, scan.derivation_id,
             derivation.derivation_name AS hostname,
+            ARRAY(SELECT DISTINCT system.management_mode FROM systems system
+              WHERE system.is_active AND system.flake_id=commit.flake_id
+                AND COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname)=derivation.derivation_name
+                AND ($1::uuid IS NULL OR system.id=$1)
+              ORDER BY system.management_mode) AS management_modes,
             derivation.derivation_path,
             flake.name AS flake_name, commit.git_commit_hash AS commit_hash,
             EXISTS (
               SELECT 1 FROM systems system
               WHERE system.is_active
+                AND system.management_mode='managed'
+                AND ($1::uuid IS NULL OR system.id=$1)
                 AND system.flake_id=commit.flake_id
                 AND COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname)=derivation.derivation_name
                 AND derivation.store_path IS NOT NULL AND BTRIM(derivation.store_path)<>''
                 AND derivation.store_path=(
-                  SELECT state.store_path FROM system_states state
+                  SELECT state.store_path FROM view_agent_current_system_states state
                   WHERE state.hostname=system.hostname
                   ORDER BY state.timestamp DESC NULLS LAST,state.id DESC LIMIT 1)
             ) AS is_current,
@@ -1087,6 +1143,7 @@ fn scan_record_from_row(row: sqlx::postgres::PgRow) -> ScanRecordRow {
         .map(|value| crate::security::snapshot_redaction::redact_text(&value))
         .map(|value| value.chars().take(2048).collect());
     ScanRecordRow {
+        management_modes: row.get("management_modes"),
         scan_id: row.get("scan_id"),
         derivation_id: row.get("derivation_id"),
         hostname: row.get("hostname"),
@@ -1181,6 +1238,10 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
                 d.id AS derivation_id,
                 (d.store_path IS NOT NULL AND BTRIM(d.store_path) <> '') AS rescan_eligible,
                 d.derivation_name AS hostname,
+                ARRAY(SELECT DISTINCT system.management_mode FROM systems system
+                  WHERE system.is_active AND system.flake_id=c.flake_id
+                    AND COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname)=d.derivation_name
+                  ORDER BY system.management_mode) AS management_modes,
                 f.name AS flake_name,
                 c.git_commit_hash AS commit_hash,
                 c.flake_id,
@@ -1206,6 +1267,7 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
             derivation_id,
             rescan_eligible,
             hostname,
+            management_modes,
             flake_name,
             commit_hash,
             status,
@@ -1223,10 +1285,11 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
             EXISTS (
               SELECT 1 FROM systems system
               WHERE system.is_active
+                AND system.management_mode='managed'
                 AND system.flake_id=lpd.flake_id
                 AND COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname)=lpd.hostname
                 AND lpd.store_path IS NOT NULL AND BTRIM(lpd.store_path)<>''
-                AND lpd.store_path=(SELECT state.store_path FROM system_states state
+                AND lpd.store_path=(SELECT state.store_path FROM view_agent_current_system_states state
                   WHERE state.hostname=system.hostname
                   ORDER BY state.timestamp DESC NULLS LAST,state.id DESC LIMIT 1)
             ) AS is_current,
@@ -1247,6 +1310,7 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
     Ok(rows
         .into_iter()
         .map(|row| ScanQueueRow {
+            management_modes: row.get("management_modes"),
             derivation_id: row.get("derivation_id"),
             rescan_eligible: row.get("rescan_eligible"),
             scan_id: row.get("scan_id"),
@@ -1319,7 +1383,8 @@ pub fn encode_deployed_cursor(hostname: &str, derivation_id: i32) -> String {
 ///
 /// The cursor is a base64url-encoded `{hostname}\x00{derivation_id}` payload so
 /// that the cursor is opaque, unambiguous, and handles config names with `:`.
-/// The latest reported store path determines each system's current derivation.
+/// The latest reported store path determines each managed system's current
+/// derivation. External and reference registrations never establish runtime.
 /// The normalized configuration name permits a NixOS configuration name to
 /// differ from its system hostname. Systems without a scan remain present with
 /// safe default counts.
@@ -1345,7 +1410,8 @@ pub async fn get_scan_deployed(
                 s.id AS system_id,
                 ss.store_path AS current_store_path
             FROM systems s
-            LEFT JOIN system_states ss ON ss.hostname = s.hostname
+            LEFT JOIN view_agent_current_system_states ss ON ss.hostname = s.hostname
+            WHERE s.management_mode = 'managed'
             ORDER BY s.id, ss.timestamp DESC NULLS LAST, ss.id DESC
         ),
         latest_commit_per_flake AS (
@@ -1361,6 +1427,10 @@ pub async fn get_scan_deployed(
                 d.id                       AS derivation_id,
                 (BTRIM(d.store_path) <> '') AS rescan_eligible,
                 COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) AS hostname,
+                ARRAY(SELECT DISTINCT system.management_mode FROM systems system
+                  WHERE system.is_active AND system.flake_id=c.flake_id
+                    AND COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname)=d.derivation_name
+                  ORDER BY system.management_mode) AS management_modes,
                 f.name                     AS flake_name,
                 c.git_commit_hash          AS commit_hash,
                 c.flake_id,
@@ -1385,6 +1455,7 @@ pub async fn get_scan_deployed(
             JOIN commits c ON c.id = d.commit_id AND c.flake_id = s.flake_id
             LEFT JOIN flakes f ON f.id = c.flake_id
             WHERE s.is_active = TRUE
+              AND s.management_mode = 'managed'
               AND d.derivation_type = 'nixos'
             ORDER BY d.id,
                      COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
@@ -1394,6 +1465,7 @@ pub async fn get_scan_deployed(
             derivation_id,
             rescan_eligible,
             hostname,
+            management_modes,
             flake_name,
             commit_hash,
             status,
@@ -1433,6 +1505,7 @@ pub async fn get_scan_deployed(
         .map(|row| {
             (
                 ScanQueueRow {
+                    management_modes: row.get("management_modes"),
                     derivation_id: row.get("derivation_id"),
                     rescan_eligible: row.get("rescan_eligible"),
                     scan_id: row.get("scan_id"),
@@ -1479,7 +1552,8 @@ pub async fn get_scan_deployed(
                 s.id AS system_id,
                 ss.store_path AS current_store_path
             FROM systems s
-            LEFT JOIN system_states ss ON ss.hostname = s.hostname
+            LEFT JOIN view_agent_current_system_states ss ON ss.hostname = s.hostname
+            WHERE s.management_mode = 'managed'
             ORDER BY s.id, ss.timestamp DESC NULLS LAST, ss.id DESC
         )
         SELECT COUNT(DISTINCT d.id)
@@ -1493,6 +1567,7 @@ pub async fn get_scan_deployed(
           AND d.store_path = lss.current_store_path
         JOIN commits c ON c.id = d.commit_id AND c.flake_id = s.flake_id
         WHERE s.is_active = TRUE
+          AND s.management_mode = 'managed'
           AND d.derivation_type = 'nixos'
         "#,
     )
@@ -1509,7 +1584,7 @@ pub async fn get_scan_deployed(
 
 /// Returns scan history for one active system's exact flake and configuration.
 ///
-/// The latest reported `system_states.store_path` determines `is_current`.
+/// Only a managed registration's latest reported store path sets `is_current`.
 /// A newer derivation from another flake cannot enter this history.
 ///
 /// # Errors
@@ -1534,11 +1609,13 @@ pub async fn get_scan_queue_for_system(
                 s.id,
                 s.flake_id,
                 s.hostname,
+                s.management_mode,
                 COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) AS config_name,
                 (
                     SELECT ss.store_path
-                    FROM system_states ss
+                    FROM view_agent_current_system_states ss
                     WHERE ss.hostname = s.hostname
+                      AND s.management_mode = 'managed'
                     ORDER BY ss.timestamp DESC NULLS LAST, ss.id DESC
                     LIMIT 1
                 ) AS current_store_path
@@ -1552,6 +1629,7 @@ pub async fn get_scan_queue_for_system(
                 d.id AS derivation_id,
                 (d.store_path IS NOT NULL AND BTRIM(d.store_path) <> '') AS rescan_eligible,
                 ss.hostname,
+                ARRAY[ss.management_mode] AS management_modes,
                 f.name AS flake_name,
                 c.git_commit_hash AS commit_hash,
                 c.flake_id,
@@ -1563,7 +1641,9 @@ pub async fn get_scan_queue_for_system(
                 COALESCE(cs.high_count, 0)::int AS high_count,
                 COALESCE(cs.medium_count, 0)::int AS medium_count,
                 COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at,
-                COALESCE(d.store_path = ss.current_store_path, FALSE) AS is_current,
+                (ss.management_mode='managed'
+                  AND NULLIF(BTRIM(d.store_path), '') IS NOT NULL
+                  AND COALESCE(d.store_path = ss.current_store_path, FALSE)) AS is_current,
                 cs.source_trigger
             FROM derivations d
             JOIN selected_system ss ON d.derivation_name = ss.config_name
@@ -1578,6 +1658,7 @@ pub async fn get_scan_queue_for_system(
             derivation_id,
             rescan_eligible,
             hostname,
+            management_modes,
             flake_name,
             commit_hash,
             status,
@@ -1611,6 +1692,7 @@ pub async fn get_scan_queue_for_system(
     Ok(rows
         .into_iter()
         .map(|row| ScanQueueRow {
+            management_modes: row.get("management_modes"),
             derivation_id: row.get("derivation_id"),
             rescan_eligible: row.get("rescan_eligible"),
             scan_id: row.get("scan_id"),
@@ -1637,7 +1719,8 @@ pub async fn get_scan_queue_for_system(
 ///
 /// Each aggregate includes only derivations from the system's flake and
 /// configuration. `current_derivation_id` matches the latest reported store
-/// path when that path resolves to an eligible derivation.
+/// path when that path resolves to an eligible managed derivation. Nonmanaged
+/// registrations retain configuration history but have no current runtime fields.
 ///
 /// # Errors
 ///
@@ -1654,14 +1737,31 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
             SELECT
                 s.id AS system_id,
                 d.id AS derivation_id,
+                -- A reused carrier (0322) is still one evaluated configuration
+                -- row, but its build output and scans belong to the execution
+                -- source. Never treat it as unbuilt or never scanned.
+                d.execution_derivation_id,
                 s.hostname,
                 f.name AS flake_name,
                 d.store_path,
                 CASE
-                  WHEN d.store_path IS NOT NULL AND BTRIM(d.store_path)<>''
-                    AND d.store_path=(SELECT state.store_path FROM system_states state
+                  WHEN s.management_mode='managed'
+                    AND d.store_path IS NOT NULL AND BTRIM(d.store_path)<>''
+                    AND d.store_path=(SELECT state.store_path FROM view_agent_current_system_states state
                       WHERE state.hostname=s.hostname
                       ORDER BY state.timestamp DESC NULLS LAST,state.id DESC LIMIT 1)
+                    THEN 'deployed'
+                  -- Cadence only: a selected configuration head uses the
+                  -- operational interval without becoming a deployed machine.
+                  WHEN s.management_mode IN ('external','reference')
+                    AND f.snapshot_ready_at IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM flake_branch_commit_snapshot head
+                      WHERE head.flake_id=s.flake_id AND head.position=0
+                        AND head.commit_id=d.commit_id)
+                    AND NULLIF(BTRIM(d.store_path),'') IS NOT NULL
+                    AND NULLIF(BTRIM(d.derivation_path),'') IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM derivation_statuses status
+                      WHERE status.id=d.execution_status_id AND status.name IN ('build-complete','complete'))
                     THEN 'deployed'
                   WHEN d.completed_at >= NOW()-INTERVAL '30 days' THEN 'recent'
                   ELSE 'archived'
@@ -1669,7 +1769,7 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
             FROM systems s
             JOIN flakes f ON f.id=s.flake_id
             JOIN commits c ON c.flake_id=s.flake_id
-            JOIN derivations d
+            JOIN view_derivation_execution_evidence d
               ON d.commit_id = c.id
              AND d.derivation_name = COALESCE(
                     NULLIF(BTRIM(s.system_configuration_name), ''),
@@ -1699,12 +1799,13 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
             FROM systems s
             LEFT JOIN LATERAL (
                 SELECT ss.store_path,ss.generation,ss.generation_matches_current_store_path
-                FROM system_states ss
+                FROM view_agent_current_system_states ss
                 WHERE ss.hostname = s.hostname
                 ORDER BY ss.timestamp DESC NULLS LAST, ss.id DESC
                 LIMIT 1
             ) state ON TRUE
             WHERE s.is_active = TRUE
+              AND s.management_mode = 'managed'
         ),
         current_derivation AS (
             SELECT DISTINCT ON (system.id)
@@ -1718,7 +1819,7 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
              AND derivation.derivation_type='nixos'
             JOIN commits commit ON commit.id=derivation.commit_id
               AND commit.flake_id=system.flake_id
-            WHERE system.is_active
+            WHERE system.is_active AND system.management_mode='managed'
             ORDER BY system.id,derivation.completed_at DESC NULLS LAST,derivation.id DESC
         ),
         current_exact AS (
@@ -1752,9 +1853,11 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
                 AND candidate.evidence_schema_version=1
               ORDER BY candidate.completed_at DESC,candidate.id DESC LIMIT 1
             ) scan ON TRUE
+            WHERE system.is_active AND system.management_mode='managed'
         )
         SELECT
             s.id AS system_id,
+            s.management_mode,
             scope.hostname,
             MAX(scope.flake_name) AS flake_name,
             MAX(e.name) AS environment,
@@ -1792,7 +1895,7 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
               AND COUNT(current_exact.scan_id)=0) AS historical_evidence,
             MAX(current_derivation.derivation_id) AS current_derivation_id
         FROM derivation_scope scope
-        LEFT JOIN latest_completed_per_derivation completed ON completed.derivation_id=scope.derivation_id
+        LEFT JOIN latest_completed_per_derivation completed ON completed.derivation_id=scope.execution_derivation_id
         JOIN systems s ON s.id=scope.system_id
         LEFT JOIN environments e ON e.id = s.environment_id
         LEFT JOIN current_exact ON current_exact.system_id=s.id
@@ -1811,6 +1914,7 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
     Ok(rows
         .into_iter()
         .map(|row| ScanSystemRow {
+            management_mode: row.get("management_mode"),
             system_id: row.get("system_id"),
             hostname: row.get("hostname"),
             flake_name: row.get("flake_name"),
@@ -1871,4 +1975,228 @@ pub async fn get_scan_activity(pool: &PgPool, limit: i64) -> Result<Vec<ScanActi
             status: row.get("status"),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod management_mode_tests {
+    use super::*;
+
+    fn records(system_id: Option<Uuid>, collection: ScanRecordCollection) -> ScanRecordRequest {
+        ScanRecordRequest {
+            collection,
+            include_archived: false,
+            system_id,
+            limit: 50,
+            search: None,
+            status: ScanRecordStatus::All,
+            revision: ScanRecordRevision::All,
+            latest_only: false,
+            sort: ScanRecordSort::Timestamp,
+            direction: ScanRecordDirection::Desc,
+            after: None,
+        }
+    }
+
+    #[test]
+    fn configuration_history_cursor_is_bound_to_registration_and_filters() {
+        let mut request = records(Some(Uuid::new_v4()), ScanRecordCollection::Completed);
+        let original = request.fingerprint();
+        request.system_id = Some(Uuid::new_v4());
+        assert_ne!(original, request.fingerprint());
+        let scoped = request.fingerprint();
+        request.revision = ScanRecordRevision::Deployed;
+        assert_ne!(scoped, request.fingerprint());
+        request.search = Some("config_100%".into());
+        assert_eq!(
+            request.search_pattern().as_deref(),
+            Some("%config\\_100\\%%")
+        );
+    }
+
+    // The existing SQLx harness creates a fresh migrated database. This test
+    // must stay ignored in pure component runs; no ambient database is safe.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn configuration_coverage_and_shared_modes_do_not_confer_runtime(pool: PgPool) {
+        sqlx::query(
+            "UPDATE scan_schedule_policy SET on_build=FALSE, deployed_interval='1d', archived_enabled=FALSE WHERE id=1",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let flake: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name,repo_url,branch,snapshot_ready_at) VALUES ('shared','https://example.test/shared','main',NOW()) RETURNING id",
+        ).fetch_one(&pool).await.unwrap();
+        let commit: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id,git_commit_hash,commit_timestamp) VALUES ($1,'shared-head',NOW()) RETURNING id",
+        ).bind(flake).fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO flake_branch_commit_snapshot (flake_id,commit_id,position) VALUES ($1,$2,0)")
+            .bind(flake).bind(commit).execute(&pool).await.unwrap();
+        let artifact: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (derivation_type,derivation_name,commit_id,store_path,derivation_path,status_id,attempt_count,completed_at) VALUES ('nixos','shared-config',$1,'/nix/store/shared-system','/nix/store/shared.drv',(SELECT id FROM derivation_statuses WHERE name='build-complete' LIMIT 1),0,NOW()-INTERVAL '90 days') RETURNING id",
+        ).bind(commit).fetch_one(&pool).await.unwrap();
+        let mut registrations = Vec::new();
+        for (name, mode) in [
+            ("external-one", "external"),
+            ("reference-one", "reference"),
+            ("reference-two", "reference"),
+        ] {
+            let environment: Uuid =
+                sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let id: Uuid = sqlx::query_scalar(
+                "INSERT INTO systems (hostname,management_mode,public_key,derivation,system_configuration_name,deployment_policy,flake_id,environment_id,is_active) VALUES ($1,$2,NULL,'','shared-config','manual',$3,$4,TRUE) RETURNING id",
+            ).bind(name).bind(mode).bind(flake).bind(environment).fetch_one(&pool).await.unwrap();
+            registrations.push((id, name, mode));
+        }
+        // No heartbeat or recovery job exists. The ready configuration artifact
+        // remains in the operational denominator even before its first scan.
+        let stats = get_scan_stats(&pool).await.unwrap();
+        assert_eq!((stats.never_scanned, stats.coverage_percent), (1, 0));
+        let scan: Uuid = sqlx::query_scalar(
+            "INSERT INTO cve_scans (derivation_id,scanner_name,status,completed_at) VALUES ($1,'vulnix','completed',NOW()-INTERVAL '2 days') RETURNING id",
+        ).bind(artifact).fetch_one(&pool).await.unwrap();
+        let stats = get_scan_stats(&pool).await.unwrap();
+        assert_eq!(
+            (stats.never_scanned, stats.coverage_percent, stats.stale),
+            (0, 100, 1)
+        );
+
+        // A new selected revision cannot borrow historical good evidence.
+        let next_commit: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id,git_commit_hash,commit_timestamp) VALUES ($1,'unbuilt-head',NOW()) RETURNING id",
+        ).bind(flake).fetch_one(&pool).await.unwrap();
+        sqlx::query(
+            "UPDATE flake_branch_commit_snapshot SET commit_id=$1 WHERE flake_id=$2 AND position=0",
+        )
+        .bind(next_commit)
+        .bind(flake)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(get_scan_stats(&pool).await.unwrap().coverage_percent, 0);
+        assert_eq!(
+            get_scan_records(&pool, &records(None, ScanRecordCollection::Completed))
+                .await
+                .unwrap()
+                .total,
+            1
+        );
+        sqlx::query(
+            "UPDATE flake_branch_commit_snapshot SET commit_id=$1 WHERE flake_id=$2 AND position=0",
+        )
+        .bind(commit)
+        .bind(flake)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Retained pre-conversion reports cannot make a nonmanaged resource
+        // current, even when an exact output path happens to match.
+        for (_, name, _) in &registrations {
+            sqlx::query("INSERT INTO system_states (hostname,store_path,change_reason,timestamp) VALUES ($1,'/nix/store/shared-system','config_change',NOW())")
+                .bind(name).execute(&pool).await.unwrap();
+        }
+        assert_eq!(get_scan_deployed(&pool, 50, None).await.unwrap().total, 0);
+        let queue = get_scan_queue(&pool, 50).await.unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue[0].management_modes,
+            vec![ManagementMode::External, ManagementMode::Reference]
+        );
+        assert!(!queue[0].is_current);
+        let systems = get_scan_systems(&pool, 50).await.unwrap();
+        assert_eq!(systems.len(), 3);
+        for (id, name, mode) in &registrations {
+            let system = systems.iter().find(|row| row.system_id == *id).unwrap();
+            assert_eq!(system.hostname, *name);
+            assert_eq!(system.environment.as_deref(), Some(*name));
+            assert_eq!(system.management_mode.as_str(), *mode);
+            assert_eq!(system.current_derivation_id, None);
+            assert_eq!(system.current_scan_id, None);
+            assert_eq!(
+                (system.scanned, system.stale),
+                (0, 1),
+                "an old selected head uses the operational cadence even with archived scans disabled"
+            );
+            assert_eq!((system.current_crit, system.current_high), (0, 0));
+            let history = get_scan_queue_for_system(&pool, *id, 50).await.unwrap();
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].hostname, *name);
+            assert_eq!(history[0].management_modes, vec![mode.parse().unwrap()]);
+            assert!(!history[0].is_current);
+            for collection in [
+                ScanRecordCollection::Completed,
+                ScanRecordCollection::History,
+            ] {
+                let history = get_scan_records(&pool, &records(Some(*id), collection))
+                    .await
+                    .unwrap();
+                assert_eq!(history.rows.len(), 1);
+                assert_eq!(history.rows[0].scan_id, scan);
+                assert_eq!(
+                    history.rows[0].management_modes,
+                    vec![mode.parse().unwrap()]
+                );
+                assert!(!history.rows[0].is_current);
+            }
+        }
+        // A managed registration sharing the artifact makes global runtime
+        // classification true, never the external/reference scoped histories.
+        sqlx::query("INSERT INTO systems (hostname,public_key,derivation,system_configuration_name,deployment_policy,flake_id,is_active) VALUES ('managed-one','test-key','','shared-config','manual',$1,TRUE)")
+            .bind(flake).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO system_states (hostname,store_path,change_reason,timestamp) VALUES ('managed-one','/nix/store/shared-system','config_change',NOW())")
+            .execute(&pool).await.unwrap();
+        let deployed = get_scan_deployed(&pool, 50, None).await.unwrap();
+        assert_eq!(deployed.total, 1);
+        assert!(deployed.rows[0].is_current);
+        assert_eq!(
+            deployed.rows[0].management_modes,
+            vec![
+                ManagementMode::External,
+                ManagementMode::Managed,
+                ManagementMode::Reference
+            ]
+        );
+        for collection in [
+            ScanRecordCollection::Completed,
+            ScanRecordCollection::History,
+        ] {
+            let global = get_scan_records(&pool, &records(None, collection))
+                .await
+                .unwrap();
+            assert!(global.rows[0].is_current);
+            let scoped = get_scan_records(&pool, &records(Some(registrations[0].0), collection))
+                .await
+                .unwrap();
+            assert!(!scoped.rows[0].is_current);
+            assert_eq!(
+                scoped.rows[0].management_modes,
+                vec![ManagementMode::External]
+            );
+        }
+        // Renaming a registration removes only its association, not evidence.
+        sqlx::query("UPDATE systems SET system_configuration_name='removed' WHERE management_mode<>'managed'")
+            .execute(&pool).await.unwrap();
+        sqlx::query("UPDATE systems SET is_active=FALSE WHERE hostname='managed-one'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            get_scan_queue(&pool, 50).await.unwrap()[0]
+                .management_modes
+                .is_empty()
+        );
+        assert_eq!(get_scan_stats(&pool).await.unwrap().coverage_percent, 0);
+        assert_eq!(
+            get_scan_records(&pool, &records(None, ScanRecordCollection::Completed))
+                .await
+                .unwrap()
+                .total,
+            1
+        );
+    }
 }

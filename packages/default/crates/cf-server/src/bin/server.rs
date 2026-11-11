@@ -48,6 +48,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+
 #[cfg(feature = "embedded-ui")]
 use crystal_forge::handlers::ui;
 
@@ -218,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
     // Start HTTP server
     info!("Starting Crystal Forge Server...");
     let server_cfg = &cfg.server;
-    info!("Host: 0.0.0.0");
+    info!("Host: {}", server_cfg.host);
     info!("Port: {}", server_cfg.port);
 
     // Create event-driven queue notifier
@@ -527,6 +528,14 @@ async fn main() -> anyhow::Result<()> {
             put(systems::evaluation_lifecycle::put_evaluation_lifecycle),
         )
         .route("/api/v1/systems/:id/cves", get(systems::get_system_cves))
+        .route(
+            "/api/v1/systems/:id/configuration-assurance",
+            get(crystal_forge::handlers::api::configuration_assurance::get),
+        )
+        .route(
+            "/api/v1/systems/:id/guest-observations/latest",
+            get(crystal_forge::handlers::api::guest_observations::latest),
+        )
         .route(
             "/api/v1/systems/:id/cve-inventory",
             get(systems::get_system_cve_inventory),
@@ -1332,7 +1341,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = app.layer(cors).with_state(state);
 
-    let listener = TcpListener::bind(("0.0.0.0", server_cfg.port)).await?;
+    let listener = bind_listener(server_cfg).await?;
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -1340,6 +1349,50 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+/// Binds the HTTP listener to the configured host and port.
+async fn bind_listener(
+    server_cfg: &crystal_forge::config::ServerConfig,
+) -> std::io::Result<TcpListener> {
+    TcpListener::bind((server_cfg.host.as_str(), server_cfg.port)).await
+}
+
+#[cfg(test)]
+mod listener_tests {
+    use super::{CrystalForgeConfig, bind_listener};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[tokio::test]
+    async fn configured_loopback_binds_only_loopback() {
+        let cfg: CrystalForgeConfig =
+            toml::from_str("[server]\nhost = '127.0.0.1'\nport = 0").unwrap();
+        let listener = bind_listener(&cfg.server).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        assert_eq!(address.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_ne!(address.port(), 0);
+    }
+
+    #[tokio::test]
+    async fn omitted_server_preserves_wildcard_bind() {
+        let mut cfg: CrystalForgeConfig = toml::from_str("").unwrap();
+        // Let the OS allocate a port without changing the default bind host.
+        cfg.server.port = 0;
+        let listener = bind_listener(&cfg.server).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        assert_eq!(address.ip(), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_ne!(address.port(), 0);
+    }
+
+    #[tokio::test]
+    async fn configured_wildcard_binds_all_ipv4_interfaces() {
+        let cfg: CrystalForgeConfig =
+            toml::from_str("[server]\nhost = '0.0.0.0'\nport = 0").unwrap();
+        let listener = bind_listener(&cfg.server).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        assert_eq!(address.ip(), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_ne!(address.port(), 0);
+    }
 }
 
 /// Adds the single-page application fallback when the server embeds the UI.

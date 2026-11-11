@@ -119,7 +119,20 @@ Eligibility rules:
 
 - `status = 'queued'` and `available_at <= NOW()`;
 - the environment rule above;
-- the derivation has `cf_agent_enabled` and `policy_requirements_met` set.
+- the derivation either has `cf_agent_enabled` and `policy_requirements_met`
+  set, or carries saved artifact-admission evidence
+  (`policy_results.global.artifactAdmission.passed`) for an active external or
+  reference registration of the exact flake and configuration.
+
+The artifact-admission branch (TASK-508) applies to both peeks and all four
+atomic claim variants (server-derivation and verified-source, wildcard and
+environment-filtered). It does not change the recorded `cf_agent_enabled` fact,
+relax session fencing, environment filtering, verified-source prerequisites or
+cache preflight, or make the derivation deployable. See
+[management modes](../concepts/management-modes-and-configuration-assurance.md).
+
+The legacy in-process `build_reservations::claim_next_derivation` path has no
+artifact-policy gate and no production caller; it is not used by API builders.
 
 Order among eligible jobs: `queue_position DESC NULLS LAST`, then
 `priority_weight DESC`, then the commit timestamp `DESC NULLS LAST`, then

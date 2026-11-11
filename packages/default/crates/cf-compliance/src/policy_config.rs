@@ -374,7 +374,52 @@ fn validate_package_pname(pname: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn validate_custom_eval_syntax(expressions: &[&str]) -> Result<(), String> {
+/// Starts every policy validation message that reports an unavailable parser.
+///
+/// Such a message states that the bounded Nix parser could not start, could
+/// not be awaited, or did not finish within its deadline. It states nothing
+/// about the expression. Callers MUST report it as a retryable service
+/// condition and MUST NOT report it as invalid policy input.
+pub const NIX_SYNTAX_VALIDATION_UNAVAILABLE: &str = "Nix syntax validation unavailable";
+
+/// Returns whether a policy validation message reports an unavailable parser
+/// instead of an invalid policy. See [`NIX_SYNTAX_VALIDATION_UNAVAILABLE`].
+pub fn is_syntax_validation_unavailable(message: &str) -> bool {
+    message.starts_with(NIX_SYNTAX_VALIDATION_UNAVAILABLE)
+}
+
+/// Deadline for one custom-expression parse, measured from parser spawn.
+///
+/// SECURITY: The bound keeps untrusted expressions from holding a request or
+/// import worker. Expiry rejects the request as unavailable; it never accepts
+/// an unparsed expression.
+const NIX_SYNTAX_VALIDATION_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Distinguishes a parser verdict from a parser that produced no verdict.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SyntaxValidationError {
+    /// The parser ran and rejected the expression text.
+    Invalid(String),
+    /// The parser produced no verdict: spawn, wait, or deadline failure.
+    Unavailable(String),
+}
+
+impl SyntaxValidationError {
+    /// Formats the error for a policy validation message. `subject` names the
+    /// expression owner, for example `custom_check expression`.
+    pub(crate) fn into_message(self, subject: &str) -> String {
+        match self {
+            Self::Invalid(diagnostic) => format!("{subject} is invalid: {diagnostic}"),
+            Self::Unavailable(diagnostic) => format!(
+                "{NIX_SYNTAX_VALIDATION_UNAVAILABLE}: {diagnostic}. The {subject} was not checked; retry the request."
+            ),
+        }
+    }
+}
+
+pub(crate) fn validate_custom_eval_syntax(
+    expressions: &[&str],
+) -> Result<(), SyntaxValidationError> {
     // Parse every custom expression in one bounded subprocess. This keeps the
     // synchronous persistence API while avoiding one blocking process and
     // timeout for every rule on an async request path.
@@ -386,39 +431,65 @@ pub(crate) fn validate_custom_eval_syntax(expressions: &[&str]) -> Result<(), St
             .collect::<Vec<_>>()
             .join(" ")
     );
-    let mut child = Command::new("nix-instantiate")
-        // Parsing needs no store. The dummy store also avoids initializing
-        // local Nix state in restricted package-build and service sandboxes.
-        .args(["--store", "dummy://", "--parse", "--expr", &wrapped])
+    let mut command = Command::new("nix-instantiate");
+    // Parsing needs no store. The dummy store also avoids initializing local
+    // Nix state in restricted package-build and service sandboxes.
+    command.args(["--store", "dummy://", "--parse", "--expr", &wrapped]);
+    run_bounded_parser(command, NIX_SYNTAX_VALIDATION_DEADLINE)
+}
+
+/// Runs one parser process and classifies its outcome.
+///
+/// A nonzero exit is a parser verdict ([`SyntaxValidationError::Invalid`]).
+/// Spawn, wait, or collection failure and deadline expiry are
+/// [`SyntaxValidationError::Unavailable`]: host load can delay a valid parse,
+/// so expiry is not evidence of invalid syntax. An expired child is killed
+/// and reaped before return.
+fn run_bounded_parser(
+    mut command: Command,
+    deadline: Duration,
+) -> Result<(), SyntaxValidationError> {
+    let mut child = command
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("could not run the Nix parser: {error}"))?;
-    let deadline = Instant::now() + Duration::from_secs(2);
+        .map_err(|error| {
+            SyntaxValidationError::Unavailable(format!("could not run the Nix parser: {error}"))
+        })?;
+    let expires_at = Instant::now() + deadline;
     loop {
         if child
             .try_wait()
-            .map_err(|error| format!("could not wait for the Nix parser: {error}"))?
+            .map_err(|error| {
+                SyntaxValidationError::Unavailable(format!(
+                    "could not wait for the Nix parser: {error}"
+                ))
+            })?
             .is_some()
         {
             break;
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= expires_at {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("Nix syntax validation timed out after 2 seconds".to_string());
+            return Err(SyntaxValidationError::Unavailable(format!(
+                "the Nix parser did not finish within {} seconds",
+                deadline.as_secs_f64()
+            )));
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("could not collect Nix parser output: {error}"))?;
+    let output = child.wait_with_output().map_err(|error| {
+        SyntaxValidationError::Unavailable(format!("could not collect Nix parser output: {error}"))
+    })?;
     if output.status.success() {
         return Ok(());
     }
     let diagnostic = String::from_utf8_lossy(&output.stderr);
     let diagnostic = diagnostic.trim().chars().take(500).collect::<String>();
-    Err(format!("invalid Nix expression syntax: {diagnostic}"))
+    Err(SyntaxValidationError::Invalid(format!(
+        "invalid Nix expression syntax: {diagnostic}"
+    )))
 }
 
 /// Validates the exact policy type and config at each persistence boundary.
@@ -575,7 +646,7 @@ fn decode_policy_type_config(
     }
     if !custom_eval_expressions.is_empty() {
         validate_custom_eval_syntax(&custom_eval_expressions)
-            .map_err(|error| format!("composite custom_eval expression is invalid: {error}"))?;
+            .map_err(|error| error.into_message("composite custom_eval expression"))?;
     }
 
     Ok(Some(composite))
@@ -684,4 +755,53 @@ pub fn is_reserved_policy_result_field(field_name: &str) -> bool {
     RESERVED_POLICY_RESULT_FIELDS
         .iter()
         .any(|reserved| reserved.eq_ignore_ascii_case(field_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parser_deadline_expiry_is_unavailable_not_invalid() {
+        // The child cannot finish before the deadline, so this outcome does
+        // not depend on scheduling: it is always deadline expiry.
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 30"]);
+        let started = Instant::now();
+        let error = run_bounded_parser(command, Duration::from_millis(50)).unwrap_err();
+        assert!(matches!(error, SyntaxValidationError::Unavailable(_)));
+        // The expired child is killed and reaped, not left to run 30 seconds.
+        assert!(started.elapsed() < Duration::from_secs(30));
+        let message = error.into_message("custom_check expression");
+        assert!(is_syntax_validation_unavailable(&message));
+        assert!(!message.contains("is invalid"), "{message}");
+    }
+
+    #[test]
+    fn parser_spawn_failure_is_unavailable_not_invalid() {
+        let command = Command::new("/nonexistent/crystal-forge-parser");
+        let error = run_bounded_parser(command, Duration::from_secs(2)).unwrap_err();
+        assert!(matches!(error, SyntaxValidationError::Unavailable(_)));
+    }
+
+    #[test]
+    fn parser_rejection_remains_invalid() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 'syntax error' >&2; exit 1"]);
+        let error = run_bounded_parser(command, Duration::from_secs(30)).unwrap_err();
+        assert_eq!(
+            error,
+            SyntaxValidationError::Invalid("invalid Nix expression syntax: syntax error".into())
+        );
+        let message = error.into_message("custom_check expression");
+        assert!(message.starts_with("custom_check expression is invalid:"));
+        assert!(!is_syntax_validation_unavailable(&message));
+    }
+
+    #[test]
+    fn parser_success_is_accepted() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 0"]);
+        assert_eq!(run_bounded_parser(command, Duration::from_secs(30)), Ok(()));
+    }
 }

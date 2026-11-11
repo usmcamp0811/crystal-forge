@@ -436,6 +436,9 @@ pub(crate) fn parse_deployment_policy_record(
     let cfg = &record.config;
     match record.policy_type.as_str() {
         "require_cf_agent" => {
+            // An explicitly assigned agent policy remains a requirement for
+            // external/reference artifacts too. Only the implicit managed
+            // deployment prerequisite is separated at build admission.
             if cfg.get("strict").and_then(|v| v.as_bool()) == Some(false) {
                 warn!(
                     "Ignoring strict=false for require_cf_agent policy '{}' ({}); enforcing strict=true",
@@ -1854,6 +1857,19 @@ async fn run_builder_recovery_loop(
             error!("❌ Builder recovery cycle failed: {:#}", err);
         }
 
+        // Registration changes can leave a queued job that no builder may claim.
+        // Cancel it so it does not wait indefinitely.
+        match crate::queries::build_jobs::retire_unclaimable_queued_jobs(&pool).await {
+            Ok(count) if count > 0 => {
+                warn!(
+                    "🧹 Cancelled {} queued builds that no longer satisfy artifact admission",
+                    count
+                );
+            }
+            Ok(_) => {}
+            Err(e) => error!("❌ Queued build revalidation failed: {:#}", e),
+        }
+
         // Periodically recover derivations whose build-preparation task failed.
         // This runs regardless of service restarts so a build job is eventually
         // created without requiring manual intervention or a service restart.
@@ -1969,11 +1985,14 @@ async fn process_pending_commits(
         let cfg = match CrystalForgeConfig::load() {
             Ok(cfg) => cfg,
             Err(e) => {
-                error!("❌ Failed to load config: {}", e);
+                // `{:#}` keeps the anyhow cause chain. The outer context alone
+                // ("loading configuration") hides the file or parse failure
+                // that operators must fix, and the UI shows this stored text.
+                error!("❌ Failed to load config: {:#}", e);
                 let _ = mark_commit_evaluation_failed(
                     pool,
                     commit.id,
-                    &e.to_string(),
+                    &format!("{e:#}"),
                     attempt,
                     crate::models::retry_policy::RetryFailureClass::Deterministic,
                 )

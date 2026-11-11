@@ -601,7 +601,7 @@ async fn fetch_commit_config_paths(
                 ss.store_path,
                 ss.timestamp,
                 ss.id
-            FROM system_states ss
+            FROM view_agent_current_system_states ss
             WHERE ss.hostname IN (SELECT hostname FROM relevant_systems)
             ORDER BY ss.hostname, ss.timestamp DESC, ss.id DESC
         ),
@@ -2431,6 +2431,8 @@ pub async fn trigger_flake_config_cve_scan(
     (
         StatusCode::ACCEPTED,
         Json(CveScanTriggerResponse {
+            configuration_derivation_id: None,
+            derivation_id: Some(target.derivation_id),
             scan_id,
             status: "accepted".to_string(),
             message: format!(
@@ -3213,7 +3215,12 @@ mod task_221_integration_tests {
             hostname: hostname.to_string(),
             environment_id: None,
             is_active: true,
-            public_key: crate::models::public_key::PublicKey::from_verifying_key(verifying),
+            management_mode: crate::models::systems::ManagementMode::Managed,
+            agent_enrolled_at: None,
+            public_key: Some(crate::models::public_key::PublicKey::from_verifying_key(
+                verifying,
+            )),
+            parent_host_id: None,
             flake_id,
             derivation: String::new(),
             system_configuration_name: config_name.map(str::to_string),

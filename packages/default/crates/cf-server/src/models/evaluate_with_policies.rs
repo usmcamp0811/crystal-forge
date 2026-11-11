@@ -1166,8 +1166,9 @@ use crate::flake::verified_source::materialize_immutable_source;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
     AssignedPolicy, EvaluationTerminalOutcome, PoliciesByConfiguration, PolicyCheckResult,
-    build_nix_eval_expression_for_source, build_nix_eval_expression_for_source_configurations,
-    policies_for_config, policy_requirements_met, policy_results_json,
+    artifact_requirements_met, build_nix_eval_expression_for_source,
+    build_nix_eval_expression_for_source_configurations, policies_for_config,
+    policy_requirements_met, policy_results_json,
 };
 use crate::models::evaluation_snapshots::EvaluatedOption;
 use crate::models::flakes::Flake;
@@ -2887,12 +2888,18 @@ pub enum SystemPersistenceOutcome {
         derivation_id: i32,
         drv_path: String,
     },
-    /// A build job already exists for this derivation (from a prior call).
-    /// Create a GC root (best-effort) and re-notify if still queued.
+    /// Owns or adopts an existing real build job for this physical artifact.
+    /// Repairs an own-job GC root best-effort and re-notifies queued work.
+    /// Adopted work retains the real execution's root ownership.
+    /// The job retains its actual execution derivation, source and session.
     ExistingBuildJob {
+        /// Identifies this evaluated configuration carrier, not the job owner.
         derivation_id: i32,
+        /// Identifies the real own or adopted job; no B execution is invented.
         build_job_id: uuid::Uuid,
+        /// Contains the actual job's lifecycle state.
         build_job_status: String,
+        /// Contains this configuration's exact evaluated physical drv path.
         drv_path: String,
     },
     /// Derivation recorded but no build job (policy/scope rejection).
@@ -2932,14 +2939,12 @@ pub enum SystemNotQueuedReason {
     /// active Crystal Forge system).  The derivation is still recorded
     /// for accounting and total-system-count accuracy.
     BuildScopeExcluded,
-    /// Another commit owns the same path while the legacy global uniqueness
-    /// constraint remains. The commit-owned evaluation row must not build.
-    LegacyDerivationPathConflict,
 }
 
 fn system_not_queued_reason(
     policy_check: &PolicyCheckResult,
     build_eligible: bool,
+    artifact_admitted: bool,
 ) -> Option<SystemNotQueuedReason> {
     // build_scope filtering: if the system is not eligible under the flake's
     // build_scope policy, still record the derivation but do not create a
@@ -2949,7 +2954,11 @@ fn system_not_queued_reason(
         return Some(SystemNotQueuedReason::BuildScopeExcluded);
     }
 
-    if policy_check.cf_agent_enabled == Some(false) {
+    if artifact_admitted {
+        return None;
+    }
+
+    if policy_check.cf_agent_enabled != Some(true) {
         return Some(SystemNotQueuedReason::AgentPolicyFailure);
     }
 
@@ -2990,7 +2999,11 @@ fn system_not_queued_reason(
 /// An existing failed build with the server-owned obsolete-contract code
 /// returns [`SystemPersistenceOutcome::NeedsBuildPreparation`]. The later
 /// activation transaction preserves that row and creates a replacement attempt.
-/// Other existing build jobs return [`SystemPersistenceOutcome::ExistingBuildJob`].
+/// Other existing or admitted shared work returns
+/// [`SystemPersistenceOutcome::ExistingBuildJob`]. A blocked or failed physical
+/// origin cannot prevent a newly admitted configuration from creating its own
+/// real job. An adopted job that later fails permits normal preparation recovery
+/// under the adopting configuration's saved current policy and source context.
 /// Retains native terminal flags and policy results in an immutable exact-attempt
 /// sidecar in this transaction. Requires selected Native discovery inventory;
 /// mutable derivation updates on a later retry cannot erase this evidence.
@@ -3041,45 +3054,64 @@ pub async fn persist_evaluated_system(
         return Err(error);
     }
 
-    let system_id = sqlx::query_scalar::<_, uuid::Uuid>(
+    let system_ids = sqlx::query_scalar::<_, uuid::Uuid>(
         r#"
         SELECT s.id
         FROM systems s
         JOIN commits c ON c.id = $1 AND c.flake_id = s.flake_id
         WHERE COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = $2
+          AND s.is_active
+        ORDER BY s.id
         "#,
     )
     .bind(commit_id)
     .bind(&result.system_name)
-    .fetch_optional(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
-    let resolved_policies = match system_id {
-        Some(system_id) => {
-            match crate::compliance::resolver::resolve_system_effective_policies_in_tx(
-                &mut tx, system_id,
-            )
-            .await?
-            {
-                crate::compliance::resolver::ResolutionOutcome::Resolved(resolved) => {
-                    Some((system_id, resolved))
-                }
-                crate::compliance::resolver::ResolutionOutcome::Conflict(conflicts) => bail!(
-                    "Effective policy conflict while persisting {}: {}",
-                    result.system_name,
-                    conflicts
-                        .into_iter()
-                        .map(|conflict| conflict.message)
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                ),
+    let mut resolved_policies = Vec::new();
+    for system_id in &system_ids {
+        match crate::compliance::resolver::resolve_system_effective_policies_in_tx(
+            &mut tx, *system_id,
+        )
+        .await?
+        {
+            crate::compliance::resolver::ResolutionOutcome::Resolved(resolved) => {
+                resolved_policies.push((*system_id, resolved));
             }
+            crate::compliance::resolver::ResolutionOutcome::Conflict(conflicts) => bail!(
+                "Effective policy conflict while persisting {}: {}",
+                result.system_name,
+                conflicts
+                    .into_iter()
+                    .map(|conflict| conflict.message)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
         }
-        None => None,
-    };
+    }
 
     let drv_path = result.drv_path.clone();
     let policy_requirements_met = policy_requirements_met(policy_check);
+    // Artifact permission belongs to a configuration, not one arbitrarily
+    // selected registration. EXISTS preserves one evaluation/build identity
+    // even when managed and agentless resources share the configuration.
+    let agentless_registration: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM systems s JOIN commits c ON c.flake_id=s.flake_id
+         WHERE c.id=$1 AND s.is_active AND s.management_mode IN ('external','reference')
+           AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''),s.hostname)=$2)",
+    )
+    .bind(commit_id)
+    .bind(&result.system_name)
+    .fetch_one(&mut *tx)
+    .await?;
+    let artifact_admitted =
+        artifact_requirements_met(policy_check, assigned_policies, agentless_registration);
     let mut policy_results = policy_results_json(policy_check, assigned_policies);
+    // PERSISTENCE: This additive gate is artifact-only. Deployment columns and
+    // global.cfAgentEnabled retain their original meanings. Older evidence has
+    // no agentless admission and must be evaluated again before it can build.
+    policy_results["global"]["artifactAdmission"] =
+        serde_json::json!({"passed": artifact_admitted});
     // INVARIANT: Failure-only partial publication accepts only this exact
     // attempt's persisted result, never a success inherited from an older run.
     policy_results["evaluation_attempt"] = serde_json::json!(expected_attempt);
@@ -3113,14 +3145,11 @@ pub async fn persist_evaluated_system(
     let assessment_derivation_id = match &write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
-        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => *derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => *derivation_id,
     };
-    let has_exact_config_carrier =
-        !matches!(&write, SuccessfulEvalWrite::LegacyPathConflict { .. });
     // PERSISTENCE: Native deployment identity comes from this actual result and
     // row in the active-owner transaction, never from historical outcome data.
-    if has_exact_config_carrier && build_eligible && policy_requirements_met {
+    if build_eligible && policy_requirements_met {
         crate::queries::evaluation_snapshots::persist_native_deployment_identity_tx(
             &mut tx,
             commit_id,
@@ -3130,13 +3159,12 @@ pub async fn persist_evaluated_system(
         )
         .await?;
     }
-    if system_id.is_some() && has_exact_config_carrier {
+    if !system_ids.is_empty() {
         // FAILURE ISOLATION: Queue the cheap root fallback in the same
         // transaction as its exact derivation. Optional in-band publication
         // can upgrade this row asynchronously, but a restart or full channel
-        // cannot leave the configuration without durable root work. A legacy
-        // global path conflict has no commit-owned carrier and cannot satisfy
-        // the observation foreign-key identity.
+        // cannot leave the configuration without durable root work. A reused
+        // artifact retains this commit's actual carrier and exact Config FK.
         crate::queries::config_observations::queue_primary_config_root_fallback_tx(
             &mut tx,
             commit_id,
@@ -3146,7 +3174,8 @@ pub async fn persist_evaluated_system(
         )
         .await?;
     }
-    if let Some((system_id, resolved)) = resolved_policies.as_ref() {
+    // Evidence remains per registration; the artifact and its build job do not.
+    for (system_id, resolved) in &resolved_policies {
         crate::services::composite_enforcement::persist_eval_passed_for_system_in_tx(
             &mut tx,
             commit_id,
@@ -3180,13 +3209,6 @@ pub async fn persist_evaluated_system(
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id } => derivation_id,
-        SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => {
-            tx.commit().await?;
-            return Ok(SystemPersistenceOutcome::RecordedWithoutBuild {
-                derivation_id,
-                reason: SystemNotQueuedReason::LegacyDerivationPathConflict,
-            });
-        }
         SuccessfulEvalWrite::PreservedBuildState {
             derivation_id: existing_deriv_id,
             status_id: _,
@@ -3208,7 +3230,7 @@ pub async fn persist_evaluated_system(
             .await?;
 
             if let Some((build_job_id, build_job_status)) = existing {
-                if policy_requirements_met {
+                if build_eligible && artifact_admitted {
                     // Policy still passes — existing build job is fine.
                     tx.commit().await?;
                     return Ok(SystemPersistenceOutcome::ExistingBuildJob {
@@ -3221,8 +3243,9 @@ pub async fn persist_evaluated_system(
                     // Policy now fails. Derive the specific reason (agent
                     // vs. strict policy) instead of always reporting
                     // StrictPolicyFailure.
-                    let reason = system_not_queued_reason(policy_check, build_eligible)
-                        .unwrap_or(SystemNotQueuedReason::StrictPolicyFailure);
+                    let reason =
+                        system_not_queued_reason(policy_check, build_eligible, artifact_admitted)
+                            .unwrap_or(SystemNotQueuedReason::StrictPolicyFailure);
 
                     // Cancel the job only if it is STILL 'queued' at the
                     // moment of this guarded UPDATE (the row is already
@@ -3282,7 +3305,8 @@ pub async fn persist_evaluated_system(
         }
     };
 
-    if let Some(reason) = system_not_queued_reason(policy_check, build_eligible) {
+    if let Some(reason) = system_not_queued_reason(policy_check, build_eligible, artifact_admitted)
+    {
         // Mark the derivation as not requiring build preparation so the recovery
         // reconciler can distinguish it from a failed activation.
         sqlx::query(
@@ -3302,6 +3326,32 @@ pub async fn persist_evaluated_system(
         return Ok(SystemPersistenceOutcome::RecordedWithoutBuild {
             derivation_id,
             reason,
+        });
+    }
+
+    // CONCURRENCY: Reuse is admitted by this configuration's gates above, not
+    // the first evaluator's policies. Preserve the actual job and source; B's
+    // queued preparation means adopted real work, never a fabricated B job.
+    crate::queries::build_jobs::lock_build_derivation(&mut tx, derivation_id).await?;
+    crate::queries::build_jobs::retire_unclaimable_physical_jobs_tx(&mut tx, derivation_id).await?;
+    if let Some((build_job_id, build_job_status)) =
+        crate::queries::build_jobs::reusable_physical_build_tx(&mut tx, derivation_id).await?
+    {
+        sqlx::query(
+            "UPDATE derivations SET build_preparation_state='queued',reused_build_job_id=$2,
+                    build_preparation_last_error=NULL,build_preparation_next_attempt_at=NULL
+                    WHERE id=$1",
+        )
+        .bind(derivation_id)
+        .bind(build_job_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Ok(SystemPersistenceOutcome::ExistingBuildJob {
+            derivation_id,
+            build_job_id,
+            build_job_status,
+            drv_path,
         });
     }
 
@@ -3545,6 +3595,17 @@ pub async fn activate_evaluated_system_build(
             .fetch_optional(&mut *tx)
             .await?;
 
+            let environment_ambiguous: bool = match &state {
+                Some(state) => {
+                    sqlx::query_scalar("SELECT ambiguous FROM derivation_environment($1, $2)")
+                        .bind(commit_id)
+                        .bind(&state.derivation_name)
+                        .fetch_one(&mut *tx)
+                        .await?
+                }
+                None => false,
+            };
+
             tx.rollback().await?;
 
             let Some(state) = state else {
@@ -3553,6 +3614,16 @@ pub async fn activate_evaluated_system_build(
                     derivation_id,
                 );
             };
+
+            // TEMPORARY RESTRICTION (TASK-518): fail closed with an actionable
+            // reason. The preparation retry admits the job after the registrations
+            // share one environment.
+            if environment_ambiguous {
+                bail!(
+                    "Build refused for configuration {}: its registrations are in more than one environment. Register the configuration in one environment, or remove or move the other registrations. Sharing one configuration across environments is not supported yet.",
+                    state.derivation_name,
+                );
+            }
 
             bail!(
                 "Build activation could not create a build job for derivation {} ({}) with status_id={}, cf_agent_enabled={:?}, policy_requirements_met={}, derivation_path={:?}",
@@ -3925,17 +3996,30 @@ async fn prepare_persisted_evaluated_system(
             build_job_status,
             drv_path,
         } => {
-            // Best-effort GC root for existing build.
-            if let Err(err) = crate::builder::create_drv_gc_root(&drv_path, derivation_id).await {
-                warn!(
-                    "⚠️  Failed to create GC root for existing build drv {} (id={}): {}",
-                    drv_path, derivation_id, err
-                );
-            } else {
-                debug!(
-                    "📌 Rooted existing build drv (id={}, drv={})",
-                    derivation_id, drv_path
-                );
+            // RETENTION: The real execution owns the physical GC root. An
+            // adopted job must not leave a second B root with no B completion
+            // to remove it. If A later fails, normal recovery roots B before
+            // admitting B's own job. Preserve own-job best-effort repair.
+            let adopted: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM derivations WHERE id=$1 AND reused_build_job_id=$2)",
+            )
+            .bind(derivation_id)
+            .bind(build_job_id)
+            .fetch_one(pool)
+            .await?;
+            if !adopted {
+                if let Err(err) = crate::builder::create_drv_gc_root(&drv_path, derivation_id).await
+                {
+                    warn!(
+                        "⚠️  Failed to create GC root for existing build drv {} (id={}): {}",
+                        drv_path, derivation_id, err
+                    );
+                } else {
+                    debug!(
+                        "📌 Rooted existing build drv (id={}, drv={})",
+                        derivation_id, drv_path
+                    );
+                }
             }
 
             Ok(SystemFinalizeOutcome::BuildAlreadyExists {
@@ -5659,14 +5743,10 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                     assigned_policies,
                                                 )
                                             .await.map_err(persistence_failure)?;
-                                            let exact_carrier = !matches!(&persisted,
-                                                SystemPersistenceOutcome::RecordedWithoutBuild {
-                                                    reason: SystemNotQueuedReason::LegacyDerivationPathConflict, ..
-                                                });
                                             // Record durable completion before optional root/status
                                             // awaits. Deadline cancellation after the transaction
                                             // commits must retain its captures and policy evidence.
-                                            if exact_carrier && !matches!(&persisted,
+                                            if !matches!(&persisted,
                                                 SystemPersistenceOutcome::Cancelled | SystemPersistenceOutcome::Superseded) {
                                                 successful_results.push(successful.clone());
                                                 results.push(result.clone());
@@ -5677,7 +5757,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                             }
                                             // No await separates the completion checkpoint from
                                             // removing its candidate. Cancelled, superseded, and
-                                            // legacy-conflict outcomes also remove the intent,
+                                            // interrupted outcomes also remove the intent,
                                             // without granting completed status.
                                             unacknowledged_completions.remove(system_name);
 
@@ -6789,10 +6869,6 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                 &persisted,
                                 SystemPersistenceOutcome::Cancelled
                                     | SystemPersistenceOutcome::Superseded
-                                    | SystemPersistenceOutcome::RecordedWithoutBuild {
-                                        reason: SystemNotQueuedReason::LegacyDerivationPathConflict,
-                                        ..
-                                    }
                             ) {
                                 seen_systems.insert(result.system_name.clone());
                                 successful_results.push(result.clone());
@@ -8044,6 +8120,89 @@ fn summarize_commit_metadata(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn artifact_admission_never_overrides_scoped_selection() {
+        let check = super::PolicyCheckResult::from_assigned(
+            "reference".into(),
+            &serde_json::json!({"cfAgentEnabled": false}),
+            &[],
+        )
+        .unwrap();
+        assert!(matches!(
+            super::system_not_queued_reason(&check, false, true),
+            Some(super::SystemNotQueuedReason::BuildScopeExcluded)
+        ));
+        assert!(super::system_not_queued_reason(&check, true, true).is_none());
+        assert!(matches!(
+            super::system_not_queued_reason(&check, true, false),
+            Some(super::SystemNotQueuedReason::AgentPolicyFailure)
+        ));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn artifact_admission_persists_exact_configuration_and_truthful_agent_fact(pool: PgPool) {
+        let flake = insert_throwaway_flake(&pool).await;
+        let commit = insert_throwaway_commit(&pool, flake).await;
+        let attempt = start_eval(&pool, commit).await;
+        native_inventory(&pool, commit, attempt, &["shared", "excluded"]).await;
+        for name in ["shared", "excluded"] {
+            sqlx::query("INSERT INTO systems(hostname,flake_id,system_configuration_name,management_mode,is_active,derivation) VALUES($1,$2,$3,'reference',TRUE,$3)")
+                .bind(format!("resource-{name}")).bind(flake).bind(name)
+                .execute(&pool).await.unwrap();
+            let mut result = successful_system(name);
+            result.cf_agent_enabled = Some(false);
+            result.build_eligible = name == "shared";
+            let check = PolicyCheckResult::from_assigned(
+                name.into(),
+                &serde_json::json!({"cfAgentEnabled": false}),
+                &[],
+            )
+            .unwrap();
+            let outcome =
+                super::persist_evaluated_system(&pool, commit, attempt, &result, &check, &[])
+                    .await
+                    .unwrap();
+            if name == "shared" {
+                assert!(matches!(
+                    outcome,
+                    super::SystemPersistenceOutcome::NeedsBuildPreparation { .. }
+                ));
+            } else {
+                assert!(matches!(
+                    outcome,
+                    super::SystemPersistenceOutcome::RecordedWithoutBuild {
+                        reason: super::SystemNotQueuedReason::BuildScopeExcluded,
+                        ..
+                    }
+                ));
+            }
+            let (agent, requirements, evidence): (bool, bool, serde_json::Value) = sqlx::query_as(
+                "SELECT cf_agent_enabled,policy_requirements_met,policy_results FROM derivations
+                 WHERE commit_id=$1 AND derivation_name=$2",
+            )
+            .bind(commit)
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(!agent && !requirements);
+            assert_eq!(evidence["global"]["cfAgentEnabled"]["passed"], false);
+            assert_eq!(evidence["global"]["artifactAdmission"]["passed"], true);
+            assert_eq!(evidence["evaluation_attempt"], attempt);
+            let native: serde_json::Value = sqlx::query_scalar(
+                "SELECT policy_results FROM evaluation_native_outcomes WHERE commit_id=$1
+                 AND attempt_number=$2 AND configuration_name=$3",
+            )
+            .bind(commit)
+            .bind(attempt)
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(native, evidence);
+        }
+    }
     use super::{
         PREFLIGHT_LOG_EXCERPT_MAX_CHARS, authoritative_evaluator_args, classify_evaluation_failure,
         isolate_authoritative_evaluator_credentials, preflight_discovery_failure_log,
@@ -8479,28 +8638,50 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn preflight_stalled_progress_logger_does_not_delay_child_deadline() {
+        use std::os::fd::AsRawFd;
+
+        // The runner's deadline starts at spawn, and neither child startup nor
+        // stderr scheduling is bounded relative to it. Establish both orderings
+        // here instead of racing the 100 ms deadline:
+        // - progress is observed before the operation starts, so the logger
+        //   starts and stalls on the first poll while the child still runs;
+        // - the child records its PID before exec, so before spawn returns.
         let directory = tempfile::tempdir().unwrap();
-        let pid_file = directory.path().join("logger-child");
+        let pid_path = directory.path().join("logger-child");
+        let pid_file = std::fs::File::create(&pid_path).unwrap();
+        let pid_fd = pid_file.as_raw_fd();
         let (progress, observed) = tokio::sync::watch::channel(false);
+        progress.send_replace(true);
         let logged = std::sync::atomic::AtomicBool::new(false);
         let mut command = Command::new("sh");
-        command
-            .args([
-                "-c",
-                "printf '%s' \"$$\" > \"$1\"; printf \"unpacking '\" >&2; exec sleep 60",
-                "--",
-            ])
-            .arg(&pid_file);
+        command.args(["-c", "exec sleep 60"]);
+        // SAFETY: The closure runs in the forked child before exec. It calls
+        // only async-signal-safe getpid and write on a descriptor that the
+        // parent opened and keeps open until spawn returns. It formats into a
+        // stack buffer, so it neither allocates nor takes a lock.
+        unsafe {
+            command.pre_exec(move || {
+                let mut pid = libc::getpid() as u32;
+                let mut digits = [0u8; 10];
+                let mut start = digits.len();
+                loop {
+                    start -= 1;
+                    digits[start] = b'0' + (pid % 10) as u8;
+                    pid /= 10;
+                    if pid == 0 {
+                        break;
+                    }
+                }
+                let remaining = &digits[start..];
+                libc::write(pid_fd, remaining.as_ptr().cast(), remaining.len());
+                Ok(())
+            });
+        }
+        let deadline = std::time::Duration::from_millis(100);
         let started = tokio::time::Instant::now();
         let operation = super::DISCOVERY_INPUT_PROGRESS.scope(
             progress,
-            run_nix_command_bounded(
-                &mut command,
-                "stalled log fixture",
-                std::time::Duration::from_millis(100),
-                16,
-                16,
-            ),
+            run_nix_command_bounded(&mut command, "stalled log fixture", deadline, 16, 16),
         );
         let error = super::with_discovery_progress(operation, observed, async {
             logged.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -8508,19 +8689,97 @@ mod tests {
         })
         .await
         .unwrap_err();
-        assert!(logged.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        drop(pid_file);
         assert!(
-            error
-                .downcast_ref::<super::BoundedProcessTimeout>()
-                .is_some()
+            logged.load(std::sync::atomic::Ordering::SeqCst),
+            "the logger must have started and stalled during child execution"
         );
-        let pgid = tokio::fs::read_to_string(pid_file)
-            .await
-            .unwrap()
-            .parse()
-            .unwrap();
+        // Contract bound from spawn: the deadline plus the cleanup
+        // acknowledgement budget. A stalled logger adds nothing; the exact
+        // no-delay property is proven in virtual time by
+        // `discovery_progress_logger_never_extends_operation`.
+        assert!(started.elapsed() < deadline + super::BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT);
+        let timeout = error
+            .downcast_ref::<super::BoundedProcessTimeout>()
+            .expect("deadline expiry must stay a typed runner timeout");
+        assert!(timeout.cleanup_confirmed);
+        let pgid = std::fs::read_to_string(pid_path).unwrap().parse().unwrap();
         assert!(super::process_group_absent(pgid));
+    }
+
+    /// Proves in virtual time that discovery logging never extends discovery.
+    ///
+    /// Paused tokio time makes each case exact: a stalled logger is bounded by
+    /// `DISCOVERY_LOG_BUDGET`, and the operation result is returned at the
+    /// operation's own completion time in every ordering.
+    #[tokio::test(start_paused = true)]
+    async fn discovery_progress_logger_never_extends_operation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let operation_time = std::time::Duration::from_millis(100);
+        assert!(operation_time < super::DISCOVERY_LOG_BUDGET);
+
+        // Progress before completion: the logger starts and stalls, and the
+        // result still returns when the operation completes.
+        let (progress, observed) = tokio::sync::watch::channel(false);
+        let logged = AtomicBool::new(false);
+        let started = tokio::time::Instant::now();
+        let result = super::with_discovery_progress(
+            async move {
+                progress.send_replace(true);
+                tokio::time::sleep(operation_time).await;
+                Ok::<_, anyhow::Error>(7)
+            },
+            observed,
+            async {
+                logged.store(true, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, 7);
+        assert!(logged.load(Ordering::SeqCst));
+        assert_eq!(started.elapsed(), operation_time);
+
+        // An operation slower than the log budget: the stalled logger expires
+        // at the budget, and the result still returns at operation completion.
+        let slow = super::DISCOVERY_LOG_BUDGET * 4;
+        let (progress, observed) = tokio::sync::watch::channel(true);
+        let started = tokio::time::Instant::now();
+        let result = super::with_discovery_progress(
+            async move {
+                tokio::time::sleep(slow).await;
+                drop(progress);
+                Ok::<_, anyhow::Error>(8)
+            },
+            observed,
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, 8);
+        assert_eq!(started.elapsed(), slow);
+
+        // Completion in the same poll as progress: logging is best effort and
+        // is dropped instead of delaying the result.
+        let (progress, observed) = tokio::sync::watch::channel(false);
+        let logged = AtomicBool::new(false);
+        let started = tokio::time::Instant::now();
+        let result = super::with_discovery_progress(
+            async move {
+                progress.send_replace(true);
+                Ok::<_, anyhow::Error>(9)
+            },
+            observed,
+            async {
+                logged.store(true, Ordering::SeqCst);
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, 9);
+        assert!(!logged.load(Ordering::SeqCst));
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO);
     }
 
     #[tokio::test]
@@ -11570,6 +11829,7 @@ mod tests {
         // identical check + assigned policies (this is exactly what
         // `persist_evaluated_system` computes internally).
         let mut expected = policy_results_json(&check, &assigned);
+        expected["global"]["artifactAdmission"] = serde_json::json!({"passed": false});
         expected["evaluation_attempt"] = serde_json::json!(attempt);
         assert_eq!(
             persisted, expected,

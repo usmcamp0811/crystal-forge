@@ -67,6 +67,16 @@ impl From<anyhow::Error> for CveScanError {
     }
 }
 
+/// Starts or reuses a scan of one exact derivation through the existing runner.
+///
+/// Registration mode does not change scanner identity, cache verification, or
+/// execution fencing. The resulting artifact is not proof of runtime state;
+/// Current authority is resolved independently for managed registrations.
+///
+/// # Errors
+///
+/// Returns an availability error when vulnix cannot run, or an internal error
+/// when scan admission or execution setup fails.
 pub async fn trigger_immediate_cve_scan(
     pool: PgPool,
     derivation_id: i32,
@@ -138,6 +148,57 @@ where
         CreateCveScanOutcome::Created(claim) => claim,
         CreateCveScanOutcome::Existing(scan_id) => return Ok(scan_id),
     };
+    execute_admitted_scan_with_runner(
+        pool,
+        claim,
+        vulnix_version,
+        runner_factory,
+        heartbeat_interval,
+        revocation_ack_gate,
+    )
+    .await
+}
+
+/// Starts an already committed managed-local execution with existing fencing.
+///
+/// Admission and actor scope locks must be released before this call. The
+/// execution lock, heartbeat and cancellation contract are identical to the
+/// compatibility immediate-scan entry point.
+///
+/// # Errors
+/// Returns execution-lock, heartbeat-handoff or persistence failures.
+pub(crate) async fn execute_admitted_immediate_scan(
+    pool: PgPool,
+    claim: crate::queries::cve_scans::CveScanExecutionClaim,
+    version: Option<String>,
+) -> Result<Uuid, CveScanError> {
+    execute_admitted_scan_with_runner(
+        pool,
+        claim,
+        version,
+        || {
+            let cfg = CrystalForgeConfig::load().unwrap_or_else(|_| CrystalForgeConfig::default());
+            VulnixRunner::with_config(cfg.get_vulnix_config())
+        },
+        std::time::Duration::from_secs(30),
+        None,
+    )
+    .await
+}
+
+async fn execute_admitted_scan_with_runner<R, F>(
+    pool: PgPool,
+    claim: crate::queries::cve_scans::CveScanExecutionClaim,
+    vulnix_version: Option<String>,
+    runner_factory: F,
+    heartbeat_interval: std::time::Duration,
+    revocation_ack_gate: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+) -> Result<Uuid, CveScanError>
+where
+    R: ImmediateCveScanRunner,
+    F: FnOnce() -> R + Send + 'static,
+{
+    let derivation_id = claim.derivation_id;
     let scan_id = claim.scan_id;
 
     // Acquire a dedicated PostgreSQL session that holds the execution advisory

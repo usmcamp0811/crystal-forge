@@ -38,6 +38,7 @@ pub struct AgentCapabilities {
 ///     capabilities: AgentCapabilities {
 ///         supports_niks3: true, ..AgentCapabilities::default()
 ///     },
+///     guest_observations: Vec::new(),
 /// };
 /// let json = serde_json::to_value(request).unwrap();
 /// assert_eq!(json["hostname"], "host");
@@ -51,6 +52,63 @@ pub struct CurrentSystemRequest<T> {
     /// Declares support authenticated by the signature over the whole body.
     #[serde(default)]
     pub capabilities: AgentCapabilities,
+    /// Reports only previously supplied guest targets, signed with the parent state.
+    /// Missing reports preserve compatibility and do not imply a guest outage.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guest_observations: Vec<GuestObservation>,
+}
+
+/// Identifies one explicitly associated external guest for read-only observation.
+/// The unit is always `microvm@<guest_identity>.service`, never a command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestObservationTarget {
+    /// Identifies the registered guest resource, independent of its configuration.
+    pub guest_id: uuid::Uuid,
+    /// Names the guest instance on the parent host (the registered hostname).
+    pub guest_identity: String,
+    /// Names the exact MicroVM systemd service to inspect.
+    pub unit: String,
+}
+
+impl GuestObservationTarget {
+    /// Returns whether the identity is safe and the unit is its exact service.
+    /// Escapes, patterns, paths, whitespace and arbitrary service names are forbidden.
+    ///
+    /// # Examples
+    /// ```
+    /// use cf_protocol::agent::GuestObservationTarget;
+    /// let target = GuestObservationTarget {
+    ///     guest_id: uuid::Uuid::new_v4(),
+    ///     guest_identity: "vm-photos".into(),
+    ///     unit: "microvm@vm-photos.service".into(),
+    /// };
+    /// assert!(target.is_valid());
+    /// ```
+    pub fn is_valid(&self) -> bool {
+        let identity = self.guest_identity.as_bytes();
+        !identity.is_empty()
+            && identity[0].is_ascii_alphanumeric()
+            && identity
+                .iter()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(c))
+            && self.unit.len() <= 255
+            && self.unit == format!("microvm@{}.service", self.guest_identity)
+    }
+}
+
+/// Retains parent-reported unit evidence, never guest attestation or scan authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuestObservation {
+    /// Binds evidence to the exact server-provided guest identity and unit.
+    #[serde(flatten)]
+    pub target: GuestObservationTarget,
+    /// Contains the unit's ActiveState, or None when collection was unavailable.
+    pub unit_active_state: Option<String>,
+    /// Identifies a locally proven runner store object, not a guest NixOS closure.
+    /// None means the runner could not be established from an authoritative path.
+    pub runner_store_path: Option<String>,
+    /// Records parent collection time; servers reject future observations.
+    pub observed_at: DateTime<Utc>,
 }
 
 /// Reason for a system state change/heartbeat.
@@ -185,6 +243,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn guest_targets_reject_commands_patterns_and_mismatched_units() {
+        let mut target = GuestObservationTarget {
+            guest_id: uuid::Uuid::new_v4(),
+            guest_identity: "vm-photos".into(),
+            unit: "microvm@vm-photos.service".into(),
+        };
+        assert!(target.is_valid());
+        target.unit = "sshd.service".into();
+        assert!(!target.is_valid());
+        for identity in [
+            "",
+            "--help",
+            "guest*",
+            "../guest",
+            "guest;reboot",
+            "guest\n",
+            "guest@other",
+            "guest\\x20",
+        ] {
+            target.guest_identity = identity.into();
+            target.unit = format!("microvm@{identity}.service");
+            assert!(!target.is_valid(), "{identity:?}");
+        }
+        target.guest_identity = "a".repeat(256);
+        target.unit = format!("microvm@{}.service", target.guest_identity);
+        assert!(!target.is_valid());
+    }
+
+    #[test]
+    fn guest_observation_fields_are_additive_and_legacy_defaults_are_empty() {
+        let legacy = serde_json::json!({"hostname":"parent", "change_reason":"heartbeat"});
+        let request: CurrentSystemRequest<SystemState> =
+            serde_json::from_value(legacy.clone()).unwrap();
+        assert!(request.guest_observations.is_empty());
+        let response: LogResponse =
+            serde_json::from_value(serde_json::json!({"desired_target":null})).unwrap();
+        assert!(response.guest_observation_targets.is_empty());
+        let report = GuestObservation {
+            target: GuestObservationTarget {
+                guest_id: uuid::Uuid::new_v4(),
+                guest_identity: "guest".into(),
+                unit: "microvm@guest.service".into(),
+            },
+            unit_active_state: None,
+            runner_store_path: None,
+            observed_at: Utc::now(),
+        };
+        let current = CurrentSystemRequest {
+            state: request.state,
+            capabilities: AgentCapabilities::default(),
+            guest_observations: vec![report],
+        };
+        let json = serde_json::to_value(current).unwrap();
+        assert_eq!(json["guest_observations"][0]["guest_identity"], "guest");
+        assert!(json["guest_observations"][0]["runner_store_path"].is_null());
+        let old: SystemState = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(old.hostname, "parent");
+        let new: CurrentSystemRequest<SystemState> = serde_json::from_value(json).unwrap();
+        assert_eq!(new.guest_observations.len(), 1);
+    }
+
+    #[test]
     fn basic_read_capability_is_independent_and_defaults_false() {
         for legacy in [
             serde_json::json!({}),
@@ -284,6 +404,7 @@ mod tests {
         assert!(!legacy.capabilities.supports_niks3);
         let advertised = serde_json::to_value(CurrentSystemRequest {
             state: &state,
+            guest_observations: Vec::new(),
             capabilities: AgentCapabilities {
                 supports_niks3: true,
                 ..AgentCapabilities::default()
@@ -360,4 +481,8 @@ pub struct LogResponse {
     /// Absent when the server cannot determine the value; agent falls back to 600s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_interval_secs: Option<u64>,
+    /// Replaces the parent's target list for its next normal pull heartbeat.
+    /// An absent list revokes cached targets; this never requests synchronous refresh.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guest_observation_targets: Vec<GuestObservationTarget>,
 }

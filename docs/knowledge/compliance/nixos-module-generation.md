@@ -27,7 +27,11 @@ configuration validator. Required rule metadata, Boolean `strict` values, and
 configuration shape are checked before extraction. An otherwise convertible
 assertion cannot bypass an invalid configuration. Custom
 expressions require `nix-instantiate` on `PATH` for a bounded syntax-only parse;
-they are not evaluated. The Nix package wrapper supplies that executable. When
+they are not evaluated. The parse has a 2-second deadline from parser start. A
+parser rejection reports the expression as invalid. A parser that cannot start
+or does not finish in time reports `Nix syntax validation unavailable`, never
+an invalid expression; the input is not accepted, and the policy API answers
+503 so the client retries. The Nix package wrapper supplies that executable. When
 running a Cargo-built binary directly, use the repository development shell or
 provide Nix on `PATH`. No server connection or database is required.
 

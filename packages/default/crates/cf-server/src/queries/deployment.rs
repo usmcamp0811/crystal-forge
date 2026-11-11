@@ -1,4 +1,4 @@
-use crate::models::systems::System;
+use crate::models::systems::{ManagementMode, System};
 use anyhow::Result;
 use sqlx::PgPool;
 
@@ -8,6 +8,8 @@ const AUTO_LATEST_SYSTEMS_QUERY: &str = r#"
             hostname,
             environment_id,
             is_active,
+            management_mode,
+            parent_host_id,
             public_key,
             flake_id,
             derivation,
@@ -19,10 +21,14 @@ const AUTO_LATEST_SYSTEMS_QUERY: &str = r#"
         FROM systems
         WHERE deployment_policy = 'auto_latest'
         AND is_active = true
+        AND management_mode = 'managed'
         ORDER BY hostname
         "#;
 
-/// Get all systems that have deployment_policy set to 'auto_latest'
+/// Returns active managed systems with the `auto_latest` deployment policy.
+///
+/// # Errors
+/// Returns database or system decoding errors.
 pub async fn get_systems_with_auto_latest_policy(pool: &PgPool) -> Result<Vec<System>> {
     let systems = sqlx::query_as::<_, System>(AUTO_LATEST_SYSTEMS_QUERY)
         .fetch_all(pool)
@@ -31,7 +37,13 @@ pub async fn get_systems_with_auto_latest_policy(pool: &PgPool) -> Result<Vec<Sy
     Ok(systems)
 }
 
-/// Update the desired_target for a system by hostname
+/// Updates a system's desired target through locked deployment authorization.
+///
+/// Clearing a target remains permitted for all modes.
+///
+/// # Errors
+/// Returns an error if deployment authority or target evidence is insufficient,
+/// or if the database operation fails.
 pub async fn update_desired_target(
     pool: &PgPool,
     hostname: &str,
@@ -40,6 +52,13 @@ pub async fn update_desired_target(
     update_desired_target_with_source(pool, hostname, desired_target, "auto_desired_target").await
 }
 
+/// Updates a desired target and records the supplied deployment source.
+///
+/// Nonmanaged and inactive systems cannot receive targets. Clearing a target
+/// remains permitted to revoke deployment intent.
+///
+/// # Errors
+/// Returns authorization, evidence, or database errors without setting a target.
 pub async fn update_desired_target_with_source(
     pool: &PgPool,
     hostname: &str,
@@ -87,8 +106,28 @@ pub async fn update_desired_target_with_source(
     Ok(())
 }
 
-/// Update the deployment policy for a system by hostname
+/// Updates the deployment policy of a managed system by hostname.
+///
+/// This operation does not change management mode or queue deployment work.
+///
+/// # Errors
+/// Returns an error for a nonmanaged system or a database failure.
 pub async fn update_deployment_policy(pool: &PgPool, hostname: &str, policy: &str) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    // CONCURRENCY: Serialize with mode transitions before changing policy.
+    let mode = sqlx::query_scalar::<_, ManagementMode>(
+        "SELECT management_mode FROM systems WHERE hostname = $1 FOR UPDATE",
+    )
+    .bind(hostname)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(mode) = mode else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        mode.permits_deployment(),
+        "Management mode {mode} does not permit deployment policy changes"
+    );
     sqlx::query(
         r#"
         UPDATE systems 
@@ -98,13 +137,17 @@ pub async fn update_deployment_policy(pool: &PgPool, hostname: &str, policy: &st
     )
     .bind(policy)
     .bind(hostname)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(())
 }
 
-/// Get systems by deployment policy
+/// Returns active managed systems with the requested deployment policy.
+///
+/// # Errors
+/// Returns database or system decoding errors.
 pub async fn get_systems_by_deployment_policy(pool: &PgPool, policy: &str) -> Result<Vec<System>> {
     let systems = sqlx::query_as::<_, System>(
         r#"
@@ -113,9 +156,12 @@ pub async fn get_systems_by_deployment_policy(pool: &PgPool, policy: &str) -> Re
             hostname,
             environment_id,
             is_active,
+            management_mode,
+            parent_host_id,
             public_key,
             flake_id,
             derivation,
+            system_configuration_name,
             created_at,
             updated_at,
             desired_target,
@@ -123,6 +169,7 @@ pub async fn get_systems_by_deployment_policy(pool: &PgPool, policy: &str) -> Re
         FROM systems 
         WHERE deployment_policy = $1 
         AND is_active = true
+        AND management_mode = 'managed'
         ORDER BY hostname
         "#,
     )

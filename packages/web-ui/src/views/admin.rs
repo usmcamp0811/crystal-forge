@@ -2608,6 +2608,8 @@ fn get_audit_action_color(
         | AuditAction::UserRoleAssigned
         | AuditAction::BuilderRotateKey
         | AuditAction::SystemKeyRotated
+        | AuditAction::SystemCreated
+        | AuditAction::SystemUpdated
         | AuditAction::PolicyEdit
         | AuditAction::CveAccept => ("#f87171", "chip-critical", "security"),
         AuditAction::SystemDeployRequested
@@ -2646,6 +2648,8 @@ fn format_action_label(action: &crate::api::models::AuditAction) -> String {
             "system.rollback".to_string()
         }
         AuditAction::SystemKeyRotated => "system.rotate_key".to_string(),
+        AuditAction::SystemCreated => "system.created".to_string(),
+        AuditAction::SystemUpdated => "system.updated".to_string(),
         AuditAction::SessionInvalidated => "auth.session_kill".to_string(),
         AuditAction::CveScanRequested => "cve.scan".to_string(),
         AuditAction::CveAccept => "cve.accept".to_string(),

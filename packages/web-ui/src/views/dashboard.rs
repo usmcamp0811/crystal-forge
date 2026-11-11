@@ -525,6 +525,19 @@ pub fn DashboardView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
     let config_health = app_state.read().config_health.clone();
+    // Configuration coverage includes all modes and is not a runtime-CVE count.
+    // One view-owned request serves the existing assurance summary widget.
+    let configuration_coverage = use_resource(move || {
+        let admin = auth::is_admin(&app_state.read().auth);
+        let _ = app_state.read().auth_generation;
+        async move {
+            if admin {
+                Some(crate::api::client::fetch_scanning_stats().await)
+            } else {
+                None
+            }
+        }
+    });
 
     // Flake timelines state
     let flake_timelines = use_signal(Vec::<FlakeTimeline>::new);
@@ -842,9 +855,26 @@ pub fn DashboardView() -> Element {
                 }
             },
             "cve-summary" => rsx! {
+                div { class: "mg-dashboard-assurance",
                 CveSummaryPanel {
                     cves: dashboard.cve_summary.clone(),
                     flake_filter: filter_display.clone()
+                }
+                if is_admin_user {
+                    div { class: "mg-dashboard-coverage",
+                        h4 { "Configuration scan coverage · all modes" }
+                        match configuration_coverage.read().as_ref() {
+                            None => rsx! { p { role: "status", "Loading configuration coverage…" } },
+                            Some(Some(Ok(stats))) => rsx! {
+                                p { "{stats.coverage_percent}% with results · {stats.never_scanned} never scanned · {stats.failed} failed · {stats.stale} stale" }
+                                a { class: "link-action focus-ring", href: "/scanning", "Open scanning" }
+                            },
+                            Some(Some(Err(error))) => rsx! { p { role: "status", "Configuration coverage unavailable: {error}" } },
+                            _ => rsx! {},
+                        }
+                        p { class: "mg-dim", "Configuration results include external and reference resources. They do not establish running exposure." }
+                    }
+                }
                 }
             },
             "poam-summary" => match &poam_summary {
@@ -1593,6 +1623,8 @@ async fn load_dashboard_systems() -> Result<Vec<SystemSummary>, ApiClientError> 
 
     loop {
         let response = fetch_systems(&SystemsListParams {
+            tag: None,
+            management_mode: None,
             page: Some(page),
             per_page: Some(per_page),
             search: None,
@@ -1622,7 +1654,10 @@ fn hostnames_for_deployment(
 ) -> Vec<String> {
     systems
         .iter()
-        .filter(|system| statuses.contains(&system.deployment_status))
+        .filter(|system| {
+            system.management_mode == crate::api::models::ManagementMode::Managed
+                && statuses.contains(&system.deployment_status)
+        })
         .map(|system| system.hostname.clone())
         .take(24)
         .collect()

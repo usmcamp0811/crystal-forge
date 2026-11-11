@@ -210,6 +210,18 @@ pub(super) async fn extend(
             } else {
                 None
             };
+            // Artifact admission is saved exact-attempt evidence. It does not
+            // turn the agent fact or a managed deployment prerequisite into a
+            // pass. Shared configuration evidence still requires full visibility.
+            if requirements_visible
+                && row
+                    .policy_results
+                    .pointer("/global/artifactAdmission/passed")
+                    == Some(&Value::Bool(true))
+            {
+                summary.passed += 1;
+                continue;
+            }
             match (row.cf_agent_enabled, requirements) {
                 (Some(true), Some(true)) => summary.passed += 1,
                 (Some(false), _) | (_, Some(false)) => {

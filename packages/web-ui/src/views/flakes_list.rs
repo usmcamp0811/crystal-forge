@@ -3217,6 +3217,45 @@ mod tests {
     }
 
     #[test]
+    fn native_declaration_pages_do_not_fabricate_other_output_facets() {
+        let page = |offset: usize, name: &str| {
+            serde_json::from_value::<FlakeOutputSnapshotResponse>(serde_json::json!({
+                "lifecycle":"unavailable", "revision":"a".repeat(40),
+                "first_parent_revision":null,"first_parent_resolved":true,
+                "comparison_available":false,"error":null,"snapshot_token":"1".repeat(64),
+                "declared_system_names":[name],"outputs":null,"previous_outputs":null,"delta":null,
+                "systems":[{"configuration_name":name,"system_id":null,"hostname":null,
+                    "environment_name":null,"environment_color":null,"state":"declared_unmanaged",
+                    "deployed_revision":null,"output_collapsed":false}],
+                "managed_system_count":0,"declared_system_count":2,"previous_declared_system_count":null,
+                "declared_unmanaged_count":2,"managed_undeclared_count":0,"output_collapsed_count":0,
+                "pinned_revision_count":0,"stale_direct_input_count":0,"exported_module_count":0,
+                "pagination":{"offset":offset,"limit":1,"system_total":2,"systems_has_more":offset==0}
+            })).unwrap()
+        };
+        let first = page(0, "a");
+        assert!(flake_output_pane_available(FlakePane::Systems, &first));
+        assert!(!flake_output_pane_available(FlakePane::Modules, &first));
+        assert!(!flake_output_pane_available(FlakePane::Inputs, &first));
+        assert!(flake_output_pane_has_more(FlakePane::Systems, &first));
+        let mut invalid = first.clone();
+        invalid.snapshot_token = None;
+        assert!(validate_flake_output_page_zero(invalid, &first.revision).is_err());
+        let merged = merge_flake_output_pages(first.clone(), page(1, "b")).unwrap();
+        assert_eq!(
+            merged.declared_system_names,
+            Some(vec!["a".into(), "b".into()])
+        );
+        assert!(merged.outputs.is_none());
+        let mut unknown = first;
+        unknown.declared_system_names = None;
+        assert!(!flake_output_pane_available(FlakePane::Systems, &unknown));
+        unknown.declared_system_names = Some(vec![]);
+        unknown.declared_system_count = 0;
+        assert!(flake_output_pane_available(FlakePane::Systems, &unknown));
+    }
+
+    #[test]
     fn output_collection_pages_merge_without_replacing_authoritative_totals() {
         let page = |offset, name| {
             serde_json::from_value::<FlakeOutputSnapshotResponse>(serde_json::json!({
@@ -3341,11 +3380,32 @@ mod tests {
 
     #[test]
     fn registration_prefill_preserves_configuration_flake_and_branch() {
-        let url = registration_prefill_url("host one", "platform/core", "release 1");
+        let url = registration_prefill_url(
+            "host one",
+            "platform/core",
+            "release 1",
+            crate::api::models::ManagementMode::Managed,
+        );
         assert!(url.contains("hostname=host%20one"));
         assert!(url.contains("configuration=host%20one"));
         assert!(url.contains("flake_name=platform%2Fcore"));
         assert!(url.contains("branch=release%201"));
+        for mode in [
+            crate::api::models::ManagementMode::Managed,
+            crate::api::models::ManagementMode::External,
+            crate::api::models::ManagementMode::Reference,
+        ] {
+            let url = registration_prefill_url("golden", "platform", "release", mode);
+            let draft = crate::components::forms::add_system_form::registration_prefill(
+                url.split_once('?').unwrap().1,
+            )
+            .unwrap();
+            assert_eq!(draft.management_mode, mode);
+            assert_eq!(draft.system_configuration_name, "golden");
+            assert_eq!(draft.hostname, "golden");
+            assert_eq!(draft.flake_name, "platform");
+            assert_eq!(draft.flake_branch, "release");
+        }
     }
 }
 
@@ -3678,7 +3738,7 @@ pub fn FlakesListViewNew(initial_query: String) -> Element {
                     div { class: "stat-accent", style: "--stat-color: #60a5fa;" }
                     div { class: "stat-label", "Systems" }
                     div { class: "stat-value", "{total_systems}" }
-                    div { class: "stat-meta", "mapped hosts" }
+                    div { class: "stat-meta", "tracked registrations · all modes" }
                 }
                 div { class: "stat",
                     div { class: "stat-accent", style: "--stat-color: #34d399;" }
@@ -5783,10 +5843,11 @@ pub(crate) fn FlakeTrayNew(
         .and_then(|result| result.as_ref().err())
         .map(flake_snapshot_request_error);
     let output_system_alert = output_snapshot.as_ref().is_some_and(|snapshot| {
-        snapshot.declared_unmanaged_count > 0
-            || snapshot.managed_undeclared_count > 0
-            || snapshot.output_collapsed_count > 0
-            || snapshot.pinned_revision_count > 0
+        flake_output_pane_available(FlakePane::Systems, snapshot)
+            && (snapshot.declared_unmanaged_count > 0
+                || snapshot.managed_undeclared_count > 0
+                || snapshot.output_collapsed_count > 0
+                || snapshot.pinned_revision_count > 0)
     });
     let output_input_alert = output_snapshot
         .as_ref()
@@ -6119,9 +6180,9 @@ pub(crate) fn FlakeTrayNew(
                         } }
                         span { class: "fx-tab-n", match pane {
                             FlakePane::Commits => effective_commits.len().to_string(),
-                            FlakePane::Systems => output_snapshot.as_ref().map(|snapshot| snapshot.declared_system_count).unwrap_or_default().to_string(),
-                            FlakePane::Modules => output_snapshot.as_ref().map(|snapshot| snapshot.exported_module_count).unwrap_or_default().to_string(),
-                            FlakePane::Inputs => authoritative_input_count(output_snapshot.as_ref()).to_string(),
+                            FlakePane::Systems => output_snapshot.as_ref().filter(|s| flake_output_pane_available(pane, s)).map(|s| s.declared_system_count.to_string()).unwrap_or_else(|| "—".into()),
+                            FlakePane::Modules => output_snapshot.as_ref().filter(|s| flake_output_pane_available(pane, s)).map(|s| s.exported_module_count.to_string()).unwrap_or_else(|| "—".into()),
+                            FlakePane::Inputs => output_snapshot.as_ref().filter(|s| flake_output_pane_available(pane, s)).map(|s| authoritative_input_count(Some(s)).to_string()).unwrap_or_else(|| "—".into()),
                         } }
                         if pane == FlakePane::Systems && output_system_alert { span { class: "fx-tab-dot", title: "System reconciliation needs attention" } }
                         if pane == FlakePane::Inputs && output_input_alert { span { class: "fx-tab-dot", title: "One or more direct inputs are stale" } }
@@ -6365,7 +6426,7 @@ fn FlakeOutputPane(
     on_system_filter: EventHandler<FlakeSystemFilter>,
     on_pick_commit: EventHandler<()>,
 ) -> Element {
-    if snapshot.lifecycle != SnapshotLifecycle::Available {
+    if !flake_output_pane_available(pane, &snapshot) {
         let label = match snapshot.lifecycle {
             SnapshotLifecycle::Queued => "Output evaluation is queued.",
             SnapshotLifecycle::Running => "Output evaluation is running.",
@@ -6390,6 +6451,9 @@ fn FlakeOutputPane(
     rsx! {
         div { class: "fx-pane",
             FlakeRevisionBar { commit, snapshot: Some(snapshot.clone()), on_pick_commit: Some(on_pick_commit) }
+            if snapshot.lifecycle != SnapshotLifecycle::Available && snapshot.declared_system_names.is_some() {
+                div { class: "fx-pane-note", role: "status", "Declared configurations are available from native discovery. Full module and input outputs remain unavailable." }
+            }
             match pane {
                 FlakePane::Systems => rsx! { FlakeSystemsOutput { flake, snapshot, system_filter, on_system_filter } },
                 FlakePane::Modules => rsx! { FlakeModulesOutput { key: "{snapshot.revision}", flake_id: flake.id, snapshot } },
@@ -6494,20 +6558,20 @@ fn FlakeSystemsOutput(
     rsx! {
         if let Some(previous) = declared_output_collapse {
             div { class: "sd-callout sd-callout-warn fx-callout", Icon { name: IconName::Warn, size: 13 }
-                "This revision declares {snapshot.declared_system_count} system outputs; its first parent declared {previous}. Verify the reduction was intentional before deploying."
+                "This revision declares {snapshot.declared_system_count} configuration outputs; its first parent declared {previous}. Review removed outputs and their retained evidence."
             }
         }
         if output_collapse > 0 {
-            div { class: "sd-callout sd-callout-warn fx-callout", Icon { name: IconName::Warn, size: 13 } "{output_collapse} declared output name(s) are shared by multiple visible managed systems. Review the collapsed mapping before deployment." }
+            div { class: "sd-callout sd-callout-warn fx-callout", Icon { name: IconName::Warn, size: 13 } "{output_collapse} declared output name(s) are shared by multiple visible registered resources. Each registration retains its own identity and management mode." }
         }
         div { class: "fx-stats",
             FlakeStat { value: snapshot.declared_system_count, label: "declared here" }
-            FlakeStat { value: snapshot.managed_system_count, label: "managed by Forge" }
-            FlakeStat { value: unmanaged, label: "declared unmanaged", warning: unmanaged > 0 }
-            FlakeStat { value: undeclared, label: "managed undeclared", critical: undeclared > 0 }
+            FlakeStat { value: snapshot.managed_system_count, label: "registered · all modes" }
+            FlakeStat { value: unmanaged, label: "declared unregistered", warning: unmanaged > 0 }
+            FlakeStat { value: undeclared, label: "registered undeclared", critical: undeclared > 0 }
         }
         if undeclared > 0 {
-            div { class: "sd-callout sd-callout-warn fx-callout", "{undeclared} managed system(s) are absent from this revision and remain pinned to an older declared output." }
+            div { class: "sd-callout sd-callout-warn fx-callout", "{undeclared} registered resource(s) select configurations absent from this revision. Earlier configuration evidence is retained; registration alone does not imply deployment authority." }
         }
         if pinned > 0 {
             div { class: "sd-callout sd-callout-warn fx-callout", "{pinned} managed system(s) are deployed at a different revision." }
@@ -6516,7 +6580,7 @@ fn FlakeSystemsOutput(
             div { class: "seg", "aria-label": "Filter reconciled systems",
                 for (filter, label, count) in [
                     (FlakeSystemFilter::All, "All", all_count),
-                    (FlakeSystemFilter::DeclaredUnmanaged, "Unmanaged", unmanaged),
+                    (FlakeSystemFilter::DeclaredUnmanaged, "Unregistered", unmanaged),
                     (FlakeSystemFilter::ManagedUndeclared, "Undeclared", undeclared),
                 ] {
                     button {
@@ -6537,7 +6601,7 @@ fn FlakeSystemsOutput(
                 if snapshot.systems.is_empty() { tr { td { colspan: "4", div { class: "fx-empty", "Nothing in this category." } } } }
             }
         }
-        div { class: "fx-pane-note", "Showing {snapshot.systems.len()} reconciled rows. Authoritative managed total: {snapshot.managed_system_count}." }
+        div { class: "fx-pane-note", "Showing {snapshot.systems.len()} reconciled rows. Registered resources across all modes: {snapshot.managed_system_count}." }
     }
 }
 
@@ -6564,9 +6628,25 @@ fn FlakeSystemRow(
     revision: String,
     system: ReconciledFlakeSystem,
 ) -> Element {
+    let mut menu_open = use_signal(|| false);
+    let app_state = use_context::<Signal<AppState>>();
+    let can_register = auth::can_mutate_systems(&app_state.read().auth);
+    let registered_mode = use_resource({
+        let id = system.system_id;
+        let supplied = system.management_mode;
+        move || async move {
+            match (id, supplied) {
+                (_, Some(mode)) => Ok(Some(mode)),
+                (Some(id), None) => crate::api::client::fetch_system(&id)
+                    .await
+                    .map(|s| Some(s.management_mode)),
+                (None, None) => Ok(None),
+            }
+        }
+    });
     let state_label = match system.state {
-        ReconciledFlakeSystemState::Managed => "managed",
-        ReconciledFlakeSystemState::DeclaredUnmanaged => "not managed",
+        ReconciledFlakeSystemState::Managed => "registered",
+        ReconciledFlakeSystemState::DeclaredUnmanaged => "unregistered",
         ReconciledFlakeSystemState::ManagedUndeclared => "undeclared",
     };
     let state_class = match system.state {
@@ -6607,16 +6687,40 @@ fn FlakeSystemRow(
                 span { class: "fx-dim", "-" }
             }
         }
-        td { span { class: "{state_class}", "{state_label}" }
+        td {
+            if system.system_id.is_some() {
+                if let Some(mode) = system.management_mode {
+                    crate::components::system::MgmtChip { mode }
+                } else { match registered_mode.read().as_ref() {
+                    Some(Ok(Some(mode))) => rsx! { crate::components::system::MgmtChip { mode: *mode } },
+                    Some(Err(_)) => rsx! { span { class: "chip chip-unknown", "Mode unavailable" } },
+                    _ => rsx! { span { class: "chip chip-unknown", "Loading mode…" } },
+                } }
+                if system.state == ReconciledFlakeSystemState::ManagedUndeclared { span { class: "{state_class}", "{state_label}" } }
+            } else { span { class: "{state_class}", "{state_label}" } }
             if let Some(deployed) = &system.deployed_revision { span { class: "fx-note mono", "pinned at {short_sha(deployed)}" } }
         }
         td { class: "fx-right",
             if let Some(system_id) = system.system_id {
                 button { class: "btn btn-ghost focus-ring xs", onclick: move |_| navigate_href(&format!("/systems/{system_id}?tab=config&config_mode=commit&revision={revision}")), "Open config" }
-            } else {
-                {
-                    let href = registration_prefill_url(&system.configuration_name, &flake.name, &flake.branch);
-                    rsx! { button { class: "btn btn-ghost focus-ring xs", onclick: move |_| navigate_href(&href), "Add to Forge" } }
+            } else if can_register {
+                div { class: "mg-menu-wrap",
+                    button { class: "btn btn-ghost focus-ring xs", aria_haspopup: "menu", aria_expanded: menu_open(), onclick: move |_| menu_open.toggle(),
+                        "Add to Forge " Icon { name: IconName::ChevronDown, size: 12 }
+                    }
+                    if menu_open() {
+                        div { class: "mg-menu", role: "menu",
+                            for mode in [crate::api::models::ManagementMode::Managed, crate::api::models::ManagementMode::External, crate::api::models::ManagementMode::Reference] {
+                                {
+                                    let href = registration_prefill_url(&system.configuration_name, &flake.name, &flake.branch, mode);
+                                     rsx! { button { class: "mg-menu-item focus-ring", role: "menuitem", onclick: move |_| navigate_href(&href),
+                                        Icon { name: crate::components::system::management_mode::mode_icon(mode), size: 15 }
+                                        span { b { "{mode.long_label()}" } small { "{mode.description()}" } }
+                                    } }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -7033,8 +7137,13 @@ fn declared_output_collapse(previous: Option<i64>, selected: i64) -> Option<i64>
     previous.filter(|previous| selected < *previous)
 }
 
+fn flake_output_pane_available(pane: FlakePane, snapshot: &FlakeOutputSnapshotResponse) -> bool {
+    snapshot.lifecycle == SnapshotLifecycle::Available
+        || (pane == FlakePane::Systems && snapshot.declared_system_names.is_some())
+}
+
 fn flake_output_pane_has_more(pane: FlakePane, snapshot: &FlakeOutputSnapshotResponse) -> bool {
-    if snapshot.lifecycle != SnapshotLifecycle::Available
+    if !flake_output_pane_available(pane, snapshot)
         || snapshot.pagination.offset >= 100_000
         || snapshot.pagination.limit == 0
     {
@@ -7059,7 +7168,7 @@ fn validate_flake_output_page_zero(
     if page.revision != revision || page.pagination.offset != 0 {
         return Err("The first revision-output page did not match the selected revision.".into());
     }
-    if page.lifecycle == SnapshotLifecycle::Available
+    if (page.lifecycle == SnapshotLifecycle::Available || page.declared_system_names.is_some())
         && page
             .snapshot_token
             .as_deref()
@@ -7078,8 +7187,10 @@ fn merge_flake_output_pages(
         .pagination
         .offset
         .saturating_add(accumulated.pagination.limit);
-    if accumulated.lifecycle != SnapshotLifecycle::Available
-        || page.lifecycle != SnapshotLifecycle::Available
+    if !flake_output_pane_available(FlakePane::Systems, &accumulated)
+        || !flake_output_pane_available(FlakePane::Systems, &page)
+        || accumulated.lifecycle != page.lifecycle
+        || accumulated.declared_system_names.is_some() != page.declared_system_names.is_some()
         || accumulated.revision != page.revision
         || accumulated.first_parent_revision != page.first_parent_revision
         || accumulated.first_parent_resolved != page.first_parent_resolved
@@ -7103,6 +7214,13 @@ fn merge_flake_output_pages(
     accumulated.previous_outputs =
         merge_flake_output_payloads(accumulated.previous_outputs, page.previous_outputs);
     accumulated.systems.extend(page.systems);
+    if let (Some(names), Some(next)) = (
+        accumulated.declared_system_names.as_mut(),
+        page.declared_system_names,
+    ) {
+        names.extend(next);
+        deduplicate_strings(names);
+    }
     let mut system_keys = HashSet::new();
     accumulated
         .systems
@@ -7312,13 +7430,19 @@ fn short_sha(revision: &str) -> String {
     revision.chars().take(7).collect()
 }
 
-fn registration_prefill_url(configuration: &str, flake: &str, branch: &str) -> String {
+fn registration_prefill_url(
+    configuration: &str,
+    flake: &str,
+    branch: &str,
+    mode: crate::api::models::ManagementMode,
+) -> String {
     format!(
-        "/systems?add=1&hostname={}&configuration={}&flake_name={}&branch={}",
+        "/systems?add=1&hostname={}&configuration={}&flake_name={}&branch={}&management_mode={}",
         encode_query_component(configuration),
         encode_query_component(configuration),
         encode_query_component(flake),
-        encode_query_component(branch)
+        encode_query_component(branch),
+        mode.as_str()
     )
 }
 
@@ -7335,10 +7459,13 @@ fn encode_query_component(value: &str) -> String {
         .collect()
 }
 
+/// Navigates to an in-app address through the router.
+///
+/// A full page load (`location.set_href`) restarts the WASM runtime and drops all
+/// client state; the router changes the route and the address in place. The target
+/// page reads its prefill from the address when it mounts.
 fn navigate_href(href: &str) {
-    if let Some(window) = web_sys::window() {
-        let _ = window.location().set_href(href);
-    }
+    navigator().push(href.to_string());
 }
 
 // ============================================================================

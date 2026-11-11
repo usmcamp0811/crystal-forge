@@ -5,6 +5,9 @@
 //! only enforced policies authorize a deployment. Authorization updates
 //! enforced assessment aggregates and guarded target state in one transaction
 //! so callers cannot consume stale passing evidence.
+//! Every authorization action first requires an active managed registration
+//! under the system-row lock. Assurance-only modes return a failing decision
+//! without consuming evidence, changing desired state, or claiming delivery.
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -22,6 +25,7 @@ use crate::models::deployment_policies::{
     EnforcementOutcome, EnforcementPhase, PoliciesByConfiguration, PolicyCheckResult,
     TimeWindowConfig, composite_config_digest, deserialize_policy_type_config,
 };
+use crate::models::systems::ManagementMode;
 use crate::queries::system_events::set_pending_deployment_target_tx;
 use crate::services::time_window_policy;
 
@@ -158,7 +162,27 @@ enum AuthorizationAction<'a> {
     },
     ClaimDelivery {
         expected_target: &'a str,
+        /// None is reserved for trusted server-side callers, never agent HTTP.
+        enrollment: Option<&'a crate::models::systems::System>,
     },
+}
+
+fn deployment_authority_denial(
+    mode: ManagementMode,
+    is_active: bool,
+) -> Option<CompositeAuthorization> {
+    let detail = if !mode.permits_deployment() {
+        format!("Management mode {mode} does not permit deployment")
+    } else if !is_active {
+        "Inactive systems do not permit deployment".to_string()
+    } else {
+        return None;
+    };
+    Some(CompositeAuthorization {
+        outcome: EnforcementOutcome::Fail,
+        assessments: Vec::new(),
+        detail,
+    })
 }
 
 fn outcome_str(outcome: EnforcementOutcome) -> &'static str {
@@ -1588,7 +1612,7 @@ async fn latest_scan_in_tx(
         SELECT id, derivation_id, status, critical_count, high_count, medium_count, low_count,
                scan_metadata, created_at, completed_at, composite_phase_order
         FROM cve_scans
-        WHERE derivation_id = $1
+        WHERE derivation_id IN (SELECT derivation_evidence_peers($1))
         ORDER BY composite_phase_order DESC
         LIMIT 1
         FOR SHARE
@@ -1668,7 +1692,7 @@ pub(crate) async fn lock_poam_findings_for_derivation_tx(
                  FROM cve_scans scan
                  JOIN cve_scan_vulnerability_observations observation
                    ON observation.scan_id=scan.id
-                 WHERE scan.derivation_id=$1
+                  WHERE scan.derivation_id IN (SELECT derivation_evidence_peers($1))
                  ORDER BY canonical_cve_id
                ) key"#,
         )
@@ -1685,7 +1709,7 @@ pub(crate) async fn lock_poam_findings_for_derivation_tx(
            FROM (
              SELECT assessment.system_id
              FROM composite_policy_assessments assessment
-             WHERE assessment.derivation_id=$1
+              WHERE assessment.derivation_id IN (SELECT derivation_evidence_peers($1))
              UNION
              SELECT system.id AS system_id
              FROM derivations derivation
@@ -1713,7 +1737,7 @@ pub(crate) async fn lock_poam_findings_for_derivation_tx(
            FROM (
              SELECT assessment.system_id,assessment.policy_lineage_id
              FROM composite_policy_assessments assessment
-             WHERE assessment.derivation_id=$1
+              WHERE assessment.derivation_id IN (SELECT derivation_evidence_peers($1))
              UNION
              SELECT finding.system_id,finding.policy_lineage_id
              FROM derivations derivation
@@ -1766,7 +1790,9 @@ async fn lock_poam_derivation_key_tx(
     tx: &mut Transaction<'_, Postgres>,
     derivation_id: i32,
 ) -> Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock($1,$2)")
+    // CONCURRENCY: Aliases publish the same scan evidence. Serialize on their
+    // proven physical root before canonical CVE and per-subject finding keys.
+    sqlx::query("SELECT pg_advisory_xact_lock($1,COALESCE(derivation_physical_id($2),$2))")
         .bind(POAM_DERIVATION_LOCK_NAMESPACE)
         .bind(derivation_id)
         .execute(&mut **tx)
@@ -1791,7 +1817,7 @@ pub(crate) async fn lock_poam_derivations_for_store_path_tx(
         return Ok(());
     };
     let derivation_ids: Vec<i32> = sqlx::query_scalar(
-        r#"SELECT id FROM derivations
+        r#"SELECT DISTINCT COALESCE(reused_from_derivation_id,id) AS id FROM derivations
            WHERE derivation_type='nixos'
              AND COALESCE(store_path,expected_store_path)=$1
            ORDER BY id"#,
@@ -1982,7 +2008,9 @@ pub(crate) async fn persist_scan_phase_in_tx(
     .await?
     .context("CVE scan transition references a missing scan")?;
     let newest_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM cve_scans WHERE derivation_id = (SELECT derivation_id FROM cve_scans WHERE id = $1) ORDER BY composite_phase_order DESC LIMIT 1",
+        "SELECT id FROM cve_scans WHERE derivation_id = (SELECT derivation_id FROM cve_scans WHERE id = $1)
+         OR derivations_share_evidence_scope((SELECT derivation_id FROM cve_scans WHERE id=$1),derivation_id)
+         ORDER BY composite_phase_order DESC LIMIT 1",
     )
     .bind(scan_id)
     .fetch_optional(&mut **tx)
@@ -1995,7 +2023,8 @@ pub(crate) async fn persist_scan_phase_in_tx(
         r#"
         SELECT assessment.id, assessment.effective_config
         FROM composite_policy_assessments assessment
-        JOIN cve_scans scan ON scan.derivation_id = assessment.derivation_id
+        JOIN cve_scans scan ON (scan.derivation_id = assessment.derivation_id
+            OR derivations_share_evidence_scope(assessment.derivation_id,scan.derivation_id))
         WHERE scan.id = $1
         FOR UPDATE OF assessment
         "#,
@@ -2078,15 +2107,57 @@ async fn authorize_target_with_read_at(
     .bind(system_id)
     .execute(&mut *tx)
     .await?;
-    let (current_desired, current_environment) =
-        sqlx::query_as::<_, (Option<String>, Option<Uuid>)>(
-            "SELECT desired_target, environment_id FROM systems WHERE id = $1 FOR UPDATE",
+    let (current_desired, current_environment, management_mode, is_active) =
+        sqlx::query_as::<_, (Option<String>, Option<Uuid>, ManagementMode, bool)>(
+            "SELECT desired_target, environment_id, management_mode, is_active
+             FROM systems WHERE id = $1 FOR UPDATE",
         )
         .bind(system_id)
         .fetch_optional(&mut *tx)
         .await?
         .context("Composite authorization system was not found")?;
-    if let AuthorizationAction::ClaimDelivery { expected_target } = action {
+    // SECURITY: Recheck authority under the same row lock as target writes and
+    // delivery claims. Earlier selection and agent authentication can be stale
+    // after a mode transition. Deny before evidence or publication is consumed,
+    // including the no-policy legacy path, without altering retained history.
+    if let Some(authorization) = deployment_authority_denial(management_mode, is_active) {
+        tx.commit().await?;
+        return Ok(TargetDeliveryAuthorization {
+            target: None,
+            publication_read: None,
+            authorization,
+        });
+    }
+    // SECURITY: The requesting identity must still own this locked registration.
+    // Ingestion already committed, so mode/activity alone cannot fence a request
+    // from an earlier enrollment. Reuse the guard in this transaction, without
+    // opening a nested authorization transaction or changing lock order.
+    if let AuthorizationAction::ClaimDelivery {
+        enrollment: Some(verified),
+        ..
+    } = &action
+    {
+        if verified.id != system_id
+            || crate::queries::system_states::lock_agent_enrollment_tx(&mut tx, verified)
+                .await?
+                .is_none()
+        {
+            tx.commit().await?;
+            return Ok(TargetDeliveryAuthorization {
+                target: None,
+                publication_read: None,
+                authorization: CompositeAuthorization {
+                    outcome: EnforcementOutcome::Fail,
+                    assessments: Vec::new(),
+                    detail: "Agent enrollment changed before delivery authorization".into(),
+                },
+            });
+        }
+    }
+    if let AuthorizationAction::ClaimDelivery {
+        expected_target, ..
+    } = action
+    {
         if current_desired.as_deref() != Some(expected_target) {
             tx.commit().await?;
             return Ok(TargetDeliveryAuthorization {
@@ -2104,7 +2175,10 @@ async fn authorize_target_with_read_at(
     // CONCURRENCY: Lock the delivery row after the system row and before
     // selecting evidence. Never authorize one same-path derivation while
     // claiming a pending row bound to another derivation.
-    let claimed_pending = if let AuthorizationAction::ClaimDelivery { expected_target } = action {
+    let claimed_pending = if let AuthorizationAction::ClaimDelivery {
+        expected_target, ..
+    } = action
+    {
         sqlx::query_as::<_, (Uuid, Option<i32>, Option<i32>)>(
             "SELECT id, requested_commit_id, requested_derivation_id
              FROM pending_system_deployments
@@ -2123,12 +2197,15 @@ async fn authorize_target_with_read_at(
         constrained_derivation_id = Some(derivation_id);
     }
 
-    let exact_target = sqlx::query_as::<_, (i32, String, i32, String)>(
-        r#"
-        SELECT d.id, d.store_path, c.id, d.derivation_name
+    // CONCURRENCY: The execution-evidence view contains an outer join, so it
+    // cannot be row-locked directly. Find the candidate, share-lock its real
+    // carrier, execution source and commit rows, then re-check the candidate
+    // under those locks. A row changed in between yields no target.
+    const EXACT_TARGET_SQL: &str = r#"
+        SELECT d.id, d.store_path, c.id, d.derivation_name, d.execution_derivation_id
         FROM systems s
         JOIN commits c ON c.flake_id = s.flake_id
-        JOIN derivations d ON d.commit_id = c.id
+        JOIN view_derivation_execution_evidence d ON d.commit_id = c.id
         WHERE s.id = $1
           AND d.derivation_type = 'nixos'
           AND d.derivation_name = COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
@@ -2139,7 +2216,7 @@ async fn authorize_target_with_read_at(
           AND EXISTS (
               SELECT 1
               FROM cache_push_jobs cache_push
-              WHERE cache_push.derivation_id = d.id
+              WHERE cache_push.derivation_id = d.execution_derivation_id
                 AND cache_push.status = 'completed'
                 AND cache_push.store_path = d.store_path
           )
@@ -2148,14 +2225,38 @@ async fn authorize_target_with_read_at(
           AND ($3::integer IS NULL OR d.id = $3)
         ORDER BY d.id DESC
         LIMIT 1
-        FOR SHARE OF d, c
-        "#,
-    )
-    .bind(system_id)
-    .bind(target)
-    .bind(constrained_derivation_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+        "#;
+    type ExactTargetRow = (i32, String, i32, String, i32);
+    let candidate = sqlx::query_as::<_, ExactTargetRow>(EXACT_TARGET_SQL)
+        .bind(system_id)
+        .bind(target)
+        .bind(constrained_derivation_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let exact_target = match candidate {
+        Some((carrier_id, _, commit_id, _, execution_id)) => {
+            sqlx::query("SELECT 1 FROM derivations WHERE id = ANY($1) ORDER BY id FOR SHARE")
+                .bind(vec![
+                    carrier_id.min(execution_id),
+                    carrier_id.max(execution_id),
+                ])
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("SELECT 1 FROM commits WHERE id = $1 FOR SHARE")
+                .bind(commit_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query_as::<_, ExactTargetRow>(EXACT_TARGET_SQL)
+                .bind(system_id)
+                .bind(target)
+                .bind(Some(carrier_id))
+                .fetch_optional(&mut *tx)
+                .await?
+                .filter(|row| row.4 == execution_id)
+        }
+        None => None,
+    }
+    .map(|(id, store_path, commit_id, name, _)| (id, store_path, commit_id, name));
 
     let resolved = match resolve_system_effective_policies_in_tx(&mut tx, system_id).await? {
         ResolutionOutcome::Resolved(resolved) => resolved,
@@ -2191,7 +2292,7 @@ async fn authorize_target_with_read_at(
                     SELECT 1
                     FROM systems system
                     JOIN commits commit ON commit.flake_id = system.flake_id
-                    JOIN derivations derivation ON derivation.commit_id = commit.id
+                    JOIN view_derivation_execution_evidence derivation ON derivation.commit_id = commit.id
                     WHERE system.id = $1
                       AND derivation.derivation_type = 'nixos'
                       AND derivation.derivation_name = COALESCE(
@@ -2623,7 +2724,9 @@ async fn authorize_target_with_read_at(
                     .await?;
                 }
             }
-            AuthorizationAction::ClaimDelivery { expected_target } => {
+            AuthorizationAction::ClaimDelivery {
+                expected_target, ..
+            } => {
                 // Upgrade bridge: only targets captured by migration may gain a
                 // pending row here, and only after this exact target passed the
                 // current serializable authorization check. Newly issued targets
@@ -2836,7 +2939,10 @@ pub async fn authorize_and_claim_desired_target(
         system_id,
         expected_target,
         Utc::now(),
-        AuthorizationAction::ClaimDelivery { expected_target },
+        AuthorizationAction::ClaimDelivery {
+            expected_target,
+            enrollment: None,
+        },
     )
     .await
 }
@@ -2847,6 +2953,8 @@ pub async fn authorize_and_claim_desired_target(
 /// come from verified transport. Both outputs become usable only after the
 /// SERIALIZABLE authorization and pending-claim transaction commits. Conflicts
 /// produce no instructions; callers retry with a new transaction.
+/// This trusted server-side entry point does not validate an agent enrollment.
+/// Agent HTTP delivery must use [`authorize_agent_desired_target_with_read`].
 ///
 /// # Errors
 /// Returns policy, evidence, database, or serialization errors without consuming
@@ -2879,7 +2987,44 @@ pub async fn authorize_and_claim_desired_target_with_read(
         system_id,
         expected_target,
         Utc::now(),
-        AuthorizationAction::ClaimDelivery { expected_target },
+        AuthorizationAction::ClaimDelivery {
+            expected_target,
+            enrollment: None,
+        },
+        confidential,
+        capabilities,
+    )
+    .await
+}
+
+/// Claims delivery only while the authenticated agent enrollment remains current.
+///
+/// Rechecks UUID, hostname, key, epoch, mode and activity under the authorization
+/// transaction's system lock before claiming work or reading cache credentials.
+/// Revocation after a successful claim does not retract that committed response.
+/// Capability and confidentiality have the same requirements as
+/// [`authorize_and_claim_desired_target_with_read`]. Agent HTTP callers must use
+/// this entry point, not the trusted server-side variant.
+///
+/// # Errors
+/// Returns policy, evidence, database or serialization errors without delivering
+/// work. A stale enrollment returns a denied result with no target or read source.
+pub(crate) async fn authorize_agent_desired_target_with_read(
+    pool: &PgPool,
+    verified: &crate::models::systems::System,
+    expected_target: &str,
+    confidential: bool,
+    capabilities: cf_protocol::agent::AgentCapabilities,
+) -> Result<TargetDeliveryAuthorization> {
+    authorize_target_with_read_at(
+        pool,
+        verified.id,
+        expected_target,
+        Utc::now(),
+        AuthorizationAction::ClaimDelivery {
+            expected_target,
+            enrollment: Some(verified),
+        },
         confidential,
         capabilities,
     )
@@ -2943,6 +3088,23 @@ mod tests {
     };
     use crate::models::deployment_policies::{CveBlockRuleConfig, TimeWindowRuleConfig};
     use chrono::TimeZone;
+
+    #[test]
+    fn deployment_authority_requires_active_managed_registration() {
+        assert!(deployment_authority_denial(ManagementMode::Managed, true).is_none());
+        for (mode, active) in [
+            (ManagementMode::Managed, false),
+            (ManagementMode::External, true),
+            (ManagementMode::External, false),
+            (ManagementMode::Reference, true),
+            (ManagementMode::Reference, false),
+        ] {
+            let denial = deployment_authority_denial(mode, active).unwrap();
+            assert_eq!(denial.outcome, EnforcementOutcome::Fail);
+            assert!(!denial.allowed());
+            assert!(denial.assessments.is_empty());
+        }
+    }
 
     fn scan(status: &str, critical_count: i32) -> LatestScan {
         LatestScan {

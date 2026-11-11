@@ -1,21 +1,328 @@
 //! Modal for editing system configuration.
 //!
-//! Tabbed modal with General, Deployment, Security, and Danger tabs.
+//! Section rail with mode-specific configuration, real key rotation and removal.
 
-use crate::api::models::{CommitInfo, FieldUpdate, SystemDetail, UpdateSystemRequest};
+use crate::api::models::{
+    CommitInfo, ENVIRONMENT_DEFAULT_POLICY, FieldUpdate, ManagementMode, SystemDetail,
+    UpdateSystemRequest,
+};
+use crate::components::forms::add_system_form::{
+    EnrollmentConfigurationFields, EnrollmentNetworkFields, EnrollmentParentField,
+    EnrollmentTagsField, ManagementModePicker, dom_key, parse_tags,
+};
 use crate::components::icon::{Icon, IconName};
 use crate::components::modals::{GeneratedKeyPair, RemoveSystemDialog, generate_key_pair};
+use crate::components::system::MgmtChip;
 use crate::components::system::key_rotation;
+use crate::components::system::management_mode::mode_icon;
 use crate::systems::adapter::{
     SystemPublicKeyRotationOutcome, update_system_public_key_and_reconcile,
 };
 use dioxus::prelude::*;
+
+// Omitted mode preserves authority; parent updates preserve/clear/set explicitly.
+fn parent_update(
+    original: Option<uuid::Uuid>,
+    selected: Option<uuid::Uuid>,
+) -> FieldUpdate<uuid::Uuid> {
+    if selected == original {
+        FieldUpdate::Unset
+    } else {
+        selected.map(FieldUpdate::Set).unwrap_or(FieldUpdate::Clear)
+    }
+}
+
+// Unchanged input must not become an explicit clear in a PATCH payload.
+fn text_update(original: &str, value: &str) -> FieldUpdate<String> {
+    if original == value.trim() {
+        FieldUpdate::Unset
+    } else if value.trim().is_empty() {
+        FieldUpdate::Clear
+    } else {
+        FieldUpdate::Set(value.trim().into())
+    }
+}
+
+/// Returns the pin change to send. Only an edit that stays managed with the
+/// pinned policy can set a pin, and only a changed selection is sent. Other
+/// policies omit it: the server clears a pin when the policy leaves `pinned`.
+fn pin_update(
+    stays_managed: bool,
+    policy: &str,
+    original: Option<&str>,
+    selected: Option<&str>,
+) -> FieldUpdate<String> {
+    match selected {
+        Some(sha) if stays_managed && policy == "pinned" && Some(sha) != original => {
+            FieldUpdate::Set(sha.to_string())
+        }
+        _ => FieldUpdate::Unset,
+    }
+}
+
+fn conversion_policy(original: ManagementMode, selected: ManagementMode, policy: &str) -> String {
+    if selected != ManagementMode::Managed || original != ManagementMode::Managed {
+        "manual".into()
+    } else {
+        policy.into()
+    }
+}
+
+// COMPATIBILITY: The API resolves absent or blank configuration names against
+// the incoming hostname. Compare effective names so renames cannot silently
+// change a legacy hostname-based assignment without declaration proof.
+fn effective_configuration<'a>(configuration: &'a str, hostname: &'a str) -> &'a str {
+    let configuration = configuration.trim();
+    if configuration.is_empty() {
+        hostname.trim()
+    } else {
+        configuration
+    }
+}
+
+// Retaining a persisted assignment does not assert that its output still exists.
+// Only changed associations require current declaration proof. Nonmanaged
+// requests still need a real registered flake and an explicit effective name.
+fn assignment_allowed(
+    original: (&str, &str),
+    selected: (&str, &str),
+    mode: ManagementMode,
+    registered_flake: bool,
+    declared: bool,
+) -> bool {
+    let configured = registered_flake && !selected.0.is_empty() && !selected.1.is_empty();
+    if mode != ManagementMode::Managed && !configured {
+        return false;
+    }
+    original == selected || (configured && declared)
+}
+
+#[cfg(test)]
+mod management_registration_tests {
+    use super::*;
+
+    #[test]
+    fn existing_assignment_survives_unavailable_or_removed_declarations() {
+        for mode in [
+            ManagementMode::Managed,
+            ManagementMode::External,
+            ManagementMode::Reference,
+        ] {
+            assert!(assignment_allowed(
+                ("fleet", "removed"),
+                ("fleet", "removed"),
+                mode,
+                true,
+                false,
+            ));
+            assert!(!assignment_allowed(
+                ("fleet", "removed"),
+                ("fleet", "new"),
+                mode,
+                true,
+                false,
+            ));
+            assert!(!assignment_allowed(
+                ("fleet", "removed"),
+                ("other", "removed"),
+                mode,
+                true,
+                false,
+            ));
+            assert!(assignment_allowed(
+                ("fleet", "removed"),
+                ("other", "new"),
+                mode,
+                true,
+                true,
+            ));
+            assert!(!assignment_allowed(
+                ("fleet", "removed"),
+                ("other", "new"),
+                mode,
+                false,
+                true,
+            ));
+        }
+    }
+
+    #[test]
+    fn legacy_no_flake_is_retained_only_for_managed_metadata() {
+        assert!(assignment_allowed(
+            ("", "host"),
+            ("", "host"),
+            ManagementMode::Managed,
+            false,
+            false,
+        ));
+        for mode in [ManagementMode::External, ManagementMode::Reference] {
+            assert!(!assignment_allowed(
+                ("", "host"),
+                ("", "host"),
+                mode,
+                false,
+                true
+            ));
+            assert!(!assignment_allowed(
+                ("fleet", ""),
+                ("fleet", ""),
+                mode,
+                true,
+                true
+            ));
+        }
+    }
+
+    #[test]
+    fn hostname_fallback_preserves_identity_and_requires_proof_for_a_new_output() {
+        for original in ["", " \n", " old-host "] {
+            let original = effective_configuration(original, "old-host");
+            assert_eq!(original, "old-host");
+            // A rename keeps the output when the editor retains its explicit name.
+            assert!(assignment_allowed(
+                ("fleet", original),
+                ("fleet", effective_configuration("old-host", "new-host")),
+                ManagementMode::Reference,
+                true,
+                false,
+            ));
+            // Clearing the name while renaming selects a different output.
+            assert!(!assignment_allowed(
+                ("fleet", original),
+                ("fleet", effective_configuration("  ", " new-host ")),
+                ManagementMode::Managed,
+                true,
+                false,
+            ));
+            assert!(assignment_allowed(
+                ("fleet", original),
+                ("fleet", effective_configuration("", "new-host")),
+                ManagementMode::Managed,
+                true,
+                true,
+            ));
+        }
+    }
+
+    #[test]
+    fn metadata_patch_distinguishes_unchanged_clear_and_set() {
+        assert_eq!(text_update("notes", " notes "), FieldUpdate::Unset);
+        assert_eq!(text_update("notes", " \n"), FieldUpdate::Clear);
+        assert_eq!(
+            text_update("", " new notes "),
+            FieldUpdate::Set("new notes".into())
+        );
+        let request: UpdateSystemRequest = serde_json::from_value(
+            serde_json::json!({"hostname":"host", "deployment_policy":"manual"}),
+        )
+        .unwrap();
+        let wire = serde_json::to_value(request).unwrap();
+        for field in ["tags", "description", "fqdn", "reachability"] {
+            assert!(wire.get(field).is_none());
+        }
+        let request: UpdateSystemRequest = serde_json::from_value(serde_json::json!({"hostname":"host", "deployment_policy":"manual", "tags":[], "description":null, "fqdn":null, "reachability":"pull"})).unwrap();
+        assert_eq!(request.tags, FieldUpdate::Set(Vec::new()));
+        assert_eq!(request.description, FieldUpdate::Clear);
+        assert_eq!(request.fqdn, FieldUpdate::Clear);
+        assert_eq!(request.reachability, FieldUpdate::Set("pull".into()));
+    }
+
+    #[test]
+    fn pin_selection_is_sent_only_for_changed_managed_pinned_edits() {
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        assert_eq!(
+            pin_update(true, "pinned", Some(&a), Some(&b)),
+            FieldUpdate::Set(b.clone())
+        );
+        assert_eq!(
+            pin_update(true, "pinned", None, Some(&a)),
+            FieldUpdate::Set(a.clone())
+        );
+        assert_eq!(
+            pin_update(true, "pinned", Some(&a), Some(&a)),
+            FieldUpdate::Unset
+        );
+        assert_eq!(
+            pin_update(true, "manual", Some(&a), Some(&b)),
+            FieldUpdate::Unset
+        );
+        assert_eq!(
+            pin_update(true, ENVIRONMENT_DEFAULT_POLICY, None, Some(&a)),
+            FieldUpdate::Unset
+        );
+        assert_eq!(
+            pin_update(false, "pinned", None, Some(&a)),
+            FieldUpdate::Unset
+        );
+        // Unset never serializes, so omission keeps the stored pin.
+        let request: UpdateSystemRequest = serde_json::from_value(
+            serde_json::json!({"hostname":"host", "deployment_policy":"pinned"}),
+        )
+        .unwrap();
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("pinned_commit")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn conversion_into_managed_cannot_enable_automatic_deployment() {
+        for original in [ManagementMode::External, ManagementMode::Reference] {
+            for policy in ["manual", "auto_latest", "pinned"] {
+                assert_eq!(
+                    conversion_policy(original, ManagementMode::Managed, policy),
+                    "manual"
+                );
+            }
+        }
+        assert_eq!(
+            conversion_policy(
+                ManagementMode::Managed,
+                ManagementMode::Managed,
+                "auto_latest"
+            ),
+            "auto_latest"
+        );
+        assert_eq!(
+            conversion_policy(
+                ManagementMode::Managed,
+                ManagementMode::External,
+                "auto_latest"
+            ),
+            "manual"
+        );
+    }
+
+    #[test]
+    fn parent_selection_preserves_clears_and_replaces_association() {
+        let original = uuid::Uuid::from_u128(1);
+        let replacement = uuid::Uuid::from_u128(2);
+        assert_eq!(
+            parent_update(Some(original), Some(original)),
+            FieldUpdate::Unset
+        );
+        assert_eq!(parent_update(None, None), FieldUpdate::Unset);
+        assert_eq!(parent_update(Some(original), None), FieldUpdate::Clear);
+        assert_eq!(
+            serde_json::to_value(parent_update(Some(original), None)).unwrap(),
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            parent_update(Some(original), Some(replacement)),
+            FieldUpdate::Set(replacement)
+        );
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     General,
     Deployment,
     Security,
+    Management,
     Danger,
 }
 
@@ -60,24 +367,10 @@ struct RotationError {
     outcome_unknown: bool,
 }
 
-/// Branch options for the flake branch field.
-const BRANCHES: &[&str] = &["main", "staging", "dev"];
-
-/// Derived FQDN from hostname and environment.
-fn derived_fqdn(hostname: &str, environment: Option<&str>) -> String {
-    let env = environment.unwrap_or("unknown").to_lowercase();
-    format!("{hostname}.{env}.cf.internal")
-}
-
-/// Derived branch from environment.
-fn derived_branch(environment: Option<&str>) -> &'static str {
-    match environment.unwrap_or("dev").to_lowercase().as_str() {
-        "production" | "prod" => "main",
-        "staging" | "stage" => "staging",
-        _ => "dev",
-    }
-}
-
+/// Edits registration locally until Save, preserving independent key rotation.
+/// Mode conversion requires explicit confirmation and new credentials when managed.
+/// Retains unchanged effective assignments when declaration discovery is unavailable;
+/// changed assignments require proof for the exact selected flake and output.
 #[component]
 pub fn EditSystemModal(
     system: SystemDetail,
@@ -94,21 +387,32 @@ pub fn EditSystemModal(
 ) -> Element {
     let mut hostname = use_signal(|| system.hostname.clone());
     let mut environment = use_signal(|| system.environment.clone().unwrap_or_default());
-    let mut fqdn = use_signal(|| {
-        system
-            .fqdn
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| derived_fqdn(&system.hostname, system.environment.as_deref()))
+    let mut fqdn = use_signal(|| system.fqdn.clone().unwrap_or_default());
+    let original_fqdn = system.fqdn.clone().unwrap_or_default();
+    let original_tags = system.tags.clone();
+    let original_description = system.description.clone().unwrap_or_default();
+    let original_reachability = system.network.reachability.clone();
+    let mut reachability = use_signal(|| original_reachability.clone());
+    let mut description = use_signal(|| original_description.clone());
+    let mut system_configuration_name = use_signal(|| {
+        effective_configuration(
+            system
+                .system_configuration_name
+                .as_deref()
+                .unwrap_or_default(),
+            &system.hostname,
+        )
+        .to_string()
     });
-    let mut fqdn_manually_edited = use_signal(|| {
-        system
-            .fqdn
-            .as_ref()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
-    });
-    let system_configuration_name = system.system_configuration_name.clone().unwrap_or_default();
+    let original_mode = system.management_mode;
+    let original_parent = system.parent_host_id;
+    let mut management_mode = use_signal(|| original_mode);
+    let mut parent_host_id = use_signal(|| original_parent);
+    let mut enrollment_key = use_signal(String::new);
+    let mut transition_confirmed = use_signal(|| false);
+    // A bare boolean could validate a different assignment after a rapid edit.
+    let mut declared_assignment = use_signal(|| None::<(String, String)>);
+    let mut validation_error = use_signal(|| None::<String>);
     let mut deployment_policy = use_signal(|| system.deployment_policy.clone());
     let mut flake_name = use_signal(|| {
         system
@@ -117,29 +421,21 @@ pub fn EditSystemModal(
             .map(|flake| flake.name.clone())
             .unwrap_or_default()
     });
-    let mut flake_branch = use_signal(|| derived_branch(system.environment.as_deref()).to_string());
+    let mut flake_branch = use_signal(String::new);
     let mut is_saving = use_signal(|| false);
     let mut show_remove_modal = use_signal(|| false);
-    // Pinned commit selection. Seeds from the system's latest known commit so the picker
-    // highlights the active pin. Wired to the real `/systems/:id/commits` data passed in
-    // via `recent_commits`.
-    let current_commit_sha = system
-        .flake
-        .as_ref()
-        .and_then(|flake| flake.latest_commit.clone());
-    let mut pinned_commit = use_signal(|| {
-        current_commit_sha
-            .clone()
-            .or_else(|| recent_commits.first().map(|commit| commit.sha.clone()))
-            .unwrap_or_default()
-    });
+    // Deployment targets have a separate API and remain owned by System Detail.
+    // The pinned picker reuses the System Detail commit list. Selecting a pin
+    // is metadata only; deployment stays a separate, authorized action.
+    let original_pin = system.pinned_commit.clone();
+    let mut pinned_commit = use_signal(|| original_pin.clone());
 
     // Seed heartbeat interval from the persisted system value.
     // 0 is a sentinel meaning "use server default" (NULL in the database).
     // When the system has no per-system override (heartbeat_interval_secs is None),
     // we show "Use server default" (0) so the user can see the current state.
     let mut heartbeat_interval_sec = use_signal(|| system.heartbeat_interval_secs.unwrap_or(0));
-    let mut tags_draft = use_signal(String::new);
+    let mut tags_draft = use_signal(|| system.tags.join(", "));
 
     // Tab state
     let mut active_tab = use_signal(|| Tab::General);
@@ -259,33 +555,135 @@ pub fn EditSystemModal(
         }
     };
 
-    // Sync FQDN when hostname or environment changes
     {
-        let hostname_clone = hostname.clone();
-        let environment_clone = environment.clone();
-        let mut fqdn_clone = fqdn.clone();
-        use_effect(move || {
-            let h = hostname_clone.read().clone();
-            let e = environment_clone.read().clone();
-            let env_opt = if e.is_empty() { None } else { Some(e.as_str()) };
-            if !*fqdn_manually_edited.read() {
-                fqdn_clone.set(derived_fqdn(&h, env_opt));
-            }
-        });
-    }
-
-    {
-        let error_message = error_message.clone();
-        use_effect(move || {
-            if error_message.is_some() {
+        use_effect(use_reactive((&error_message,), move |(message,)| {
+            if message.is_some() {
                 is_saving.set(false);
             }
-        });
+        }));
     }
 
+    let original_assignment = (
+        system
+            .flake
+            .as_ref()
+            .map(|flake| flake.name.trim())
+            .unwrap_or_default()
+            .to_string(),
+        effective_configuration(
+            system
+                .system_configuration_name
+                .as_deref()
+                .unwrap_or_default(),
+            &system.hostname,
+        )
+        .to_string(),
+    );
+    let selected_assignment = (
+        flake_name().trim().to_string(),
+        effective_configuration(&system_configuration_name(), &hostname()).to_string(),
+    );
+    // The persisted detail proves its existing flake association even when the
+    // registry dropdown cannot load. It proves no newly selected association.
+    let registered_flake = !selected_assignment.0.is_empty()
+        && (selected_assignment.0 == original_assignment.0
+            || flake_names
+                .iter()
+                .any(|name| name == &selected_assignment.0));
+    // Approved footer state: the per-system heartbeat override, where 0 means
+    // the server-configured default.
+    // Approved mode-switch notices: stopping management warns, the others inform.
+    let host = system.hostname.clone();
+    let (notice_class, notice_title) = if original_mode == ManagementMode::Managed {
+        (
+            "mg-notice mg-notice-warn",
+            format!("Crystal Forge will stop managing {host}"),
+        )
+    } else if management_mode() == ManagementMode::Managed {
+        ("mg-notice", format!("Crystal Forge will manage {host}"))
+    } else {
+        (
+            "mg-notice",
+            format!(
+                "Switching to {}",
+                management_mode().long_label().to_lowercase()
+            ),
+        )
+    };
+    // The reason Save is unavailable. Shown in the footer, as in the design.
+    let converting_to_managed =
+        management_mode() == ManagementMode::Managed && original_mode != ManagementMode::Managed;
+    let key_error = (converting_to_managed && !enrollment_key().trim().is_empty())
+        .then(|| key_rotation::validate_public_key_input(&enrollment_key()).err())
+        .flatten();
+    let save_blocker = if management_mode() != original_mode && !transition_confirmed() {
+        Some("Confirm the management change")
+    } else if converting_to_managed
+        && key_rotation::validate_public_key_input(&enrollment_key()).is_err()
+    {
+        Some("Agent public key required to manage this system")
+    } else if hostname.read().trim().is_empty() {
+        Some("A name is required")
+    } else {
+        None
+    };
+    let heartbeat_label = match heartbeat_interval_sec() {
+        0 => "server default".to_string(),
+        seconds => format!("{seconds}s"),
+    };
+    let declared = declared_assignment().as_ref() == Some(&selected_assignment);
+    let can_keep_assignment = assignment_allowed(
+        (&original_assignment.0, &original_assignment.1),
+        (&selected_assignment.0, &selected_assignment.1),
+        management_mode(),
+        registered_flake,
+        declared,
+    );
+    let discovery_assignment = selected_assignment.clone();
+    let original_for_save = original_assignment.clone();
+    let registered_flakes_for_save = flake_names.clone();
+
+    let save_original_pin = original_pin.clone();
     let handle_save = move |_| {
-        if rotate_in_flight() {
+        if rotate_in_flight() || is_saving() {
             return;
+        }
+        validation_error.set(None);
+        // Re-read the current draft at the event boundary. Render-time validity
+        // must never authorize a changed assignment before the next render.
+        let selected = (
+            flake_name().trim().to_string(),
+            effective_configuration(&system_configuration_name(), &hostname()).to_string(),
+        );
+        let registered = !selected.0.is_empty()
+            && (selected.0 == original_for_save.0
+                || registered_flakes_for_save
+                    .iter()
+                    .any(|name| name == &selected.0));
+        if !assignment_allowed(
+            (&original_for_save.0, &original_for_save.1),
+            (&selected.0, &selected.1),
+            management_mode(),
+            registered,
+            declared_assignment().as_ref() == Some(&selected),
+        ) {
+            validation_error.set(Some(
+                "Keep the existing assignment or select a registered flake and an exact declared configuration. External and reference resources require a flake and configuration.".into(),
+            ));
+            return;
+        }
+        if management_mode() != original_mode && !transition_confirmed() {
+            validation_error.set(Some(
+                "Confirm the management-mode change in Management before saving.".into(),
+            ));
+            return;
+        }
+        if original_mode != ManagementMode::Managed && management_mode() == ManagementMode::Managed
+        {
+            if let Err(message) = key_rotation::validate_public_key_input(&enrollment_key()) {
+                validation_error.set(Some(message));
+                return;
+            }
         }
         is_saving.set(true);
 
@@ -306,16 +704,39 @@ pub fn EditSystemModal(
         };
 
         let request = UpdateSystemRequest {
-            hostname: hostname.read().clone(),
-            fqdn: if fqdn.read().trim().is_empty() {
-                None
+            tags: if parse_tags(&tags_draft()) == original_tags {
+                FieldUpdate::Unset
             } else {
-                Some(fqdn.read().trim().to_string())
+                FieldUpdate::Set(parse_tags(&tags_draft()))
             },
-            system_configuration_name: if system_configuration_name.trim().is_empty() {
+            description: text_update(&original_description, &description()),
+            reachability: if management_mode() == ManagementMode::Managed {
+                text_update(&original_reachability, &reachability())
+            } else {
+                FieldUpdate::Unset
+            },
+            management_mode: (management_mode() != original_mode).then_some(management_mode()),
+            public_key: (management_mode() == ManagementMode::Managed
+                && original_mode != ManagementMode::Managed)
+                .then(|| enrollment_key().trim().to_string()),
+            parent_host_id: parent_update(
+                original_parent,
+                if management_mode() == ManagementMode::External {
+                    parent_host_id()
+                } else {
+                    None
+                },
+            ),
+            hostname: hostname.read().clone(),
+            fqdn: if management_mode() == ManagementMode::Managed {
+                text_update(&original_fqdn, &fqdn())
+            } else {
+                FieldUpdate::Unset
+            },
+            system_configuration_name: if selected.1.is_empty() {
                 None
             } else {
-                Some(system_configuration_name.clone())
+                Some(selected.1)
             },
             environment: if environment.read().trim().is_empty() {
                 None
@@ -327,8 +748,23 @@ pub fn EditSystemModal(
             } else {
                 Some(flake_name.read().clone())
             },
-            deployment_policy: deployment_policy.read().clone(),
-            heartbeat_interval_secs: heartbeat_interval,
+            deployment_policy: conversion_policy(
+                original_mode,
+                management_mode(),
+                &deployment_policy(),
+            ),
+            pinned_commit: pin_update(
+                original_mode == ManagementMode::Managed
+                    && management_mode() == ManagementMode::Managed,
+                &deployment_policy(),
+                save_original_pin.as_deref(),
+                pinned_commit().as_deref(),
+            ),
+            heartbeat_interval_secs: if management_mode() == ManagementMode::Managed {
+                heartbeat_interval
+            } else {
+                FieldUpdate::Unset
+            },
         };
 
         on_save.call(request);
@@ -339,105 +775,129 @@ pub fn EditSystemModal(
             class: "modal-backdrop",
             "data-testid": "edit-system-modal-backdrop",
             onclick: move |_| {
-                if !rotate_in_flight() {
+                if !rotate_in_flight() && !is_saving() {
                     on_close.call(());
                 }
             },
 
             div {
-                class: "modal",
+                class: "pe-shell management-form-shell",
                 "data-testid": "edit-system-modal",
                 "aria-busy": rotate_in_flight(),
-                style: "width:min(620px,96vw); max-height:92vh;",
+                role: "dialog",
+                "aria-modal": "true",
+                "aria-label": "Edit {system.hostname}",
                 onclick: move |e| e.stop_propagation(),
+                // Escape closes the dialog unless a save or key rotation is in flight.
+                // The key is read through `dom_key`: a key-less keydown (a datalist
+                // pick) would otherwise panic the runtime.
+                onkeydown: move |e| {
+                    if dom_key(&e).as_deref() == Some("Escape") && !is_saving() && !rotate_in_flight() {
+                        on_close.call(());
+                    }
+                },
 
                 div {
-                    class: "modal-head",
-                    h2 {
-                        span { style: "margin-right:6px; display:inline-flex; vertical-align:text-bottom;",
-                            Icon { name: IconName::Gear, size: 14 }
+                    class: "pe-head",
+                    div { style: "min-width:0; display:flex; flex-direction:column; gap:3px;",
+                    div { style: "display:flex; align-items:center; gap:9px; min-width:0; flex-wrap:wrap;",
+                        span { style: "display:inline-flex; color:var(--cf-brand-purple); flex-shrink:0;",
+                            Icon { name: IconName::Gear, size: 15 }
                         }
-                        "Edit {system.hostname}"
+                        h2 { class: "pe-head-title mono", aria_label: "Edit {system.hostname}", "{hostname}" }
+                        MgmtChip { mode: management_mode() }
+                        if !environment().trim().is_empty() { span { class: "chip chip-info", "{environment}" } }
+                        if !flake_name().trim().is_empty() { span { class: "chip chip-unknown mono", style: "font-size:10px", "{flake_name}" } }
                     }
                     p {
-                        "Update system registration, flake assignment, deployment policy, and security settings."
+                        class: "pe-head-sub",
+                        if management_mode() == ManagementMode::Managed { "System registration, flake assignment, deployment policy and agent identity." }
+                        else { "Name, environment, configuration and management mode." }
                     }
+                    }
+                    button { class: "btn-icon focus-ring", aria_label: "Close", disabled: is_saving() || rotate_in_flight(), onclick: move |_| on_close.call(()), "×" }
                 }
 
-                // Tab bar
+                // Conditional sections retain the existing key rotation and danger flows.
                 div {
-                    style: "border-bottom: 1px solid var(--cf-divider); padding: 0 20px;",
+                    class: "pe-rail",
                     div {
-                        class: "seg",
-                        style: "width: fit-content; margin: 0;",
+                        class: "management-form-nav",
                         button {
-                            class: if *active_tab.read() == Tab::General { "active" } else { "" },
+                            class: if *active_tab.read() == Tab::General { "pe-rail-item active focus-ring" } else { "pe-rail-item focus-ring" },
                             disabled: rotate_in_flight(),
                             onclick: move |_| {
                                 if !rotate_in_flight() {
                                     active_tab.set(Tab::General);
                                 }
                             },
-                            span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
-                                Icon { name: IconName::Gear, size: 12 }
-                            }
-                            "General"
+                            Icon { name: IconName::Server, size: 13 }
+                            span { class: "pe-rail-label", "General" }
                         }
                         button {
-                            class: if *active_tab.read() == Tab::Deployment { "active" } else { "" },
+                            class: if *active_tab.read() == Tab::Deployment { "pe-rail-item active focus-ring" } else { "pe-rail-item focus-ring" },
                             disabled: rotate_in_flight(),
                             onclick: move |_| {
                                 if !rotate_in_flight() {
                                     active_tab.set(Tab::Deployment);
                                 }
                             },
-                            span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
-                                Icon { name: IconName::Git, size: 12 }
-                            }
-                            "Deployment"
+                            Icon { name: if management_mode() == ManagementMode::Managed { IconName::Deploy } else { IconName::Git }, size: 13 }
+                            span { class: "pe-rail-label", if management_mode() == ManagementMode::Managed { "Deployment" } else { "Configuration" } }
                         }
+                        if management_mode() == ManagementMode::Managed {
                         button {
-                            class: if *active_tab.read() == Tab::Security { "active" } else { "" },
+                            class: if *active_tab.read() == Tab::Security { "pe-rail-item active focus-ring" } else { "pe-rail-item focus-ring" },
                             disabled: rotate_in_flight(),
                             onclick: move |_| {
                                 if !rotate_in_flight() {
                                     active_tab.set(Tab::Security);
                                 }
                             },
-                            span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
-                                Icon { name: IconName::Key, size: 12 }
-                            }
-                            "Security"
+                            Icon { name: IconName::Key, size: 13 }
+                            span { class: "pe-rail-label", "Security" }
+                        }
                         }
                         button {
-                            class: if *active_tab.read() == Tab::Danger { "active" } else { "" },
+                            class: if active_tab() == Tab::Management { "pe-rail-item active focus-ring" } else { "pe-rail-item focus-ring" },
+                            disabled: rotate_in_flight() || is_saving(),
+                            onclick: move |_| active_tab.set(Tab::Management),
+                            Icon { name: mode_icon(management_mode()), size: 13 }
+                            span { class: "pe-rail-label", "Management" }
+                        }
+                        button {
+                            class: if *active_tab.read() == Tab::Danger { "pe-rail-item active focus-ring" } else { "pe-rail-item focus-ring" },
+                            style: if *active_tab.read() != Tab::Danger { "color:#f87171" } else { "" },
                             disabled: rotate_in_flight(),
                             onclick: move |_| {
                                 if !rotate_in_flight() {
                                     active_tab.set(Tab::Danger);
                                 }
                             },
-                            span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
-                                Icon { name: IconName::Warn, size: 12 }
-                            }
-                            "Danger"
+                            Icon { name: IconName::Warn, size: 13 }
+                            span { class: "pe-rail-label", "Danger zone" }
                         }
                     }
                 }
 
                 div {
-                    class: "modal-body",
+                    class: "pe-body",
                     style: "overflow-y:auto;",
 
                     // GENERAL TAB
+                    fieldset { disabled: is_saving(),
                     if *active_tab.read() == Tab::General {
+                        div { class: "pe-sec-head", h3 { "General" }
+                            p { if management_mode() == ManagementMode::Managed { "Identity, environment, and how the server reaches this host." } else { "Name, environment, tags and notes." } }
+                        }
                         div {
-                            // Two-column: Hostname + Environment (design layout)
+                            // Two-column: Hostname + Environment (design layout). The
+                            // shared grid class resets the second field's top margin.
                             div {
-                                style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px;",
+                                class: "management-form-grid",
                                 div {
                                     class: "field",
-                                    label { "Hostname" }
+                                    label { if management_mode() == ManagementMode::Managed { "Hostname" } else { "Name" } }
                                     input {
                                         r#type: "text",
                                         class: "input focus-ring mono",
@@ -452,7 +912,7 @@ pub fn EditSystemModal(
                                         select {
                                             class: "input focus-ring",
                                             value: "{environment}",
-                                            onchange: move |e| environment.set(e.value().clone()),
+                                            onchange: move |e| { environment.set(e.value()); parent_host_id.set(None); },
                                             option { value: "", "— none —" }
                                             for env_name in &environments {
                                                 option {
@@ -474,74 +934,14 @@ pub fn EditSystemModal(
                                 }
                             }
 
-                            // FQDN field (design: below hostname+environment)
-                            div {
-                                class: "field",
-                                label { "FQDN" }
-                                input {
-                                    r#type: "text",
-                                    class: "input focus-ring mono",
-                                    value: "{fqdn}",
-                                    oninput: move |e| {
-                                        fqdn_manually_edited.set(true);
-                                        fqdn.set(e.value().clone());
-                                    },
-                                }
-                                p { class: "help", "Saved as this system's operator-managed FQDN. Clear it to fall back to hostname + environment." }
+                            if management_mode() == ManagementMode::Managed {
+                            EnrollmentNetworkFields { fqdn: fqdn(), reachability: reachability(), on_address: move |value| fqdn.set(value), on_reachability: move |value| reachability.set(value) }
+
                             }
 
-                            // Reachability section (design: Direct/LAN vs Agent pull-only)
-                            div {
-                                style: "margin-top: 8px; padding: 14px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 50%, var(--cf-card-bg));",
-                                div {
-                                    style: "display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 13px; font-weight: 600;",
-                                    Icon { name: IconName::Server, size: 13 }
-                                    " Reachability"
-                                }
-                                div {
-                                    class: "field",
-                                    label { "How the server reaches this system" }
-                                    div {
-                                        class: "seg",
-                                        style: "width: fit-content;",
-                                        button { class: "active", "Direct / LAN" }
-                                        button { "Agent pull-only" }
-                                    }
-                                    p { class: "help", "Server can open connections to the agent (same LAN / routable / VPN). Enables server-initiated deploys and live log tail." }
-                                }
-                            }
+                            EnrollmentTagsField { value: tags_draft(), on_change: move |value| tags_draft.set(value) }
 
-                            // Server address field
-                            div {
-                                class: "field",
-                                label { "Server address" }
-                                input {
-                                    r#type: "text",
-                                    class: "input focus-ring mono",
-                                    value: "https://crystal-forge.internal",
-                                    disabled: true,
-                                }
-                                p { class: "help", "The Crystal Forge server this agent checks in with. Set during agent bootstrap." }
-                            }
-
-                            // Two-column: Tags + Description combined in one section
-                            div {
-                                class: "field",
-                                label {
-                                    "Tags "
-                                    span { style: "color: var(--cf-text-muted); font-weight: 400;", "· free-form labels for grouping & filtering" }
-                                }
-                                input {
-                                    r#type: "text",
-                                    class: "input focus-ring",
-                                    value: "{tags_draft}",
-                                    placeholder: "e.g. builder, stig-enforced",
-                                    oninput: move |e| tags_draft.set(e.value().clone()),
-                                }
-                                p { class: "help", "Free-form labels for grouping & filtering. Click a tag in System Detail to slice the fleet by it." }
-                            }
-
-                            // Description / notes (local-only; no systems.description column yet).
+                            // Notes remain local until the authorized Save succeeds.
                             div {
                                 class: "field",
                                 "data-testid": "description-field",
@@ -549,74 +949,71 @@ pub fn EditSystemModal(
                                 textarea {
                                     class: "input focus-ring",
                                     rows: "2",
+                                    aria_label: "Description / notes",
+                                    value: "{description}",
+                                    oninput: move |e| description.set(e.value()),
                                     placeholder: "Optional context for operators…",
                                     style: "resize: vertical;",
                                 }
-                                p { class: "help", "Optional context for operators. Not persisted to the backend yet." }
+                                p { class: "help", "Optional context for operators." }
                             }
                         }
                     }
 
-                    // DEPLOYMENT TAB
-                    if *active_tab.read() == Tab::Deployment {
-                        div {
-                            // Flake assignment section (design: grouped in a bordered box)
-                            div {
-                                style: "margin-top: 8px; padding: 14px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 50%, var(--cf-card-bg));",
-                                div {
-                                    style: "display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 13px; font-weight: 600;",
-                                    Icon { name: IconName::Git, size: 13 }
-                                    " Flake assignment"
-                                }
-                                div {
-                                    style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px;",
-                                    div {
-                                        class: "field",
-                                        label { "Flake" }
-                                        select {
-                                            class: "input focus-ring",
-                                            value: "{flake_name}",
-                                            onchange: move |e| flake_name.set(e.value().clone()),
-                                            option {
-                                                value: "",
-                                                selected: flake_name.read().is_empty(),
-                                                "— none —"
-                                            }
-                                            for name in &flake_names {
-                                                option {
-                                                    value: "{name}",
-                                                    selected: *flake_name.read() == *name,
-                                                    "{name}"
-                                                }
-                                            }
-                                        }
-                                        if flake_name.read().is_empty() {
-                                            p {
-                                                class: "text-xs text-amber-400 mt-1",
-                                                "⚠ No flake linked — won't be included in evaluations."
-                                            }
-                                        }
-                                    }
-                                    div {
-                                        class: "field",
-                                        label { "Branch" }
-                                        select {
-                                            class: "input focus-ring",
-                                            value: "{flake_branch}",
-                                            onchange: move |e| flake_branch.set(e.value().clone()),
-                                            for b in BRANCHES {
-                                                option {
-                                                    value: "{b}",
-                                                    selected: *flake_branch.read() == *b,
-                                                    "{b}"
-                                                }
-                                            }
-                                        }
-                                    }
+                    if active_tab() == Tab::Management {
+                        div { class: "pe-sec-head", h3 { "Management mode" } p { "Who controls deployment. Evidence history is kept when the mode changes." } }
+                        ManagementModePicker { value: management_mode(), current: original_mode,
+                            on_change: move |mode| { management_mode.set(mode); transition_confirmed.set(false); validation_error.set(None); }
+                        }
+                        if management_mode() != original_mode {
+                            div { class: "{notice_class}",
+                                div { class: "mg-notice-body",
+                                    b { "{notice_title}" }
+                                    if original_mode == ManagementMode::Managed {
+                                        p { "Saving atomically revokes the agent key and deployment authority, invalidates pending deployments, and disables deploys and rollbacks. Evidence and history remain available." }
+                                    } else if management_mode() == ManagementMode::Managed {
+                                        p { "Supply a new real agent public key. Conversion saves MANUAL policy and does not deploy. Enable an automatic policy in a later edit after enrollment." }
+                                    } else if management_mode() == ManagementMode::Reference {
+                                        p { "The parent association is cleared. This resource becomes configuration-only; retained runtime observations do not establish current runtime state." }
+                                    } else { p { "This becomes a system deployed outside Crystal Forge. Associate a reporting parent from Configuration if required." } }
                                 }
                             }
+                            if management_mode() == ManagementMode::Managed {
+                                label { class: "field", "New agent public key *",
+                                    textarea { class: "input focus-ring mono", aria_label: "New agent public key *", rows: 3, value: "{enrollment_key}", placeholder: "Base64 Ed25519 public key", oninput: move |e| enrollment_key.set(e.value()) }
+                                    if let Some(message) = key_error.clone() { span { class: "help", role: "alert", style: "color:#fca5a5", "{message}" } }
+                                }
+                            }
+                            label { class: "management-transition-confirm",
+                                input { r#type: "checkbox", checked: transition_confirmed(), onchange: move |e| transition_confirmed.set(e.checked()) }
+                                "I authorize this management-mode change when Save changes succeeds."
+                            }
+                        }
+                    }
 
-                            // Deployment mode (design: segmented buttons)
+                    // Keep discovery mounted while navigating the section rail.
+                    div { hidden: active_tab() != Tab::Deployment,
+                        div { class: "pe-sec-head",
+                            h3 { if management_mode() == ManagementMode::Managed { "Deployment" } else { "Configuration" } }
+                            p { if management_mode() == ManagementMode::Managed { "Which flake this system tracks, and how it picks up new configuration." } else { "Which NixOS configuration Crystal Forge evaluates, builds and scans." } }
+                        }
+                        div {
+                            EnrollmentConfigurationFields {
+                                flake_name: selected_assignment.0.clone(), branch: flake_branch(), configuration: selected_assignment.1.clone(), flake_names: flake_names.clone(),
+                                on_change: move |(flake, branch, config)| { declared_assignment.set(None); flake_name.set(flake); flake_branch.set(branch); system_configuration_name.set(config); },
+                                on_valid: move |valid: bool| declared_assignment.set(valid.then(|| discovery_assignment.clone())),
+                            }
+                            if can_keep_assignment && !declared {
+                                p { class: "help", role: "status", "Keeping the existing assignment; declaration discovery is unavailable or has not confirmed this output. This does not prove that the configuration is still declared." }
+                            }
+                            if management_mode() == ManagementMode::External {
+                                EnrollmentParentField { environment: environment(), value: parent_host_id(), exclude: system_id, on_change: move |id| parent_host_id.set(id) }
+                            }
+                            if management_mode() == ManagementMode::Managed {
+                            // Conversion policy is forced to manual in the request.
+                            if original_mode != ManagementMode::Managed {
+                                p { class: "mg-notice", "Initial managed policy: Manual. Automatic deployment can be enabled after conversion in a later edit." }
+                            } else {
                             div {
                                 class: "field",
                                 label { "Deployment mode" }
@@ -638,55 +1035,64 @@ pub fn EditSystemModal(
                                         onclick: move |_| deployment_policy.set("pinned".to_string()),
                                         "Pinned"
                                     }
+                                    button {
+                                        class: if *deployment_policy.read() == ENVIRONMENT_DEFAULT_POLICY { "active" } else { "" },
+                                        onclick: move |_| deployment_policy.set(ENVIRONMENT_DEFAULT_POLICY.to_string()),
+                                        "Environment default"
+                                    }
                                 }
                                 p {
                                     class: "help",
                                     match deployment_policy.read().as_str() {
-                                        "manual" => "Operator must explicitly approve every deploy.",
-                                        "auto_latest" => "Automatically deploy the latest commit.",
-                                        "pinned" => "Deploy only specific pinned commits.",
-                                        _ => ""
+                                        "manual" => "Operator must explicitly approve every deploy.".to_string(),
+                                        "auto_latest" => "Automatically deploy the latest commit.".to_string(),
+                                        "pinned" => "System will not auto-advance off the pinned commit. Saving a pin does not deploy it.".to_string(),
+                                        ENVIRONMENT_DEFAULT_POLICY => format!(
+                                            "Copies the {} environment's current default policy when you save. Later changes to that default do not update this system.",
+                                            if environment().trim().is_empty() { "selected".to_string() } else { environment() }
+                                        ),
+                                        _ => String::new(),
                                     }
                                 }
                             }
-
-                            // Pinned commit picker (design: only shown when mode is "pinned")
-                            if *deployment_policy.read() == "pinned" && !recent_commits.is_empty() {
-                                div {
-                                    class: "field",
+                            if deployment_policy() == "pinned" {
+                                div { class: "field", "data-testid": "pinned-commit-field",
                                     label { "Pinned commit" }
-                                    div {
-                                        class: "sd-commit-list",
-                                        style: "max-height: 200px;",
-                                        for commit in recent_commits.iter().cloned() {
-                                            {
-                                                let is_selected = *pinned_commit.read() == commit.sha;
-                                                let is_current = current_commit_sha
-                                                    .as_deref()
-                                                    .map(|sha| sha == commit.sha)
-                                                    .unwrap_or(false);
-                                                let sha = commit.sha.clone();
-                                                rsx! {
-                                                    button {
-                                                        class: if is_selected { "sd-commit-item focus-ring selected" } else { "sd-commit-item focus-ring" },
-                                                        onclick: move |_| pinned_commit.set(sha.clone()),
-                                                        span { class: "mono sd-commit-sha", "{commit.short_sha}" }
-                                                        span { class: "sd-commit-msg", "{commit.message}" }
-                                                        span { class: "sd-commit-meta mono", "{commit.author}" }
-                                                        span { class: "sd-commit-meta", "{commit.timestamp}" }
-                                                        if is_current {
-                                                            span { class: "chip chip-info", style: "font-size:10px;", "current" }
+                                    if recent_commits.is_empty() {
+                                        p { class: "help", "No commits of the registered flake are available to pin." }
+                                    } else {
+                                        div { class: "sd-commit-list", style: "max-height: 200px;", role: "listbox", aria_label: "Pinned commit",
+                                            for commit in recent_commits.clone() {
+                                                {
+                                                    let selected = pinned_commit().as_deref() == Some(commit.sha.as_str());
+                                                    let sha = commit.sha.clone();
+                                                    rsx! {
+                                                        button {
+                                                            r#type: "button",
+                                                            role: "option",
+                                                            aria_selected: selected,
+                                                            class: if selected { "sd-commit-item focus-ring selected" } else { "sd-commit-item focus-ring" },
+                                                            onclick: move |_| pinned_commit.set(Some(sha.clone())),
+                                                            span { class: "mono sd-commit-sha", "{commit.short_sha}" }
+                                                            span { class: "sd-commit-msg", "{commit.message}" }
+                                                            span { class: "sd-commit-meta mono", "{commit.author}" }
+                                                            span { class: "sd-commit-meta", title: "{commit.timestamp}",
+                                                                {chrono::DateTime::parse_from_rfc3339(&commit.timestamp)
+                                                                    .map(|at| crate::components::system::system_card_v2::ago(at.with_timezone(&chrono::Utc)))
+                                                                    .unwrap_or_else(|_| commit.timestamp.clone())}
+                                                            }
+                                                            if original_pin.as_deref() == Some(commit.sha.as_str()) {
+                                                                span { class: "chip chip-info", style: "font-size:10px", "pinned" }
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                    p {
-                                        class: "help",
-                                        "System will not auto-advance off this commit. Operators can change the pin or temporarily deploy a different commit from System Detail."
-                                    }
+                                    p { class: "help", "System will not auto-advance off this commit. Operators can change the pin or temporarily deploy a different commit from System Detail. Saving the pin does not deploy it." }
                                 }
+                            }
                             }
 
                             // Heartbeat interval
@@ -713,11 +1119,27 @@ pub fn EditSystemModal(
                                 }
                                 p { class: "help", "Agent heartbeat cadence. \"Use server default\" clears any per-system override (inherits the server-configured default). Takes effect on the agent's next check-in after saving." }
                             }
+                            }
                         }
                     }
 
                     // SECURITY TAB
-                    if *active_tab.read() == Tab::Security {
+                    if *active_tab.read() == Tab::Security && management_mode() == ManagementMode::Managed {
+                        div { class: "pe-sec-head", h3 { "Security" } p { "The Ed25519 key the agent presents on every heartbeat." } }
+                    }
+                    // A resource that is converting into managed mode has no
+                    // enrolled key yet: its key is entered in Management and
+                    // takes effect when Save changes succeeds. Rotation applies
+                    // only to an existing enrollment.
+                    if *active_tab.read() == Tab::Security && management_mode() == ManagementMode::Managed && original_mode != ManagementMode::Managed {
+                        div { class: "mg-notice", role: "status",
+                            div { class: "mg-notice-body",
+                                b { "No agent key is enrolled yet" }
+                                p { "Enter the agent public key in Management. Key rotation is available after the conversion is saved." }
+                            }
+                        }
+                    }
+                    if *active_tab.read() == Tab::Security && management_mode() == ManagementMode::Managed && original_mode == ManagementMode::Managed {
                         div {
                             div {
                                 "data-testid": "agent-identity-section",
@@ -1044,9 +1466,12 @@ pub fn EditSystemModal(
                     // DANGER TAB
                     if *active_tab.read() == Tab::Danger {
                         div {
-                            div {
-                                style: "font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin-bottom: 8px;",
-                                "Danger zone"
+                            div { class: "pe-sec-head",
+                                h3 { "Danger zone" }
+                                p {
+                                    if management_mode() == ManagementMode::Managed { "Unregistering stops deploys — the agent keeps running its current generation." }
+                                    else { "Removing stops evaluation and scanning. The system or configuration itself is not affected." }
+                                }
                             }
                             button {
                                 class: "btn btn-ghost focus-ring",
@@ -1067,10 +1492,21 @@ pub fn EditSystemModal(
                             "{message}"
                         }
                     }
+                    if let Some(message) = validation_error() { div { class: "sd-callout sd-callout-danger", role: "alert", "{message}" } }
+                    }
                 }
 
                 div {
-                    class: "modal-foot",
+                    class: "pe-foot",
+                    span { class: "pe-foot-state",
+                        if flake_branch().trim().is_empty() { "{flake_name}" } else { "{flake_name}@{flake_branch}" }
+                        if management_mode() == ManagementMode::Managed { " · {deployment_policy} · heartbeat {heartbeat_label}" } else { " · {management_mode().long_label()}" }
+                        if !can_keep_assignment { " · Registered flake and declared configuration required for a new assignment" }
+                        else if !declared { " · Keeping existing assignment; declaration unconfirmed" }
+                        if management_mode() != original_mode { " · mode: {original_mode.label()} → {management_mode().label()}" }
+                        if let Some(reason) = save_blocker { span { style: "color:#fbbf24", " · {reason}" } }
+                    }
+                    div {
 
                     button {
                         class: "btn btn-ghost focus-ring",
@@ -1090,6 +1526,9 @@ pub fn EditSystemModal(
                         onclick: handle_save,
                         disabled: is_saving()
                             || rotate_in_flight()
+                            || !can_keep_assignment
+                            || (management_mode() != original_mode && !transition_confirmed())
+                            || (management_mode() == ManagementMode::Managed && original_mode != ManagementMode::Managed && key_rotation::validate_public_key_input(&enrollment_key()).is_err())
                             || hostname.read().trim().is_empty(),
 
                         if is_saving() {
@@ -1097,6 +1536,7 @@ pub fn EditSystemModal(
                         } else {
                             "Save changes"
                         }
+                    }
                     }
                 }
             }

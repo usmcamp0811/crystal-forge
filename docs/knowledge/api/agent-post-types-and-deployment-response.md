@@ -8,7 +8,7 @@ tags:
   - heartbeat
   - deployment-command
   - log-response
-implementation_status: implemented
+implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
   at: 2026-10-03T22:55:03-05:00
@@ -40,8 +40,27 @@ Common values:
 Important compatibility rule:
 
 > Older agents may emit `state_delta` for every periodic heartbeat. The server
-> must still run equivalence checks for `state_delta` and write only an
-> `agent_heartbeats` row when nothing meaningful changed.
+> still runs equivalence checks for `state_delta` on the heartbeat endpoint.
+> When enrollment already has a current full observation and no reboot occurred,
+> unchanged state writes only an `agent_heartbeats` row. The first report under a
+> new enrollment forces a full row. The legacy state endpoint writes a full row.
+
+Both signed ingress channels recheck public key, enrollment epoch, managed mode
+and activity under the transaction's system-row lock. Authentication before a
+mode change cannot authorize a later write after re-enrollment, even if a key is
+reused. Migration `0318` owns the epoch; clients cannot reset it with metadata or
+key rotation. Current authority needs a fresh report under that enrollment.
+The owner reports passing isolated ingress/epoch tests; full exact-source owner
+results remain pending. See [management modes](../concepts/management-modes-and-configuration-assurance.md).
+
+Upgraded parent heartbeat responses include explicit `guest_observation_targets`;
+the next signed heartbeat can include optional `guest_observations`. Invalid,
+stale-association, duplicate or future-dated guest batches store no observations,
+but valid parent heartbeat processing and the fresh authorized target list
+continue. Revoked parent credentials reject the request. Inactive guests are
+neither targets nor latest-observation results; history remains retained. The
+current collector reports unit ActiveState and no runner path. These reports do
+not establish guest runtime configuration matches or synchronous Refresh.
 
 ## Deployment command response
 
@@ -63,7 +82,8 @@ flowchart LR
 
 Therefore, treating old-agent `state_delta` as heartbeat-eligible is safe:
 
-- unchanged `state_delta` writes to `agent_heartbeats`
+- unchanged heartbeat-endpoint `state_delta` writes to `agent_heartbeats` after
+  the enrollment has a current full observation and absent a reboot
 - genuinely changed `state_delta` still writes to `system_states`
 - `desired_target` is still returned either way
 - older agents can still receive and apply deployment commands

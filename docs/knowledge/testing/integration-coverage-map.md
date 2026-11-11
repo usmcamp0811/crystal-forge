@@ -17,6 +17,48 @@ generated:
 
 ## Current status
 
+### TASK-508 management-mode regression additions (partial proof)
+
+Authority: TASK-508 AC 1–15 and approved design `18b47eed`, specifically
+`AddSystemModal.jsx`, `EditSystemModal.jsx`, `FlakeExplorer.jsx`, `Systems.jsx`,
+`SystemDetail.jsx`, `MgmtParts.jsx`, `ConfigExplorer.jsx` and `ScanningView.jsx`.
+These additions extend the existing registered lifecycles. They add no scenario,
+VM, harness, check owner, verification wrapper, or approved visual baseline.
+The historical execution records below do not verify these new inputs.
+
+| Contract | Existing owner/scenario and fragment | Added mandatory proof | Status (local run, exact commit) |
+| --- | --- | --- | --- |
+| `access.configuration.resources` | Access `lifecycle-local-bootstrap`, `fragments/management-registration.py` | Keyless external/reference registration, descriptive reference identity, shared configuration with distinct resource IDs, mode filter, invalid mode/managed missing-key rejection, role/environment denials, conversion and audit persistence. Access's unavailable origin tests registration only; it does not claim declared-output evaluation. | **Passed** in `nix flake check` at `5176d483` (Access 40 cases, including the three management cases). |
+| `delivery.activation` | Delivery `delivery-lifecycle`, `fragments/management-authority.{py,cjs}` | A real managed pending request against an existing built/published artifact; simultaneous conversion, replay and new deployment admission; revoked key/targets, superseded pending requests, invalidated reservations and absent legacy bridge; explicit deploy/rollback denials. | **Passed** at `5176d483` (Delivery 17 cases). Concurrent HTTP requests do not prove a measured row-lock interleaving; isolated database tests cover the lock paths. |
+| `assurance.scanning`, `assurance.remediation` | Assurance `evidence-remediation-lifecycle`, `fragments/configuration-assurance.{py,cjs}`, `fragments/exact-artifact-reuse.py`, `fixtures/source.nix` | Add to Forge menu preselection in all modes; browser external and API reference registration share the declared `assuranceOnly` output. Native evaluation records agent disabled; one real build/publication and real vulnix scans supply exact schema-1 identities and authored CVE/package observations. Remote manual and periodic scans execute and seal without server-local vulnix. A documentation-only commit reuses the exact artifact without a second build. Neither registration receives Current authority, fabricated runtime state or POA&M authority (`412 stale_cve_observation`). A real signed parent unit observation remains distinct from attestation. A Git rename reports the missing head while retaining exact history. | **Passed** in `.#checks.x86_64-linux.integration-assurance` at `5176d483`, all ten configuration cases. |
+| `access.configuration`, assurance UI bindings | Same Assurance fragment and explicit `configuration-register`, `configuration-evidence`, `configuration-removed` browser registrations | Conditional enrollment/edit fields and mode confirmation; Systems mode filter; Overview, Deploy, Logs, Evidence history filters, Config, CVEs, Hardening and Compliance; exact artifact findings read-only, unavailable runtime/deploy/hardening states, scan request identity; dark/light tab captures and narrow unavailable state. | Browser execution **passed** at `5176d483` (dark and light, both modes). Captures are review candidates, not approved baselines; independent design reference/difference images are not produced. |
+
+Lower-level evidence is separate from these integration gates. The isolated
+state-machine workflow (`devScripts.state-machine-test`) passed end to end at
+`b032bd6a`. `required_inventory_exact_owner_success_and_conflict`, which an
+earlier full run failed with `EvaluationSuperseded`, passed in that run. The
+earlier failure is not otherwise classified. SQLx `prepare --check` passed against a database
+migrated through `0333` at the MR !340 finalization. Reused-carrier scan coverage, per-system summaries and
+hardening target selection are covered by
+`exact_reuse_scan_coverage_counts_reused_head_by_execution_source`, which fails
+on the pre-fix query.
+
+Remaining TASK-508 evidence obligations: exact-HEAD CI results for the review
+revision; independent equivalent-state design reference/actual/difference
+images before any visual baseline is accepted. The following remain unproved by
+these integration additions and rely on isolated database tests or nothing:
+failed evaluation and failed nonmanaged build/scan presentation in a VM, full
+metrics arithmetic, signed unauthorized and cross-environment guest report
+rejection in a VM, old-agent omitted-field compatibility, old-key ingress after
+conversion in a VM, automatic/rollout bypasses, deterministic
+deployment/conversion interleaving, POA&M verification/closure after conversion,
+and broad responsive/error/loading/form-cancel coverage. Remote rescans of an
+artifact built in an earlier builder session are not supported (TASK-513).
+Existing assertions are retained; no historical failure is relabeled.
+
+Focused commands remain the registered gates in the command table below. The
+top-level inventory must still evaluate to exactly the four owner names.
+
 The requested [pipeline 2985072087](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2985072087)
 at `45fa3e2f` is **terminal failed**. Downloaded, source-matching owner artifacts
 passed Access **37/37**, Delivery **16/16**, Assurance **54/54 records / 48 names**,

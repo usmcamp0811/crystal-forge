@@ -1,7 +1,10 @@
 //! Dashboard-related database queries.
 //!
 //! All SQL for the dashboard summary endpoint lives here, keeping the
-//! handler layer free of raw queries.
+//! handler layer free of raw queries. Fleet totals, health, deployments, and
+//! runtime CVEs count active managed machines only. Configuration evidence does
+//! not create an operational machine. Build/cache workload remains artifact
+//! workload across modes, not a health or deployment denominator.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -20,6 +23,12 @@ pub async fn fetch_fleet_health(pool: &PgPool) -> Result<FleetHealthSummary> {
     fetch_fleet_health_for_user(pool, None).await
 }
 
+/// Counts visible active managed machines in each health category.
+///
+/// Administrators pass `None`; other callers pass their user ID.
+///
+/// # Errors
+/// Returns database errors without substituting an empty fleet.
 pub async fn fetch_fleet_health_for_user(
     pool: &PgPool,
     user_id: Option<Uuid>,
@@ -30,7 +39,8 @@ pub async fn fetch_fleet_health_for_user(
     let rows = sqlx::query_as::<_, (String, i64)>(
         "SELECT v.health_status, COUNT(*)::BIGINT AS count \
          FROM view_system_list v JOIN systems s ON s.id = v.id \
-         WHERE ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id)) \
+         WHERE s.is_active AND s.management_mode = 'managed' \
+           AND ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id)) \
          GROUP BY v.health_status",
     )
     .bind(user_id)
@@ -75,6 +85,12 @@ pub async fn fetch_deployment_status(pool: &PgPool) -> Result<DeploymentStatusSu
     fetch_deployment_status_for_user(pool, None).await
 }
 
+/// Partitions visible active managed machines by deployment status.
+///
+/// Administrators pass `None`; other callers pass their user ID.
+///
+/// # Errors
+/// Returns database errors without substituting a zero denominator.
 pub async fn fetch_deployment_status_for_user(
     pool: &PgPool,
     user_id: Option<Uuid>,
@@ -85,7 +101,8 @@ pub async fn fetch_deployment_status_for_user(
            WHEN 'behind' THEN 'Behind' \
            WHEN 'no_deployment' THEN 'No Deployment' ELSE 'Unknown' END \
          FROM view_system_deployment_status v JOIN systems s ON s.hostname = v.hostname \
-         WHERE ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id)) \
+         WHERE s.is_active AND s.management_mode = 'managed' \
+           AND ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id)) \
          GROUP BY v.deployment_status",
     )
     .bind(user_id)
@@ -106,11 +123,18 @@ pub async fn fetch_deployment_status_for_user(
     Ok(summary)
 }
 
-/// Aggregate CVE counts from `view_systems_cve_summary` across all systems.
+/// Aggregates distinct CVEs per managed machine from exact Current authority.
 pub async fn fetch_cve_summary(pool: &PgPool) -> Result<CveSummary> {
     fetch_cve_summary_for_user(pool, None).await
 }
 
+/// Sums distinct Current-authorized CVEs per visible active managed machine.
+///
+/// Administrators pass `None`; other callers pass their user ID. A zero counts
+/// no authoritative occurrences; it does not prove that every machine is scanned.
+///
+/// # Errors
+/// Returns database errors without substituting clean evidence.
 pub async fn fetch_cve_summary_for_user(
     pool: &PgPool,
     user_id: Option<Uuid>,
@@ -118,16 +142,17 @@ pub async fn fetch_cve_summary_for_user(
     let row = sqlx::query_as::<_, (i64, i64, i64, i64)>(
         "WITH per_system_counts AS ( \
             SELECT \
-                v.hostname, \
-                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'CRITICAL')::BIGINT AS critical_cves, \
-                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'HIGH')::BIGINT AS high_cves, \
-                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'MEDIUM')::BIGINT AS medium_cves, \
-                COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'LOW')::BIGINT AS low_cves \
-            FROM view_system_vulnerabilities v \
-            JOIN systems s ON s.hostname = v.hostname \
-             WHERE s.is_active = TRUE \
+                s.id, \
+                COUNT(DISTINCT v.cve_id) FILTER (WHERE public.severity_from_cvss(c.cvss_v3_score) = 'CRITICAL')::BIGINT AS critical_cves, \
+                COUNT(DISTINCT v.cve_id) FILTER (WHERE public.severity_from_cvss(c.cvss_v3_score) = 'HIGH')::BIGINT AS high_cves, \
+                COUNT(DISTINCT v.cve_id) FILTER (WHERE public.severity_from_cvss(c.cvss_v3_score) = 'MEDIUM')::BIGINT AS medium_cves, \
+                COUNT(DISTINCT v.cve_id) FILTER (WHERE public.severity_from_cvss(c.cvss_v3_score) = 'LOW')::BIGINT AS low_cves \
+            FROM view_current_exact_cve_occurrences v \
+            JOIN systems s ON s.id = v.system_id \
+            JOIN cves c ON c.id = v.cve_id \
+              WHERE s.is_active = TRUE AND s.management_mode = 'managed' \
                AND ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id)) \
-            GROUP BY v.hostname \
+            GROUP BY s.id \
          ) \
          SELECT \
             COALESCE(SUM(critical_cves), 0)::BIGINT, \
@@ -148,14 +173,20 @@ pub async fn fetch_cve_summary_for_user(
     })
 }
 
-/// Count total registered systems.
+/// Counts active managed machines, matching the fleet-health denominator.
 pub async fn fetch_total_systems(pool: &PgPool) -> Result<i64> {
     fetch_total_systems_for_user(pool, None).await
 }
 
+/// Counts visible active managed machines, matching both operational partitions.
+///
+/// Administrators pass `None`; other callers pass their user ID.
+///
+/// # Errors
+/// Returns database errors without substituting an empty registry.
 pub async fn fetch_total_systems_for_user(pool: &PgPool, user_id: Option<Uuid>) -> Result<i64> {
     let count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM systems s WHERE $1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id)",
+        "SELECT COUNT(*) FROM systems s WHERE s.is_active AND s.management_mode = 'managed' AND ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id))",
     )
         .bind(user_id)
         .fetch_one(pool)
@@ -200,6 +231,13 @@ pub async fn fetch_recent_deployments(pool: &PgPool) -> Result<Vec<RecentDeploym
     fetch_recent_deployments_for_user(pool, None).await
 }
 
+/// Returns up to ten recent deployments of visible active managed machines.
+///
+/// Administrators pass `None`; other callers pass their user ID. Configuration
+/// builds and observations on nonmanaged registrations are not deployments.
+///
+/// # Errors
+/// Returns database errors without returning partial history.
 pub async fn fetch_recent_deployments_for_user(
     pool: &PgPool,
     user_id: Option<Uuid>,
@@ -211,7 +249,7 @@ pub async fn fetch_recent_deployments_for_user(
          FROM view_system_deployment_status v \
          JOIN systems s USING (hostname) \
          LEFT JOIN LATERAL (SELECT message FROM commits WHERE flake_id = s.flake_id AND git_commit_hash = v.current_commit_hash ORDER BY id DESC LIMIT 1) c ON TRUE \
-         WHERE v.deployment_time IS NOT NULL AND ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id)) \
+          WHERE s.is_active AND s.management_mode = 'managed' AND v.deployment_time IS NOT NULL AND ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id)) \
          ORDER BY v.deployment_time DESC \
          LIMIT 10",
     )
@@ -609,6 +647,13 @@ fn dashboard_activity_status(value: &str) -> Result<DashboardActivityStatus> {
     }
 }
 
+/// Returns bounded visible activity with managed-only deployment events.
+///
+/// Build and evaluation events remain configuration workload across all modes.
+/// Administrators pass `None`; other callers pass their user ID.
+///
+/// # Errors
+/// Returns database errors or unsupported persisted event kinds/states.
 pub async fn fetch_activity_for_user(
     pool: &PgPool,
     user_id: Option<Uuid>,
@@ -653,6 +698,7 @@ pub async fn fetch_activity_for_user(
             ORDER BY d.id DESC LIMIT 1
           ) c ON TRUE
           WHERE se.event_type IN ('cf_deployment_started', 'cf_deployment_succeeded', 'cf_deployment_failed')
+            AND s.is_active AND s.management_mode = 'managed'
             AND ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id))
           UNION ALL
           SELECT ('build:' || bj.id::text), 'build', CASE bj.status
@@ -1599,6 +1645,24 @@ mod tests {
 
         assert_eq!(summary.healthy, 10);
         assert_eq!(summary.offline, 2);
+    }
+
+    #[test]
+    fn unobserved_configuration_does_not_add_an_operational_outage() {
+        let mut summary = FleetHealthSummary {
+            healthy: 0,
+            warning: 0,
+            critical: 0,
+            offline: 0,
+        };
+        apply_health_count(&mut summary, "healthy", 2);
+        apply_health_count(&mut summary, "offline", 1);
+        apply_health_count(&mut summary, "unknown", 8);
+        assert_eq!(
+            summary.healthy + summary.warning + summary.critical + summary.offline,
+            3
+        );
+        assert_eq!(summary.offline, 1);
     }
 
     #[test]
@@ -2766,6 +2830,90 @@ mod tests {
 
     // ── TASK-272: dashboard summary scope tests ──────────────────────────────
 
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn management_metrics_partition_machines_without_unobserved_outages(pool: PgPool) {
+        let environment: Uuid = sqlx::query_scalar(
+            "INSERT INTO environments(name) VALUES ('management-metric-test') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let user: Uuid = sqlx::query_scalar(
+            "INSERT INTO users(username,first_name,last_name,email,user_type)
+             VALUES ('management-metrics','Test','Viewer','metrics@example.invalid','human') RETURNING id",
+        ).fetch_one(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO user_environment_memberships(user_id,environment_id) VALUES ($1,$2)",
+        )
+        .bind(user)
+        .bind(environment)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (hostname, mode, active) in [
+            ("managed-metric", "managed", true),
+            ("external-metric", "external", true),
+            ("reference-metric", "reference", true),
+            ("inactive-metric", "managed", false),
+        ] {
+            sqlx::query(
+                "INSERT INTO systems(hostname,management_mode,is_active,public_key,environment_id,derivation,deployment_policy)
+                 VALUES ($1,$2,$3,CASE WHEN $2='managed' THEN 'test-enrollment-key' ELSE NULL END,$4,'','manual')",
+            ).bind(hostname).bind(mode).bind(active).bind(environment).execute(&pool).await.unwrap();
+        }
+        let health = fetch_fleet_health_for_user(&pool, Some(user))
+            .await
+            .unwrap();
+        let total = fetch_total_systems_for_user(&pool, Some(user))
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(
+            health.healthy + health.warning + health.critical + health.offline,
+            total
+        );
+        assert_eq!(health.offline, 1);
+        assert_eq!(
+            fetch_deployment_status_for_user(&pool, Some(user))
+                .await
+                .unwrap()
+                .total(),
+            total
+        );
+        let environment_summary =
+            crate::queries::environments::find_environment_for_user(&pool, environment, Some(user))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(environment_summary.system_count, 4);
+        assert_eq!(environment_summary.rollup.active_system_count, 1);
+        assert_eq!(environment_summary.rollup.offline, 1);
+        let nonmanaged: Vec<String> = sqlx::query_scalar(
+            "SELECT v.health_status FROM view_system_list v JOIN systems s ON s.id=v.id
+             WHERE s.environment_id=$1 AND s.management_mode<>'managed' ORDER BY s.hostname",
+        )
+        .bind(environment)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(nonmanaged, vec!["unknown", "unknown"]);
+        // Retained outage occurrences must disappear from navigation immediately
+        // after authority changes, even before the periodic reconciler runs.
+        sqlx::query(
+            "INSERT INTO attention_occurrences(category,subject_type,subject_id,source_occurrence_key,opened_at,last_observed_at)
+             SELECT 'systems','system',id::text,'metric:'||id::text,NOW(),NOW() FROM systems
+             WHERE environment_id=$1 AND management_mode<>'managed'",
+        ).bind(environment).execute(&pool).await.unwrap();
+        let badges =
+            crate::queries::navigation::fetch_navigation_badges(&pool, user, false, &[environment])
+                .await
+                .unwrap();
+        assert_eq!(badges.systems_total, 3);
+        assert_eq!(badges.systems_attention, 0);
+        assert!(badges.systems_occurrence_ids.is_empty());
+    }
+
     /// Helper: connect to the DATABASE_URL env variable.
     async fn test_pool_from_env() -> PgPool {
         let db_url = std::env::var("DATABASE_URL")
@@ -2795,7 +2943,7 @@ mod tests {
         )
         .bind(system_id)
         .bind(hostname)
-        .bind(pub_key_bytes.as_slice())
+        .bind(hex::encode(pub_key_bytes))
         .bind(is_active)
         .execute(pool)
         .await
@@ -2891,6 +3039,31 @@ mod tests {
         .await
         .expect("insert package vulnerability");
 
+        // TASK-508: Legacy package rows alone are not runtime evidence. Supply
+        // a sealed scan and an unambiguous managed generation observation.
+        let output = format!("/nix/store/task272-output-{host_deriv_id}");
+        sqlx::query("UPDATE systems SET flake_id=$2 WHERE id=$1")
+            .bind(system_id)
+            .bind(flake_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE derivations SET store_path=$2 WHERE id=$1")
+            .bind(host_deriv_id)
+            .bind(&output)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO system_states(hostname,change_reason,store_path,generation,generation_matches_current_store_path,timestamp) VALUES ($1,'startup',$2,1,true,NOW())")
+            .bind(hostname).bind(&output).execute(pool).await.unwrap();
+        let exact_scan: Uuid = sqlx::query_scalar("INSERT INTO cve_scans(derivation_id,scanner_name,status) VALUES ($1,'vulnix','in_progress') RETURNING id")
+            .bind(host_deriv_id).fetch_one(pool).await.unwrap();
+        sqlx::query("INSERT INTO cve_scan_vulnerability_observations(scan_id,canonical_cve_id,canonical_package_name,observed_package_name,observed_package_version,observed_derivation_path,is_whitelisted,detection_method) VALUES ($1,$2,'openssl','openssl','3.0',$3,false,'vulnix')")
+            .bind(exact_scan).bind(cve_id).bind(format!("/nix/store/task272-package-{pkg_deriv_id}.drv"))
+            .execute(pool).await.unwrap();
+        sqlx::query("UPDATE cve_scans SET status='completed',completed_at=NOW(),evidence_schema_version=1 WHERE id=$1")
+            .bind(exact_scan).execute(pool).await.unwrap();
+
         (system_id, flake_id, commit_id)
     }
 
@@ -2968,7 +3141,7 @@ mod tests {
         .expect("count active CVEs");
 
         let total_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(DISTINCT v.cve_id)
+            "SELECT COUNT(DISTINCT (v.hostname, v.cve_id))
              FROM view_system_vulnerabilities v
              WHERE v.cve_id = $1",
         )

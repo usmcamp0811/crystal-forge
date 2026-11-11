@@ -311,7 +311,16 @@ async fn run_hardening_backfill_cycle(pool: &PgPool, auto_hardening_scans: bool)
     }
 }
 
-/// Trigger a hardening scan for a system by system ID.
+/// Enqueues hardening for a managed runtime or selected configuration artifact.
+///
+/// External/reference registrations need no heartbeat. Their scan is evidence
+/// for the exact selected derivation only; callers must read it through
+/// `ExactDerivation`, which cannot authorize Current mutations.
+///
+/// # Errors
+///
+/// Returns an eligibility error for a missing target, unavailable build output,
+/// or missing source metadata, and an internal error for persistence failures.
 pub async fn trigger_system_hardening_scan(
     pool: PgPool,
     system_id: Uuid,
@@ -323,7 +332,10 @@ pub async fn trigger_system_hardening_scan(
         .await
         .map_err(HardeningScanError::Internal)?
         .ok_or_else(|| {
-            HardeningScanError::DerivationNotEligible("System not found or has no builds".into())
+            HardeningScanError::DerivationNotEligible(
+                "System or selected configuration revision is unavailable, or has no derivation"
+                    .into(),
+            )
         })?;
 
     if let Some(reason) = target.blocked_reason {

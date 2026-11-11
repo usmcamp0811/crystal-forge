@@ -2898,6 +2898,8 @@ fn CacheDestinationPanel(props: CacheDestinationPanelProps) -> Element {
             let mut seen = HashSet::new();
             for (_, env_name, _) in &env_list {
                 if let Ok(response) = client::fetch_systems(&SystemsListParams {
+                    tag: None,
+                    management_mode: None,
                     page: Some(1),
                     per_page: Some(200),
                     search: None,

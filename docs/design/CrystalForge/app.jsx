@@ -2,18 +2,22 @@
 
 function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDetail, coach, tag = "all", onTag, initialFlake, onClearInitialFlake }) {
   const [view, setView] = React.useState(defaultView);
-  const [env, setEnv] = React.useState("all");
-  const [status, setStatus] = React.useState("all");
-  const [flake, setFlake] = React.useState("all");
+  const [envs, setEnvs] = React.useState([]);
+  const [statuses, setStatuses] = React.useState([]);
+  const [flakes, setFlakes] = React.useState([]);
+  const [tags, setTags] = React.useState(tag !== "all" ? [tag] : []);
+  const [group, setGroup] = React.useState(true);
+  const [collapsed, setCollapsed] = React.useState(() => new Set());
+  React.useEffect(() => { setTags(tag === "all" ? [] : [tag]); }, [tag]);
   const [query, setQuery] = React.useState("");
   const [selected, setSelected] = React.useState(null);
   const [pendingDeploy, setPendingDeploy] = React.useState(null);
   const [editTarget, setEditTarget] = React.useState(null);
   const [addOpen, setAddOpen] = React.useState(false);
-  const [mode, setMode] = React.useState("all");
+  const [modes, setModes] = React.useState([]);
   const setTag = onTag || (() => {});
   React.useEffect(() => {
-    if (initialFlake) { setFlake(initialFlake); onClearInitialFlake?.(); }
+    if (initialFlake) { setFlakes([initialFlake]); onClearInitialFlake?.(); }
   }, [initialFlake]);
   const isAttention = (s) => s.health === "critical" || s.health === "offline";
   const evidenceIssue = (s) => !isManagedSys(s) && ["scan-stale", "scan-failed", "scan-unavailable", "missing-config", "eval-failed", "build-failed"].includes(assuranceStatus(s.assurance).key);
@@ -24,20 +28,20 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
 
   const fleetTags = (typeof allFleetTags === "function" ? allFleetTags() : []);
 
+  const matchStatus = (s, st) => {
+    if (st === "evidence") return evidenceIssue(s);
+    if (st === "attention") return needsAttention(s);
+    if (!isManagedSys(s)) return false;
+    if (st === "online") return s.health !== "offline" && s.health !== "unknown";
+    if (st === "warning") return s.health === "warning" || s.health === "drifted";
+    return s.health === st;
+  };
   const filtered = SYSTEMS.filter((s) => {
-    if (env !== "all" && s.environment !== env) return false;
-    if (flake !== "all" && s.flake !== flake) return false;
-    if (tag !== "all" && !(s.tags || []).includes(tag)) return false;
-    if (mode !== "all" && mgmtOf(s) !== mode) return false;
-    if (status !== "all") {
-      if (!isManagedSys(s)) { if (status === "evidence" || status === "attention") return evidenceIssue(s); return false; }
-      if (status === "evidence") return false;
-      if (status === "online" && (s.health === "offline" || s.health === "unknown")) return false;
-      if (status === "offline" && s.health !== "offline") return false;
-      if (status === "warning" && s.health !== "warning" && s.health !== "drifted") return false;
-      if (status === "critical" && s.health !== "critical") return false;
-      if (status === "attention" && !needsAttention(s)) return false;
-    }
+    if (envs.length && !envs.includes(s.environment)) return false;
+    if (flakes.length && !flakes.includes(s.flake)) return false;
+    if (tags.length && !tags.some((t) => (s.tags || []).includes(t))) return false;
+    if (modes.length && !modes.includes(mgmtOf(s))) return false;
+    if (statuses.length && !statuses.some((st) => matchStatus(s, st))) return false;
     if (query) {
       const q = query.toLowerCase();
       if (!s.hostname.toLowerCase().includes(q) &&
@@ -51,6 +55,20 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
     return true;
   });
 
+  const inList = new Set(filtered.map((s) => s.hostname));
+  const guestsOf = (h) => group ? filtered.filter((g) => mgmtOf(g) === "external" && g.parentHost === h.hostname) : [];
+  const isGrouped = (s) => group && mgmtOf(s) === "external" && s.parentHost && inList.has(s.parentHost) && filtered.some((p) => p.hostname === s.parentHost && isManagedSys(p));
+  const ordered = [];
+  filtered.forEach((s) => {
+    if (isGrouped(s)) return;
+    const gs = isManagedSys(s) ? guestsOf(s) : [];
+    ordered.push({ sys: s, guests: gs.length });
+    if (gs.length && !collapsed.has(s.hostname)) gs.forEach((g) => ordered.push({ sys: g, indent: true }));
+  });
+  const hostsWithGuests = filtered.filter((s) => isManagedSys(s) && guestsOf(s).length).map((s) => s.hostname);
+  const toggleGroup = (h) => setCollapsed((p) => { const n = new Set(p); n.has(h) ? n.delete(h) : n.add(h); return n; });
+  const clearAll = () => { setModes([]); setEnvs([]); setStatuses([]); setFlakes([]); setTags([]); setTag("all"); setQuery(""); };
+  const anyFilter = modes.length + envs.length + statuses.length + flakes.length + tags.length + (query ? 1 : 0) > 0;
   const MS = managedSystems();
   const nExt = SYSTEMS.filter((s) => mgmtOf(s) === "external").length, nRef = SYSTEMS.filter((s) => mgmtOf(s) === "reference").length;
   const nEvidence = SYSTEMS.filter(evidenceIssue).length;
@@ -71,7 +89,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
         <div>
           <h1 className="page-title">Systems</h1>
           <p className="page-subtitle">
-            {counts.total} managed · {nExt} external · {nRef} reference · {counts.healthy} managed healthy · <span className="link-action" onClick={() => setStatus("attention")}>{counts.warning + counts.critical + counts.offline + nEvidence} needing attention</span>
+            {counts.total} managed · {nExt} external · {nRef} reference · {counts.healthy} managed healthy · <span className="link-action" onClick={() => setStatuses(["attention"])}>{counts.warning + counts.critical + counts.offline + nEvidence} needing attention</span>
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -136,36 +154,16 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
             onChange={(e) => setQuery(e.target.value)} />
           
         </div>
-        <select className="input filter-select focus-ring" style={{ width: "auto" }} value={mode} onChange={(e) => setMode(e.target.value)} title="Filter by management mode">
-          <option value="all">All management</option>
-          {Object.keys(MGMT_META).map((k) => <option key={k} value={k}>{MGMT_META[k].long} · {SYSTEMS.filter((s) => mgmtOf(s) === k).length}</option>)}
-        </select>
-        <select className="input filter-select focus-ring" style={{ width: "auto" }} value={env} onChange={(e) => setEnv(e.target.value)}>
-          <option value="all">All environments</option>
-          {ENVIRONMENTS.map((e) => <option key={e.name} value={e.name}>{e.name}</option>)}
-        </select>
-        <select className="input filter-select focus-ring" style={{ width: "auto" }} value={status} onChange={(e) => setStatus(e.target.value)}>
-          <option value="all">All statuses</option>
-          <option value="online">Online (managed)</option>
-          <option value="warning">Warning / drift</option>
-          <option value="critical">Critical</option>
-          <option value="offline">Offline</option>
-          <option value="evidence">Evidence issues (external / reference)</option>
-          <option value="attention">Needs attention</option>
-        </select>
-        <select className="input filter-select focus-ring" style={{ width: "auto" }} value={flake} onChange={(e) => setFlake(e.target.value)}>
-          <option value="all">All flakes</option>
-          {FLAKES.map((f) => <option key={f} value={f}>{f}</option>)}
-        </select>
-        <select className="input filter-select focus-ring" style={{ width: "auto" }} value={tag} onChange={(e) => setTag(e.target.value)} title="Filter by tag — free-form labels you assign per system">
-          <option value="all">All tags</option>
-          {fleetTags.map((t) => <option key={t} value={t}>#{t} · {SYSTEMS.filter((s) => (s.tags || []).includes(t)).length}</option>)}
-        </select>
-        {tag !== "all" && (
-          <button className="btn btn-ghost focus-ring xs" onClick={() => setTag("all")} title="Clear tag filter">
-            <Icon name="x" size={11} /> #{tag}
-          </button>
-        )}
+        <MultiFilter label="Management" allLabel="All management" value={modes} onChange={setModes} options={Object.keys(MGMT_META).map((k) => ({ value: k, label: MGMT_META[k].long, count: SYSTEMS.filter((s) => mgmtOf(s) === k).length }))} />
+        <MultiFilter label="Environment" allLabel="All environments" value={envs} onChange={setEnvs} options={ENVIRONMENTS.map((e) => ({ value: e.name, label: e.name, count: SYSTEMS.filter((s) => s.environment === e.name).length }))} />
+        <MultiFilter label="Status" allLabel="All statuses" value={statuses} onChange={setStatuses} options={[
+          { value: "online", label: "Online (managed)" }, { value: "warning", label: "Warning / drift" }, { value: "critical", label: "Critical" }, { value: "offline", label: "Offline" },
+          { value: "evidence", label: "Evidence issues (external / reference)", count: nEvidence }, { value: "attention", label: "Needs attention" }]} />
+        <MultiFilter label="Flake" allLabel="All flakes" value={flakes} onChange={setFlakes} options={FLAKES.map((f) => ({ value: f, label: f, count: SYSTEMS.filter((s) => s.flake === f).length }))} />
+        <MultiFilter label="Tag" allLabel="All tags" value={tags} onChange={(v) => { setTags(v); setTag(v.length === 1 ? v[0] : "all"); }} options={fleetTags.map((t) => ({ value: t, label: "#" + t, count: SYSTEMS.filter((s) => (s.tags || []).includes(t)).length }))} />
+        {anyFilter && <button className="btn btn-ghost focus-ring xs" onClick={clearAll}><Icon name="x" size={11} /> Clear filters</button>}
+        <button className={"btn btn-ghost focus-ring xs" + (group ? " mf-on" : "")} aria-pressed={group} onClick={() => setGroup(!group)} title="Show external guests under their parent host"><Icon name="rows" size={11} /> Group guests</button>
+        {group && hostsWithGuests.length > 0 && <button className="btn btn-ghost focus-ring xs" onClick={() => setCollapsed(collapsed.size ? new Set() : new Set(hostsWithGuests))}>{collapsed.size ? "Expand all" : "Collapse all"}</button>}
 
         <div className="seg" role="tablist" aria-label="View mode">
           <button className={view === "cards" ? "active" : ""} onClick={() => setView("cards")}><Icon name="grid" size={12} /> Cards</button>
@@ -179,14 +177,15 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
       <div className="empty">
           <h3>No systems match</h3>
           <div>Try clearing a filter or changing the search.</div>
-          {(mode !== "all" || status !== "all") && <button className="btn btn-ghost focus-ring" style={{ marginTop: 10 }} onClick={() => { setMode("all"); setStatus("all"); }}>Show all management modes</button>}
+          {anyFilter && <button className="btn btn-ghost focus-ring" style={{ marginTop: 10 }} onClick={clearAll}>Clear all filters</button>}
         </div> :
       view === "cards" ?
       <div className="cards-grid">
-          {filtered.map((sys) =>
+          {ordered.map(({ sys, guests, indent }) =>
         <SystemCard
           key={sys.id}
           sys={sys}
+          guests={guests} collapsed={collapsed.has(sys.hostname)} onToggleGuests={() => toggleGroup(sys.hostname)} indent={indent}
           compact={compact}
           flash={flashAttention && isAttention(sys)}
           pendingApproval={(typeof APPROVAL_QUEUE !== "undefined" ? APPROVAL_QUEUE.find(a => a.system_id === sys.id && a.status === "pending") : null)}
@@ -212,10 +211,11 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
               </tr>
             </thead>
             <tbody>
-              {filtered.map((sys) =>
+              {ordered.map(({ sys, guests, indent }) =>
             <SystemRow
               key={sys.id}
               sys={sys}
+              guests={guests} collapsed={collapsed.has(sys.hostname)} onToggleGuests={() => toggleGroup(sys.hostname)} indent={indent}
               compact={compact}
               flash={flashAttention && isAttention(sys)}
               pendingApproval={(typeof APPROVAL_QUEUE !== "undefined" ? APPROVAL_QUEUE.find(a => a.system_id === sys.id && a.status === "pending") : null)}
@@ -234,7 +234,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
       <SystemPanel
         sys={selected}
         onClose={() => setSelected(null)}
-        onTagClick={(t) => { setTag(t); setSelected(null); }}
+        onTagClick={(t) => { setTag(t); setTags([t]); setSelected(null); }}
         onEdit={(s) => {setEditTarget(s);setSelected(null);}}
         onOpenDetail={(s, tab) => {setSelected(null);onOpenDetail(s, tab);}}
         pendingDeploy={pendingDeploy && pendingDeploy.sysId === selected.id ? pendingDeploy : null}

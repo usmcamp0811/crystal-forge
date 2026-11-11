@@ -5,8 +5,13 @@
 //! - History: Vertical commit timeline showing deployed vs skipped commits
 //! - CVEs: Expandable vulnerability list
 //! - Logs: Recent deployment logs
+//!
+//! External and reference registrations use [`management_detail`] for exact
+//! configuration evidence. Their artifact reads remain read-only and never
+//! confer Current runtime, deployment, or remediation-verification authority.
 
 use chrono::{Local, Utc};
+mod management_detail;
 use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
@@ -1237,8 +1242,8 @@ pub fn SystemDetailView(
         &revision,
         &generation,
         &deploy_generation,
-        cve_target,
-        cve_mode,
+        &cve_target,
+        &cve_mode,
     );
     let nav = navigator();
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
@@ -1272,6 +1277,8 @@ pub fn SystemDetailView(
         ("revision", &revision),
         ("generation", &generation),
         ("deploy_generation", &deploy_generation),
+        ("cve_target", &cve_target),
+        ("cve_mode", &cve_mode),
     ] {
         if !value.is_empty() {
             initial_query = query_with_parameter(&initial_query, key, Some(value));
@@ -1378,7 +1385,7 @@ pub fn SystemDetailView(
     use_effect(move || {
         spawn(async move {
             loop {
-                gloo_timers::future::TimeoutFuture::new(1000).await;
+                crate::hooks::visibility::visible_tick(1000).await;
                 now_tick.set(Utc::now());
             }
         });
@@ -1555,7 +1562,7 @@ pub fn SystemDetailView(
         loop {
             #[cfg(target_arch = "wasm32")]
             {
-                gloo_timers::future::TimeoutFuture::new(4000).await;
+                crate::hooks::visibility::visible_tick(4000).await;
                 deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1);
             }
         }
@@ -1573,7 +1580,7 @@ pub fn SystemDetailView(
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
-                    gloo_timers::future::TimeoutFuture::new(4000).await;
+                    crate::hooks::visibility::visible_tick(4000).await;
                     if dep_resource.read_unchecked().is_some() {
                         tick.set(tick() + 1);
                     }
@@ -1622,7 +1629,7 @@ pub fn SystemDetailView(
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
-                    gloo_timers::future::TimeoutFuture::new(3000).await;
+                    crate::hooks::visibility::visible_tick(3000).await;
                     if *active_tab_for_events.read() == Tab::Logs {
                         agent_events_poll_tick.set(agent_events_poll_tick() + 1);
                     }
@@ -1702,8 +1709,7 @@ pub fn SystemDetailView(
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
-                    gloo_timers::future::TimeoutFuture::new(HARDENING_ACTIVE_POLL_INTERVAL_MS)
-                        .await;
+                    crate::hooks::visibility::visible_tick(HARDENING_ACTIVE_POLL_INTERVAL_MS).await;
                     let active = {
                         let snapshot = inventory_resource.read_unchecked();
                         snapshot.as_ref().is_some_and(|(_, result)| {
@@ -2077,12 +2083,14 @@ pub fn SystemDetailView(
         HealthStatus::Warning => "#fbbf24",
         HealthStatus::Critical => "#f87171",
         HealthStatus::Offline => "#6b7280",
+        HealthStatus::Unknown => "#6b7280",
     };
     let health_chip_class = match system.health_status {
         HealthStatus::Healthy => "chip chip-healthy",
         HealthStatus::Warning => "chip chip-warning",
         HealthStatus::Critical => "chip chip-critical",
         HealthStatus::Offline => "chip chip-unknown",
+        HealthStatus::Unknown => "chip chip-unknown",
     };
     let health_label = system.health_status.label();
     let detail_fqdn = effective_fqdn(&system);
@@ -2145,6 +2153,20 @@ pub fn SystemDetailView(
     };
 
     rsx! {
+        if system.management_mode != crate::api::models::ManagementMode::Managed {
+            management_detail::ManagementDetail {
+                // Metadata edits can change mode, configuration or parent while
+                // retaining the resource ID. Remount their evidence reads too.
+                key: "{system.id}-{system.management_mode.as_str()}-{system.updated_at.timestamp_micros()}-{detail_reload()}",
+                system: system.clone(), active_tab, navigation_state, now,
+                artifact_selection: cve_selection,
+                commits: deploy_commit_history.clone(),
+                allow_config_observations: can_start_config_observations,
+                can_mutate,
+                on_edit: { let system = system.clone(); move |_| edit_modal_system.set(Some(system.clone())) },
+                on_open_flake_commit,
+            }
+        } else {
         div {
             class: "sd-root",
             "data-testid": "system-detail",
@@ -2818,9 +2840,10 @@ pub fn SystemDetailView(
             }
         }
 
+        }
         PoamDetailHost {
             poam_id: cve_poam(),
-            viewer: !auth::is_operator_or_above(&auth_context),
+            viewer: system.management_mode != crate::api::models::ManagementMode::Managed || !auth::is_operator_or_above(&auth_context),
             on_close: move |_| {
                 cve_poam.set(None);
                 let query = query_with_parameter(&current_system_detail_query(), "poam", None);
@@ -3526,7 +3549,9 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
             }
 
             // Loading state
-            if loading {
+            if system.management_mode != crate::api::models::ManagementMode::Managed {
+                p { class: "mg-dim", "Runtime compliance is not verified. Retained POA&M items above are read-only; use exact evaluation evidence for configuration control results." }
+            } else if loading {
                 div {
                     role: "status",
                     aria_live: "polite",
@@ -6634,6 +6659,7 @@ fn ConfigTab(
     on_open_flake_commit: EventHandler<FlakeCommitPeekTarget>,
 ) -> Element {
     const MODULE_PAGE_SIZE: i64 = 40;
+    let managed = system.management_mode == crate::api::models::ManagementMode::Managed;
     let card_id = format!("config-options-card-{}", system.id);
     let table_id = format!("config-options-table-{}", system.id);
     let side_id = format!("config-summary-side-{}", system.id);
@@ -6709,7 +6735,8 @@ fn ConfigTab(
         ConfigRevision::Commit(_) => None,
     };
     let selected_revision =
-        selected_config_revision(&revision, current_commit.as_deref(), &generations);
+        selected_config_revision(&revision, current_commit.as_deref(), &generations)
+            .filter(|value| !value.is_empty());
     let revision_known = match &revision {
         ConfigRevision::Current => selected_revision.is_some(),
         ConfigRevision::Generation(value) => {
@@ -7471,10 +7498,10 @@ fn ConfigTab(
                 div { class: "cfgx-target", span { class: "cfgx-target-label", "TARGET" } span { class: "mono cfgx-target-path", "{flake_name}#nixosConfigurations.{config_name}.config" } }
                 div { class: "cfgx-top-r",
                     div { class: "cfgx-rev",
-                        div { class: "seg xs",
+                        if !managed { span { class: "mg-dim", "Commits only · configuration evidence" } } else { div { class: "seg xs",
                             button { class: if selected_mode == SnapshotRevisionMode::Generation { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_mode == SnapshotRevisionMode::Generation, onclick: move |_| on_revision_change.call(ConfigRevision::Current), "Generations" }
-                            button { class: if selected_mode == SnapshotRevisionMode::Commit { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_mode == SnapshotRevisionMode::Commit, disabled: commit_for_mode_switch.is_none(), onclick: move |_| { if let Some(commit) = commit_for_mode_switch.clone() { on_revision_change.call(ConfigRevision::Commit(commit)); } }, "Commits" }
-                        }
+                            button { class: if selected_mode == SnapshotRevisionMode::Commit { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_mode == SnapshotRevisionMode::Commit, disabled: commit_for_mode_switch.is_none(), onclick: { let commit = commit_for_mode_switch.clone(); move |_| { if let Some(commit) = commit.clone() { on_revision_change.call(ConfigRevision::Commit(commit)); } } }, "Commits" }
+                        } }
                         if selected_mode == SnapshotRevisionMode::Generation {
                             select { class: "cfgx-select focus-ring", value: selected_generation.map(|value| value.to_string()).unwrap_or_default(), onchange: move |event| { if let Ok(generation) = event.value().parse::<i32>() { on_revision_change.call(ConfigRevision::Generation(generation)); } },
                                 for generation in &generations {
@@ -7490,7 +7517,7 @@ fn ConfigTab(
                                 if let ConfigRevision::Commit(sha) = &revision { if !revision_known { option { value: "{sha}", "{short_revision(sha)} · linked revision" } } }
                                 for commit in &commits {
                                     {
-                                        let deployed = if commit.is_current { " (deployed)" } else { "" };
+                                        let deployed = if managed && commit.is_current { " (deployed)" } else { "" };
                                         let short = short_revision(&commit.hash);
                                         rsx! { option { value: "{commit.hash}", disabled: !commit.config_inspectable, "{short}{deployed} · {commit.message}" } }
                                     }
@@ -7512,7 +7539,31 @@ fn ConfigTab(
                     }
                 }
             }
-            if is_historical {
+            if !managed {
+                {
+                    // Nonmanaged resources have no running generation. The
+                    // reference point is the newest inspectable tracked commit;
+                    // an older selection says so and offers a way back.
+                    let newest = commit_for_mode_switch.clone();
+                    let at_newest = newest.is_some() && newest == selected_revision;
+                    rsx! {
+                        div { class: "cfgx-hist", Icon { name: if at_newest { IconName::File } else { IconName::Clock }, size: 12 }
+                            div {
+                                if at_newest { "Inspecting configuration evidence at the newest tracked commit " }
+                                else if selected_revision.is_some() { "Inspecting configuration evidence at an older commit " }
+                                else { "Inspecting configuration evidence at " }
+                                span { class: "mono", title: selected_revision.clone().unwrap_or_default(), "{selected_revision_label}" }
+                                ". No running generation or deployment authority is implied."
+                            }
+                            if !at_newest && selected_revision.is_some() {
+                                if let Some(commit) = newest {
+                                    button { class: "cfgx-link focus-ring", onclick: move |_| on_revision_change.call(ConfigRevision::Commit(commit.clone())), "back to newest" }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if is_historical {
                 div { class: "cfgx-hist", Icon { name: IconName::Clock, size: 12 }
                     div { "Inspecting historical configuration " span { class: "mono", title: selected_revision.clone().unwrap_or_default(), "{selected_revision_label}" } if selected_mode == SnapshotRevisionMode::Commit && revision_known && !deployed_here { " (never deployed here)" } ". This is not the running state." }
                     button { class: "cfgx-link focus-ring", onclick: move |_| on_revision_change.call(ConfigRevision::Current), "back to current" }
@@ -7521,6 +7572,7 @@ fn ConfigTab(
             ConfigExplorer {
                 key: "{explorer_scope_key}",
                 system_id: system.id,
+                configuration_only: !managed,
                 revision: selected_revision.clone(),
                 scoped_enabled: config_observation_allowed,
                 disabled_reason: if matches!(revision, ConfigRevision::Generation(_)) { "Lazy observations are commit-scoped. Certified retained-generation evidence remains selected so a new commit observation is not mislabeled as historical generation data.".to_string() } else if selected_revision.is_none() { "An unambiguous full tracked commit is required before lazy Config observations can start.".to_string() } else if !selected_commit_inspectable { "This commit does not have a completed NixOS derivation with a nonempty carrier for the system's exact flake and configuration.".to_string() } else { "Administrator eligibility is required to start a lazy Config observation.".to_string() },

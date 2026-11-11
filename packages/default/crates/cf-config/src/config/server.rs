@@ -66,6 +66,9 @@ impl ExecutionMode {
 /// This section is loaded from `[server]` in `config.toml`.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
+    /// Selects the HTTP listener's bind host. Use `127.0.0.1` for loopback only.
+    /// Defaults to `0.0.0.0` to preserve the effective all-IPv4-interface bind
+    /// used before the listener honored this field.
     pub host: String,
     pub port: u16,
 
@@ -418,7 +421,7 @@ fn default_commit_cache_retention_days() -> i32 {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            host: "127.0.0.1".to_string(),
+            host: "0.0.0.0".to_string(),
             port: 3000,
             eval_workers: default_eval_workers(),
             eval_max_memory_mb: None,

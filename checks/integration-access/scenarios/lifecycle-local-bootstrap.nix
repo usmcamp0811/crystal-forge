@@ -248,6 +248,8 @@ in
       + builtins.readFile ./fragments/preferences.py
       + "\n"
       + builtins.readFile ./fragments/shell-navigation.py
+      + "\n"
+      + builtins.readFile ./fragments/management-registration.py
     );
     browserSpecs = {
       bootstrap-sign-in = ./lifecycle-local-bootstrap.cjs;

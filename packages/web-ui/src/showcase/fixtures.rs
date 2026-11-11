@@ -327,6 +327,10 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
     vec![
         // Healthy production system (up-to-date)
         SystemSummary {
+            tags: Vec::new(),
+            description: None,
+            management_mode: Default::default(),
+            parent_host_id: None,
             id: mock_uuid(1),
             hostname: "web-server-1".to_string(),
             system_configuration_name: None,
@@ -352,6 +356,10 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
         },
         // Warning staging system (behind)
         SystemSummary {
+            tags: Vec::new(),
+            description: None,
+            management_mode: Default::default(),
+            parent_host_id: None,
             id: mock_uuid(2),
             hostname: "staging-app".to_string(),
             system_configuration_name: None,
@@ -377,6 +385,10 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
         },
         // Critical dev system (never deployed)
         SystemSummary {
+            tags: Vec::new(),
+            description: None,
+            management_mode: Default::default(),
+            parent_host_id: None,
             id: mock_uuid(3),
             hostname: "dev-machine".to_string(),
             system_configuration_name: None,
@@ -402,6 +414,10 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
         },
         // Offline system (no environment)
         SystemSummary {
+            tags: Vec::new(),
+            description: None,
+            management_mode: Default::default(),
+            parent_host_id: None,
             id: mock_uuid(4),
             hostname: "legacy-server".to_string(),
             system_configuration_name: None,
@@ -427,6 +443,10 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
         },
         // Healthy system with long hostname (overflow test)
         SystemSummary {
+            tags: Vec::new(),
+            description: None,
+            management_mode: Default::default(),
+            parent_host_id: None,
             id: mock_uuid(5),
             hostname: "production-worker-node-with-very-long-hostname-01".to_string(),
             system_configuration_name: None,
@@ -452,6 +472,10 @@ pub fn system_summary_fixtures() -> Vec<SystemSummary> {
         },
         // Building state system
         SystemSummary {
+            tags: Vec::new(),
+            description: None,
+            management_mode: Default::default(),
+            parent_host_id: None,
             id: mock_uuid(6),
             hostname: "db-primary".to_string(),
             system_configuration_name: None,

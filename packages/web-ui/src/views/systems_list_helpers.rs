@@ -1,10 +1,26 @@
 use crate::api::models::{
-    CveSummary, DeploymentStatus, HealthStatus, PipelineStage, SystemSummary,
+    CveSummary, DeploymentStatus, HealthStatus, ManagementMode, PipelineStage, SystemSummary,
 };
 use crate::components::filters::ViewMode;
+use crate::components::system::management_mode::EvidenceStatus;
 use chrono::Utc;
 use dioxus::prelude::*;
 use uuid::Uuid;
+
+/// Identifies actionable configuration failures without treating unknown runtime as outage.
+pub fn evidence_issue(status: Option<EvidenceStatus>) -> bool {
+    matches!(
+        status,
+        Some(
+            EvidenceStatus::ConfigurationMissing
+                | EvidenceStatus::EvaluationFailed
+                | EvidenceStatus::BuildFailed
+                | EvidenceStatus::Stale
+                | EvidenceStatus::Failed
+                | EvidenceStatus::Unavailable
+        )
+    )
+}
 
 pub fn remove_system_by_id(
     systems: Signal<Vec<SystemSummary>>,
@@ -65,18 +81,31 @@ pub fn matches_environment(system: &SystemSummary, filter: &str) -> bool {
         .is_some_and(|env| env.eq_ignore_ascii_case(filter))
 }
 
-/// Single-select status filter matching the design's "All statuses" select.
-///
-/// Design semantics (CrystalForgelatest `SystemsView`):
-/// - `online`: anything that is not offline
-/// - `warning`: warning / drift
-/// - `critical`: critical
-/// - `offline`: offline
+/// Matches managed operational status; nonmanaged resources have no heartbeat health.
 pub fn matches_status(system: &SystemSummary, filter: &str) -> bool {
+    if filter == "all" {
+        return true;
+    }
+    if system.management_mode != ManagementMode::Managed {
+        return false;
+    }
     match filter {
         "all" => true,
-        "online" => system.health_status != HealthStatus::Offline,
-        "warning" => system.health_status == HealthStatus::Warning,
+        "online" => !matches!(
+            system.health_status,
+            HealthStatus::Offline | HealthStatus::Unknown
+        ),
+        "warning" => {
+            system.health_status == HealthStatus::Warning
+                || system.deployment_status == DeploymentStatus::Behind
+        }
+        "attention" => {
+            matches!(
+                system.health_status,
+                HealthStatus::Warning | HealthStatus::Critical | HealthStatus::Offline
+            ) || system.deployment_status == DeploymentStatus::Behind
+        }
+        "evidence" => false,
         "critical" => system.health_status == HealthStatus::Critical,
         "offline" => system.health_status == HealthStatus::Offline,
         _ => true,
@@ -91,8 +120,82 @@ pub fn matches_flake(flake_name: Option<&str>, filter: &str) -> bool {
     flake_name.is_some_and(|name| name.eq_ignore_ascii_case(filter))
 }
 
-/// Search across hostname, flake name, and commit, matching the design's
-/// "Filter by hostname, commit, or flake…" placeholder behavior.
+/// Applies one multi-select filter: no selection matches every resource, and a
+/// selection matches when any selected value matches (OR within one filter).
+/// Separate filters are combined with AND by the caller.
+pub fn matches_any(selected: &[String], matches_one: impl Fn(&str) -> bool) -> bool {
+    selected.is_empty() || selected.iter().any(|value| matches_one(value))
+}
+
+/// One row or card of the Systems list after optional guest grouping.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListedSystem {
+    /// Resource shown by this row or card.
+    pub system: SystemSummary,
+    /// Number of grouped external guests under this managed host. Zero for
+    /// every other resource.
+    pub guests: usize,
+    /// True when this resource is shown indented under its parent host.
+    pub indent: bool,
+}
+
+/// Orders resources for display, optionally grouping external guests under
+/// their parent host.
+///
+/// With `group` set, an external resource follows its parent host only when
+/// the parent is a managed resource in `systems`, which is the already-filtered
+/// list. A guest whose parent is filtered out, absent or not managed stays a
+/// top-level entry, so filtering never hides a matching resource. Guests of a
+/// host in `collapsed` are omitted, and the host keeps its guest count for the
+/// toggle. Top-level order and guest order follow `systems`.
+pub fn group_guests(
+    systems: &[SystemSummary],
+    group: bool,
+    collapsed: &std::collections::HashSet<Uuid>,
+) -> Vec<ListedSystem> {
+    let managed_hosts: std::collections::HashSet<Uuid> = systems
+        .iter()
+        .filter(|s| s.management_mode == ManagementMode::Managed)
+        .map(|s| s.id)
+        .collect();
+    let grouped_parent = |s: &SystemSummary| {
+        (group && s.management_mode == ManagementMode::External)
+            .then_some(s.parent_host_id)
+            .flatten()
+            .filter(|parent| managed_hosts.contains(parent))
+    };
+    let mut listed = Vec::with_capacity(systems.len());
+    for system in systems.iter().filter(|s| grouped_parent(s).is_none()) {
+        let guests: Vec<&SystemSummary> = systems
+            .iter()
+            .filter(|g| grouped_parent(g) == Some(system.id))
+            .collect();
+        listed.push(ListedSystem {
+            system: system.clone(),
+            guests: guests.len(),
+            indent: false,
+        });
+        if !collapsed.contains(&system.id) {
+            listed.extend(guests.into_iter().map(|guest| ListedSystem {
+                system: guest.clone(),
+                guests: 0,
+                indent: true,
+            }));
+        }
+    }
+    listed
+}
+
+/// Returns the managed hosts in `listed` that have grouped guests.
+pub fn hosts_with_guests(listed: &[ListedSystem]) -> Vec<Uuid> {
+    listed
+        .iter()
+        .filter(|entry| entry.guests > 0)
+        .map(|entry| entry.system.id)
+        .collect()
+}
+
+/// Searches persisted identity, configuration, FQDN, flake, and revision.
 pub fn matches_search(
     system: &SystemSummary,
     search: &str,
@@ -106,10 +209,33 @@ pub fn matches_search(
     if system.hostname.to_lowercase().contains(&query) {
         return true;
     }
+    if [
+        system.system_configuration_name.as_deref(),
+        system.fqdn.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value.to_lowercase().contains(&query))
+    {
+        return true;
+    }
     if flake_name.is_some_and(|name| name.to_lowercase().contains(&query)) {
         return true;
     }
     commit.is_some_and(|hash| hash.to_lowercase().contains(&query))
+}
+
+/// Searches only the associated parent's visible registry identity.
+pub fn matches_parent_search(
+    system: &SystemSummary,
+    systems: &[SystemSummary],
+    search: &str,
+) -> bool {
+    let query = search.trim().to_lowercase();
+    system
+        .parent_host_id
+        .and_then(|id| systems.iter().find(|parent| parent.id == id))
+        .is_some_and(|parent| parent.hostname.to_lowercase().contains(&query))
 }
 
 pub fn unique_environments(systems: &[SystemSummary]) -> Vec<String> {
@@ -132,7 +258,9 @@ pub fn systems_missing_flake_count(systems: &[SystemSummary]) -> usize {
 pub fn systems_missing_heartbeat_count(systems: &[SystemSummary]) -> usize {
     systems
         .iter()
-        .filter(|system| system.last_seen.is_none())
+        .filter(|system| {
+            system.management_mode == ManagementMode::Managed && system.last_seen.is_none()
+        })
         .count()
 }
 
@@ -146,6 +274,10 @@ mod tests {
 
     fn sample_system(environment: Option<&str>) -> SystemSummary {
         SystemSummary {
+            tags: Vec::new(),
+            description: None,
+            management_mode: Default::default(),
+            parent_host_id: None,
             id: Uuid::parse_str("00000000-0000-0000-0000-0000000000aa").expect("valid uuid"),
             hostname: "sample-host".to_string(),
             system_configuration_name: None,
@@ -217,6 +349,31 @@ mod tests {
     }
 
     #[test]
+    fn unknown_health_is_neither_online_nor_an_outage() {
+        let mut system = sample_system(Some("production"));
+        system.health_status = HealthStatus::Unknown;
+        for mode in [
+            ManagementMode::Managed,
+            ManagementMode::External,
+            ManagementMode::Reference,
+        ] {
+            system.management_mode = mode;
+            assert!(matches_status(&system, "all"));
+            for filter in ["online", "offline", "critical", "warning", "attention"] {
+                assert!(!matches_status(&system, filter));
+            }
+            let stats =
+                crate::components::systems_stat_strip::SystemsStats::from_systems(
+                    &[system.clone()],
+                );
+            assert_eq!(
+                (stats.healthy, stats.warning, stats.critical, stats.offline),
+                (0, 0, 0, 0)
+            );
+        }
+    }
+
+    #[test]
     fn matches_flake_uses_resolved_flake_name() {
         assert!(matches_flake(Some("infrastructure"), "all"));
         assert!(matches_flake(Some("Infrastructure"), "infrastructure"));
@@ -263,5 +420,160 @@ mod tests {
         with_missing_heartbeat.last_seen = None;
         let systems = vec![sample_system(Some("production")), with_missing_heartbeat];
         assert_eq!(systems_missing_heartbeat_count(&systems), 1);
+    }
+
+    #[test]
+    fn nonmanaged_resources_never_enter_operational_filters_or_denominators() {
+        let managed = sample_system(Some("production"));
+        let mut external = managed.clone();
+        external.management_mode = ManagementMode::External;
+        external.health_status = HealthStatus::Offline;
+        external.last_seen = None;
+        external.cve_counts.critical = 88;
+        let mut reference = external.clone();
+        reference.management_mode = ManagementMode::Reference;
+        reference.health_status = HealthStatus::Critical;
+        for resource in [&external, &reference] {
+            for filter in ["online", "warning", "critical", "offline", "attention"] {
+                assert!(!matches_status(resource, filter));
+            }
+            assert!(matches_status(resource, "all"));
+        }
+        let resources = vec![managed, external, reference];
+        let stats = crate::components::systems_stat_strip::SystemsStats::from_systems(&resources);
+        assert_eq!(
+            (stats.total, stats.healthy, stats.critical, stats.offline),
+            (1, 1, 0, 0)
+        );
+        assert_eq!(stats.critical_cves, 0);
+        assert_eq!(systems_missing_heartbeat_count(&resources), 0);
+    }
+
+    #[test]
+    fn configuration_and_fqdn_are_searchable_without_changing_other_filters() {
+        let mut system = sample_system(Some("production"));
+        system.system_configuration_name = Some("Golden-Workstation".into());
+        system.fqdn = Some("sample.example.org".into());
+        assert!(matches_search(&system, "  GOLDEN  ", None, None));
+        assert!(matches_search(&system, "example.org", None, None));
+        assert!(!matches_environment(&system, "staging"));
+    }
+
+    #[test]
+    fn attention_requires_an_actual_evidence_problem() {
+        use EvidenceStatus::*;
+        for status in [
+            ConfigurationMissing,
+            EvaluationFailed,
+            BuildFailed,
+            Stale,
+            Failed,
+            Unavailable,
+        ] {
+            assert!(evidence_issue(Some(status)));
+        }
+        for status in [
+            Missing,
+            EvaluationUnavailable,
+            Current,
+            FreshnessUnknown,
+            Scanning,
+            AwaitingBuild,
+        ] {
+            assert!(!evidence_issue(Some(status)));
+        }
+        assert!(!evidence_issue(None));
+    }
+
+    #[test]
+    fn parent_search_resolves_association_not_an_unrelated_host() {
+        let mut guest = sample_system(Some("production"));
+        guest.id = Uuid::from_u128(10);
+        let mut parent = sample_system(Some("production"));
+        parent.hostname = "Hypervisor-Alpha".into();
+        guest.parent_host_id = Some(parent.id);
+        assert!(matches_parent_search(
+            &guest,
+            &[parent.clone()],
+            " hypervisor "
+        ));
+        guest.parent_host_id = Some(Uuid::from_u128(99));
+        assert!(!matches_parent_search(&guest, &[parent], "hypervisor"));
+    }
+
+    #[test]
+    fn multi_select_empty_matches_all_and_values_are_or() {
+        let system = sample_system(Some("staging"));
+        assert!(matches_any(&[], |env| matches_environment(&system, env)));
+        let selected = vec!["production".to_string(), "staging".to_string()];
+        assert!(matches_any(&selected, |env| matches_environment(
+            &system, env
+        )));
+        let other = vec!["production".to_string()];
+        assert!(!matches_any(&other, |env| matches_environment(
+            &system, env
+        )));
+    }
+
+    fn resource(id: u128, mode: ManagementMode, parent: Option<u128>) -> SystemSummary {
+        let mut system = sample_system(Some("production"));
+        system.id = Uuid::from_u128(id);
+        system.management_mode = mode;
+        system.parent_host_id = parent.map(Uuid::from_u128);
+        system
+    }
+
+    fn ids(listed: &[ListedSystem]) -> Vec<(u128, usize, bool)> {
+        listed
+            .iter()
+            .map(|e| (e.system.id.as_u128(), e.guests, e.indent))
+            .collect()
+    }
+
+    #[test]
+    fn guests_follow_their_managed_parent_and_collapse() {
+        let systems = vec![
+            resource(2, ManagementMode::External, Some(1)),
+            resource(1, ManagementMode::Managed, None),
+            resource(3, ManagementMode::Reference, None),
+            resource(4, ManagementMode::External, Some(1)),
+        ];
+        let none = std::collections::HashSet::new();
+        assert_eq!(
+            ids(&group_guests(&systems, true, &none)),
+            vec![(1, 2, false), (2, 0, true), (4, 0, true), (3, 0, false)]
+        );
+        let collapsed = std::collections::HashSet::from([Uuid::from_u128(1)]);
+        let listed = group_guests(&systems, true, &collapsed);
+        assert_eq!(ids(&listed), vec![(1, 2, false), (3, 0, false)]);
+        assert_eq!(hosts_with_guests(&listed), vec![Uuid::from_u128(1)]);
+    }
+
+    #[test]
+    fn ungrouped_or_orphaned_guests_stay_top_level() {
+        let none = std::collections::HashSet::new();
+        let systems = vec![
+            resource(1, ManagementMode::Managed, None),
+            resource(2, ManagementMode::External, Some(1)),
+        ];
+        assert_eq!(
+            ids(&group_guests(&systems, false, &none)),
+            vec![(1, 0, false), (2, 0, false)]
+        );
+        // The parent is filtered out of the list: the guest must stay visible.
+        let filtered = vec![resource(2, ManagementMode::External, Some(1))];
+        assert_eq!(
+            ids(&group_guests(&filtered, true, &none)),
+            vec![(2, 0, false)]
+        );
+        // A parent that is not managed does not group guests.
+        let unmanaged_parent = vec![
+            resource(1, ManagementMode::Reference, None),
+            resource(2, ManagementMode::External, Some(1)),
+        ];
+        assert_eq!(
+            ids(&group_guests(&unmanaged_parent, true, &none)),
+            vec![(1, 0, false), (2, 0, false)]
+        );
     }
 }

@@ -56,6 +56,15 @@ in harness.mkScenario {
         build.remote_execution_strategy = "server_derivation";
         flakes = {flake_polling_interval = "1h"; commit_evaluation_interval = "2s"; build_processing_interval = "2s";};
         vulnix.poll_interval = "2s";
+        # The effective static cache configuration. The scenario registers a
+        # database cache destination for every real publication, so this static
+        # destination publishes nothing here. It is the configuration against
+        # which exact-reuse admission accepts a recorded static publication
+        # (case static-publication-reuses-exact-real-artifact-and-rescans).
+        cache = {
+          push_to = "ssh-ng://cache@services";
+          push_after_build = true;
+        };
       };
       # The packaged server wrapper adds vulnix to PATH. Make only that optional
       # executable unavailable in the server's mount namespace, preserving its
@@ -121,8 +130,25 @@ in harness.mkScenario {
     + builtins.readFile ./fragments/stig-import.py + "\n"
     + builtins.readFile ./evidence-remediation-lifecycle.py
     + "\nassurance_stig_import()\n"
+    + builtins.readFile ./fragments/exact-artifact-reuse.py + "\n"
+    + builtins.readFile ./fragments/configuration-assurance.py
   );
   browserSpecs = {
+    configuration-register = pkgs.writeText "configuration-register.cjs" ''
+      exports.run = require("${./fragments/configuration-assurance.cjs}").register;
+    '';
+    configuration-evidence = pkgs.writeText "configuration-evidence.cjs" ''
+      exports.run = require("${./fragments/configuration-assurance.cjs}").evidence;
+    '';
+    ui-background-work = pkgs.writeText "ui-background-work.cjs" ''
+      exports.run = require("${./fragments/configuration-assurance.cjs}").backgroundWork;
+    '';
+    configuration-reuse-rescan = pkgs.writeText "configuration-reuse-rescan.cjs" ''
+      exports.run = require("${./fragments/configuration-assurance.cjs}").reuseRescan;
+    '';
+    configuration-removed = pkgs.writeText "configuration-removed.cjs" ''
+      exports.run = require("${./fragments/configuration-assurance.cjs}").removed;
+    '';
     cve = cveSpec;
     cve-scan = wrapper "scan"; cve-current = wrapper "current";
     cve-missing = wrapper "missing"; cve-historical = wrapper "historical";

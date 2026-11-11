@@ -85,6 +85,30 @@ async fn apply_migrations_through(pool: &PgPool, version: i64) {
     }
 }
 
+/// Lets pre-0322 rehearsals build fixtures with current composite helpers.
+///
+/// Before migration 0322 no derivation alias can exist, so
+/// `derivations_share_evidence_scope` is always false and a derivation's only
+/// evidence peer is itself (`derivation_evidence_peers`, migration 0326). Install
+/// these stubs only in a rehearsal that never applies 0322 or 0326 itself; the
+/// real migrations would otherwise conflict with them.
+async fn install_pre_0322_evidence_scope_stub(pool: &PgPool) {
+    sqlx::query(
+        "CREATE FUNCTION derivations_share_evidence_scope(integer, integer)
+         RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT false'",
+    )
+    .execute(pool)
+    .await
+    .expect("install pre-0322 evidence-scope stub");
+    sqlx::query(
+        "CREATE FUNCTION derivation_evidence_peers(integer)
+         RETURNS SETOF integer LANGUAGE sql STABLE AS 'SELECT $1'",
+    )
+    .execute(pool)
+    .await
+    .expect("install pre-0326 evidence-peers stub");
+}
+
 async fn apply_migration(pool: &PgPool, version: i64) {
     let migration = MIGRATOR
         .iter()
@@ -109,6 +133,7 @@ impl PoamClock for FixedClock {
 #[sqlx::test(migrations = false)]
 async fn migration_0258_preserves_populated_legacy_poams_and_adds_typed_shape(pool: PgPool) {
     apply_migrations_through(&pool, 257).await;
+    install_pre_0322_evidence_scope_stub(&pool).await;
     let fixture = failing_assessment_fixture(&pool).await;
     let finding_id: Uuid = sqlx::query_scalar(
         r#"SELECT finding.id
@@ -423,6 +448,12 @@ async fn migration_0279_to_0284_preserves_populated_retained_cve_poam(pool: PgPo
         .unwrap(),
         Some("accepted".into())
     );
+    // The historical assertions above exercise 0279..0284 in isolation.
+    // Current service code requires the current schema (including management
+    // authority). Continue the populated upgrade before invoking that code.
+    for migration in MIGRATOR.iter().filter(|migration| migration.version > 284) {
+        apply_migration(&pool, migration.version).await;
+    }
     let rows = fetch_cve_list(&pool, &CveReadScope::All, &CveFilters::default())
         .await
         .unwrap();
@@ -523,6 +554,7 @@ async fn migration_0295_to_0296_preserves_single_cve_history_and_admits_distinct
     pool: PgPool,
 ) {
     apply_migrations_through(&pool, 295).await;
+    install_pre_0322_evidence_scope_stub(&pool).await;
     let fixture = assessment_fixture(&pool).await;
     let actor = admin_actor(fixture.user_id);
     let environment_id = assign_environment(&pool, "0296-forward-upgrade", &[&fixture]).await;
@@ -1424,8 +1456,7 @@ async fn add_scheduled_cve_target(
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
-        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => derivation_id,
     };
     sqlx::query("UPDATE derivations SET store_path=$1,status_id=10 WHERE id=$2")
         .bind(&store_path)
@@ -4876,8 +4907,7 @@ async fn external_cve_revision(
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
-        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => derivation_id,
     };
     sqlx::query("UPDATE derivations SET store_path=$1,status_id=10 WHERE id=$2")
         .bind(&store_path)
@@ -10393,8 +10423,7 @@ async fn exact_system_vulnerability_rows_exclude_newer_undeployed_scan(pool: PgP
     {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
-        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => derivation_id,
     };
     seal_exact_cve_scan_for_derivation(
         &pool,
@@ -11029,8 +11058,7 @@ async fn record_later_legacy_result(
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
-        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => derivation_id,
     };
     sqlx::query("UPDATE derivations SET store_path=$1,status_id=10 WHERE id=$2")
         .bind(&store_path)
@@ -12727,26 +12755,24 @@ async fn assessment_fixture_with_policy(
         .await
         .unwrap();
     let store_path = format!("/nix/store/{suffix}-poam-target");
-    let write = record_successful_eval_result(
-        pool,
-        Some(commit_id),
-        &hostname,
-        "nixos",
-        None,
-        &format!("{store_path}.drv"),
-        Some(&store_path),
-        Some(true),
-        true,
-        &serde_json::json!({}),
+    // Migration rehearsals build this fixture on historical schemas, before
+    // columns such as 0322's reuse binding exist. Insert the fresh evaluated
+    // row directly with columns present in every rehearsed schema; current
+    // evaluator persistence is covered by its own tests.
+    let derivation_id: i32 = sqlx::query_scalar(
+        r#"INSERT INTO derivations(commit_id,derivation_type,derivation_name,derivation_path,
+               expected_store_path,cf_agent_enabled,policy_requirements_met,policy_results,status_id)
+           VALUES($1,'nixos',$2,$3,$4,true,true,'{}'::jsonb,
+               (SELECT id FROM derivation_statuses WHERE name='dry-run-complete'))
+           RETURNING id"#,
     )
+    .bind(commit_id)
+    .bind(&hostname)
+    .bind(format!("{store_path}.drv"))
+    .bind(&store_path)
+    .fetch_one(pool)
     .await
     .unwrap();
-    let derivation_id = match write {
-        SuccessfulEvalWrite::Inserted { derivation_id }
-        | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
-        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
-    };
     sqlx::query("UPDATE derivations SET store_path=$1,status_id=10 WHERE id=$2")
         .bind(&store_path)
         .bind(derivation_id)

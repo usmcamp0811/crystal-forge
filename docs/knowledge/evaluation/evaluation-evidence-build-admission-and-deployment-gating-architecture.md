@@ -55,7 +55,13 @@ Status: **proposed**, with the prerequisites partly in place. Evidence checked o
 
 - Tier 2 prerequisites exist. A separate Config Inspector worker and V2 snapshot artifact exist (`packages/default/crates/cf-server/src/services/config_inspections.rs`, `packages/default/crates/cf-server/src/models/config_snapshot_artifact.rs`). They are described in [evaluation-flake-snapshot-architecture.md](evaluation-flake-snapshot-architecture.md) and [config-explorer-implementation-status.md](config-explorer-implementation-status.md). The document's name `ConfigArtifactV2` does not appear in code.
 - The narrow primary evaluator exists. `packages/default/crates/cf-server/src/models/primary_evaluation.nix` evaluates `cfAgentEnabled`, and [config-explorer-architecture.md](config-explorer-architecture.md) records the same boundary.
-- Build admission is currently a fixed rule, not a mode. `packages/default/crates/cf-server/src/queries/build_jobs.rs` filters on `d.cf_agent_enabled = TRUE`. No Build-all, CF-enabled, or Policy-gated mode setting was found.
+- TASK-508 separates artifact admission from managed deployment prerequisites.
+  `queries/build_jobs.rs` accepts exact saved `global.artifactAdmission.passed`
+  with an active external/reference registration. `cf_agent_enabled` remains
+  factual. This is management authority, not the proposed Build-all/CF-enabled/
+  Policy-gated setting. Builder peek and claim selectors apply the same admission
+  predicate; see [management modes](../concepts/management-modes-and-configuration-assurance.md)
+  for verification status. This does not establish delivery of the broader proposed design.
 - `PolicyAssessment`, policy phases (`pre-build`, `build-priority`, `pre-deploy`), and persisted build-admission decision reasons were not found. `derivations.policy_requirements_met` and `policy_results` remain in use (`packages/default/crates/cf-server/src/queries/derivations.rs`).
 - Config inspection currently enqueues after primary evaluation succeeds, as [evaluation-flake-snapshot-architecture.md](evaluation-flake-snapshot-architecture.md) states. Whether it runs concurrently with the build, as this document requires, was not verified.
 - Arbitrary `custom_check` expressions exist (`packages/default/crates/cf-server/src/models/custom_check.rs`).

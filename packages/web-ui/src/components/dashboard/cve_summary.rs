@@ -7,7 +7,7 @@ use dioxus::prelude::*;
 
 use crate::api::models::CveSummary;
 
-/// CVE summary panel using the canonical dash-w-body / dash-w-mini layout.
+/// Renders Current-authorized managed runtime CVEs, not configuration scan coverage.
 #[component]
 pub fn CveSummaryPanel(
     cves: CveSummary,
@@ -41,9 +41,10 @@ pub fn CveSummaryPanel(
                 }
                 span {
                     style: "font-size:12px; color:var(--cf-text-muted);",
-                    "critical CVEs"
+                    "critical runtime CVEs"
                 }
             }
+            p { class: "mg-dim", "Active managed machines · exact Current authority. Zero findings does not prove scan coverage." }
 
             // 2-col mini grid: High + Total
             div {

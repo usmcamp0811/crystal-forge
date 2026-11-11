@@ -478,8 +478,12 @@ struct RunningMappingRow {
 }
 
 // SECURITY: Select the most recent report BEFORE checking its fields. This
-// query counts every scoped derivation, not just the first 1,000 menu entries.
+// query counts every scoped physical identity, not just the first 1,000 menu
+// entries. Only enforced flat aliases collapse a match. Source SHA identifies
+// the mapped artifact, not a latest-head guess about unknown runtime Git.
 // Neither a candidate flag nor a completed scan proves output-to-target identity.
+// Retained observations for nonmanaged registrations are history, not runtime
+// authority. Keep the registration row but suppress its running observation.
 async fn resolve_running_inventory_target(
     transaction: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
@@ -489,7 +493,7 @@ async fn resolve_running_inventory_target(
 )> {
     let row = sqlx::query_as::<_, RunningMappingRow>(
         r#"WITH selected AS (
-             SELECT system.id,system.hostname,system.flake_id,
+             SELECT system.id,system.hostname,system.flake_id,system.management_mode,
                     COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''),system.hostname)
                       AS configuration_name
              FROM systems system WHERE system.id=$1
@@ -501,7 +505,8 @@ async fn resolve_running_inventory_target(
              FROM selected LEFT JOIN LATERAL (
                SELECT candidate.id,candidate.generation,candidate.store_path,
                       candidate.generation_matches_current_store_path,candidate.timestamp
-               FROM system_states candidate WHERE candidate.hostname=selected.hostname
+                FROM view_agent_current_system_states candidate WHERE candidate.hostname=selected.hostname
+                 AND selected.management_mode='managed'
                ORDER BY candidate.timestamp DESC NULLS LAST,candidate.id DESC LIMIT 1
              ) state ON TRUE
            )
@@ -509,18 +514,21 @@ async fn resolve_running_inventory_target(
                   observation.store_path,observation.generation,
                   observation.generation_matches_current_store_path,
                   observation.reported_at,
-                   matches.match_count,matches.derivation_id,matches.commit_hash
+                    matches.match_count,source.id AS derivation_id,source_commit.git_commit_hash AS commit_hash
            FROM observation
            CROSS JOIN LATERAL (
-             SELECT COUNT(*)::bigint AS match_count,MIN(derivation.id) AS derivation_id,
-                    MIN(commit.git_commit_hash) AS commit_hash
+              SELECT COUNT(DISTINCT COALESCE(derivation.reused_from_derivation_id,derivation.id))::bigint AS match_count,
+                     MIN(derivation.id) AS derivation_id
              FROM derivations derivation
              JOIN commits commit ON commit.id=derivation.commit_id
                AND commit.flake_id=observation.flake_id
              WHERE derivation.derivation_type='nixos'
                AND derivation.derivation_name=observation.configuration_name
                AND COALESCE(derivation.store_path,derivation.expected_store_path)=observation.store_path
-            ) matches"#,
+             ) matches
+            LEFT JOIN view_current_cve_authority authority ON authority.system_id=observation.id
+            LEFT JOIN derivations source ON source.id=COALESCE(authority.derivation_id,matches.derivation_id)
+            LEFT JOIN commits source_commit ON source_commit.id=source.commit_id"#,
     )
     .bind(system_id)
     .fetch_one(&mut **transaction)
@@ -550,6 +558,7 @@ async fn resolve_running_inventory_target(
     Ok((
         SystemCveCurrentAuthorityState::MappedRunningNoScan,
         Some(SystemCveRunningTarget {
+            source_kind: Some("physical_artifact".into()),
             derivation_id,
             generation: row.generation,
             commit_hash,
@@ -732,7 +741,7 @@ pub async fn fetch_authorized_system_cve_inventory_candidates(
 
     let rows = sqlx::query(
         r#"WITH selected_system AS (
-             SELECT system.id,system.hostname,system.flake_id,
+             SELECT system.id,system.hostname,system.flake_id,system.management_mode,
                     COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''),system.hostname)
                       AS configuration_name
              FROM systems system WHERE system.id=$1
@@ -740,7 +749,8 @@ pub async fn fetch_authorized_system_cve_inventory_candidates(
              SELECT state.generation,state.store_path
              FROM selected_system system
              LEFT JOIN LATERAL (SELECT candidate.generation,candidate.store_path
-               FROM system_states candidate WHERE candidate.hostname=system.hostname
+                FROM view_agent_current_system_states candidate WHERE candidate.hostname=system.hostname
+                 AND system.management_mode='managed'
                ORDER BY candidate.timestamp DESC NULLS LAST,candidate.id DESC LIMIT 1) state ON true
            ), candidates AS (
              SELECT 'current'::text AS kind,NULL::uuid AS generation_snapshot_id,
@@ -758,6 +768,7 @@ pub async fn fetch_authorized_system_cve_inventory_candidates(
              LEFT JOIN flakes flake ON flake.id=system.flake_id
              LEFT JOIN flake_branch_commit_snapshot head ON head.flake_id=flake.id
                AND head.position=0
+             WHERE system.management_mode='managed'
              UNION ALL
              SELECT 'retained_generation',retained.id,retained.generation,
                     derivation.id,commit.git_commit_hash,FALSE,
@@ -899,7 +910,7 @@ async fn fetch_historical_system_cve_inventory_tx(
             generation_snapshot_id,
         } => {
             sqlx::query_scalar::<_, i32>(
-                r#"SELECT derivation.id
+                r#"SELECT derivation_execution_source(derivation.id)
                    FROM evaluation_generation_snapshots retained
                    JOIN systems system ON system.id=retained.system_id
                    JOIN derivations derivation ON derivation.id=retained.derivation_id
@@ -917,7 +928,7 @@ async fn fetch_historical_system_cve_inventory_tx(
         }
         SystemCveInventorySelection::ExactDerivation { derivation_id } => {
             sqlx::query_scalar::<_, i32>(
-                r#"SELECT derivation.id
+                r#"SELECT derivation_execution_source(derivation.id)
                    FROM systems system
                    JOIN derivations derivation
                      ON derivation.id=$2 AND derivation.derivation_type='nixos'
@@ -1003,8 +1014,9 @@ async fn fetch_historical_system_cve_inventory_tx(
 /// # Current authority rules
 ///
 /// A `current` selection first checks the latest observation against every
-/// derivation in the registered flake and effective configuration. One match
-/// selects only that derivation's newest completed schema-1 scan by
+/// physical artifact in the registered flake and effective configuration. Only
+/// database-proven aliases collapse a match. One physical match selects the
+/// actual source's newest completed schema-1 scan by
 /// `completed_at DESC, id DESC`. That scan is exact Current CVE authority,
 /// independent of retained Config or deployment provenance. Missing or
 /// ambiguous mapping returns an explicit source-less state. This read does not
@@ -2656,7 +2668,7 @@ pub async fn fetch_cve_inventory_systems(
         LEFT JOIN environments environment ON environment.id=system.environment_id
         LEFT JOIN flakes flake ON flake.id=system.flake_id
         LEFT JOIN LATERAL (
-          SELECT candidate.primary_ip_address FROM system_states candidate
+          SELECT candidate.primary_ip_address FROM view_agent_current_system_states candidate
           WHERE candidate.hostname=system.hostname
           ORDER BY candidate.timestamp DESC,candidate.id DESC LIMIT 1
         ) state ON true
@@ -2878,6 +2890,11 @@ pub async fn revoke_fleet_cve_justification(pool: &PgPool, cve_id: &str) -> Resu
 /// Compatibility affected totals count the distinct union of current and
 /// scheduled systems. Historical totals are explicit and never contribute to
 /// compatibility affected totals.
+/// `no_scan_systems` counts active registrations in every management mode
+/// without scan evidence. Managed coverage retains current, scheduled and legacy
+/// completed-build scan semantics. Nonmanaged coverage requires sealed schema-1
+/// evidence for the exact registered flake/configuration. Neither historical
+/// coverage measure establishes Current authority or selected-head coverage.
 ///
 /// # Errors
 ///
@@ -2903,12 +2920,23 @@ pub async fn fetch_cve_fleet_stats(pool: &PgPool, scope: &CveReadScope) -> Resul
                              WHERE scheduled.system_id=system.id)
                    OR EXISTS(
                     SELECT 1 FROM derivations derivation
-                   JOIN derivation_statuses status ON status.id=derivation.status_id
-                     AND status.name=ANY(ARRAY['build-complete','complete'])
-                   JOIN cve_scans scan ON scan.derivation_id=derivation.id
+                    JOIN cve_scans scan ON scan.derivation_id=derivation.id
                      AND scan.status='completed' AND scan.completed_at IS NOT NULL
-                   WHERE derivation.derivation_name=system.hostname
-                     AND derivation.derivation_type='nixos') AS has_scan
+                      AND ((system.management_mode<>'managed'
+                            AND scan.evidence_schema_version=1) OR (
+                          system.management_mode='managed' AND EXISTS (
+                            SELECT 1 FROM derivation_statuses status
+                            WHERE status.id=derivation.status_id
+                              AND status.name=ANY(ARRAY['build-complete','complete'])
+                          )))
+                    JOIN commits commit ON commit.id=derivation.commit_id
+                   WHERE derivation.derivation_name=CASE
+                           WHEN system.management_mode='managed' THEN system.hostname
+                           ELSE COALESCE(NULLIF(BTRIM(system.system_configuration_name),''),system.hostname)
+                         END
+                       AND (system.management_mode='managed'
+                            OR commit.flake_id=system.flake_id)
+                      AND derivation.derivation_type='nixos') AS has_scan
           FROM systems system WHERE system.is_active
             AND ($1::uuid[] IS NULL OR system.environment_id=ANY($1))
         )
@@ -3114,7 +3142,10 @@ mod tests {
                 hostname: format!("inventory-{suffix}"),
                 environment_id: None,
                 is_active: true,
-                public_key: PublicKey::from_verifying_key(key.verifying_key()),
+                management_mode: crate::models::systems::ManagementMode::Managed,
+                agent_enrolled_at: None,
+                public_key: Some(PublicKey::from_verifying_key(key.verifying_key())),
+                parent_host_id: None,
                 flake_id: Some(flake.id),
                 derivation: String::new(),
                 system_configuration_name: Some(format!("inventory-{suffix}")),
@@ -3466,6 +3497,306 @@ mod tests {
         assert_eq!(
             a.attempt.as_ref().map(|attempt| attempt.status.as_str()),
             Some("failed")
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn retained_observation_loses_current_authority_but_keeps_exact_scan(pool: PgPool) {
+        use axum::{
+            body::Bytes,
+            extract::State,
+            http::{HeaderMap, StatusCode},
+        };
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use ed25519_dalek::Signer;
+
+        async fn report(
+            state: &crate::handlers::agent_request::CFState,
+            key: &ed25519_dalek::SigningKey,
+            payload: &crate::models::system_states::SystemState,
+        ) -> axum::response::Response {
+            let body = Bytes::from(serde_json::to_vec(payload).unwrap());
+            let mut headers = HeaderMap::new();
+            headers.insert("x-key-id", payload.hostname.parse().unwrap());
+            headers.insert(
+                "x-signature",
+                STANDARD.encode(key.sign(&body).to_bytes()).parse().unwrap(),
+            );
+            crate::handlers::agent::heartbeat::log(
+                State(state.clone()),
+                State(state.pool.clone()),
+                None,
+                headers,
+                body,
+            )
+            .await
+        }
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (system, commit_id) = inventory_test_system(&pool, &suffix).await;
+        let (mut key, verifying) = crate::test_utils::crypto::generate_keypair();
+        sqlx::query("UPDATE systems SET public_key=$2 WHERE id=$1")
+            .bind(system.id)
+            .bind(STANDARD.encode(verifying.to_bytes()))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let state = crate::handlers::agent_request::CFState::new(
+            pool.clone(),
+            crate::config::ServerConfig::default(),
+            std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        let path = format!("/nix/store/{suffix}-retained");
+        let derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations(derivation_name,derivation_type,commit_id,status_id,store_path) VALUES($1,'nixos',$2,(SELECT id FROM derivation_statuses WHERE name='build-complete'),$3) RETURNING id",
+        )
+        .bind(&system.hostname)
+        .bind(commit_id)
+        .bind(&path)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut payload = crate::test_utils::builders::SystemStateBuilder::new()
+            .hostname(&system.hostname)
+            .store_path(&path)
+            .build();
+        payload.generation = Some(1);
+        payload.generation_matches_current_store_path = Some(true);
+        payload.change_reason = "heartbeat".into();
+        assert_eq!(
+            report(&state, &key, &payload).await.status(),
+            StatusCode::OK
+        );
+        let scan_id: Uuid = sqlx::query_scalar("INSERT INTO cve_scans(derivation_id,scanner_name,status) VALUES($1,'vulnix','in_progress') RETURNING id")
+            .bind(derivation_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE cve_scans SET status='completed',completed_at=now(),evidence_schema_version=1 WHERE id=$1")
+            .bind(scan_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let managed = fetch_system_cve_inventory(&pool, system.id).await.unwrap();
+        assert_eq!(
+            managed.current_state,
+            Some(SystemCveCurrentAuthorityState::ExactCurrentScan)
+        );
+        assert!(!managed.read_only);
+        let authority: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM view_current_cve_authority WHERE system_id=$1",
+        )
+        .bind(system.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(authority, 1);
+
+        // Existing installations and ordinary key rotation retain legacy Current.
+        let (rotated, verifying) = crate::test_utils::crypto::generate_keypair();
+        sqlx::query(
+            "UPDATE systems SET public_key=$2,agent_enrolled_at=clock_timestamp() WHERE id=$1",
+        )
+        .bind(system.id)
+        .bind(STANDARD.encode(verifying.to_bytes()))
+        .execute(&pool)
+        .await
+        .unwrap();
+        key = rotated;
+        let epoch: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT agent_enrolled_at FROM systems WHERE id=$1")
+                .bind(system.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            epoch.is_none(),
+            "client input cannot reset legacy enrollment"
+        );
+        assert!(
+            fetch_system_cve_inventory(&pool, system.id)
+                .await
+                .unwrap()
+                .running_target
+                .is_some()
+        );
+
+        for mode in ["external", "reference"] {
+            sqlx::query("UPDATE systems SET management_mode=$2,public_key=NULL WHERE id=$1")
+                .bind(system.id)
+                .bind(mode)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let current = fetch_system_cve_inventory(&pool, system.id).await.unwrap();
+            assert!(current.read_only);
+            assert!(current.running_target.is_none());
+            assert!(current.source.is_none());
+            let authority: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM view_current_cve_authority WHERE system_id=$1",
+            )
+            .bind(system.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(authority, 0, "{mode} cannot authorize POA&M via Current");
+            let historical = fetch_system_cve_inventory_page(
+                &pool,
+                system.id,
+                &SystemCveInventoryPageRequest {
+                    selection: SystemCveInventorySelection::ExactDerivation { derivation_id },
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(historical.read_only);
+            assert_eq!(
+                historical.source.as_ref().map(|source| source.scan_id),
+                Some(scan_id)
+            );
+
+            // Re-enrollment must not turn retained history back into Current.
+            let (fresh_key, verifying) = crate::test_utils::crypto::generate_keypair();
+            sqlx::query("UPDATE systems SET management_mode='managed',public_key=$2 WHERE id=$1")
+                .bind(system.id)
+                .bind(STANDARD.encode(verifying.to_bytes()))
+                .execute(&pool)
+                .await
+                .unwrap();
+            let pending = fetch_system_cve_inventory(&pool, system.id).await.unwrap();
+            assert!(
+                pending.running_target.is_none(),
+                "{mode} re-enrollment needs a new report"
+            );
+            assert!(pending.source.is_none());
+            let authority: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM view_current_cve_authority WHERE system_id=$1",
+            )
+            .bind(system.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(authority, 0);
+            let runtime: (Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT current_store_path,primary_ip_address FROM view_system_detail WHERE id=$1",
+            )
+            .bind(system.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(runtime, (None, None));
+            let historical = fetch_system_cve_inventory_page(
+                &pool,
+                system.id,
+                &SystemCveInventoryPageRequest {
+                    selection: SystemCveInventorySelection::ExactDerivation { derivation_id },
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                historical.source.as_ref().map(|source| source.scan_id),
+                Some(scan_id)
+            );
+
+            assert_eq!(
+                report(&state, &key, &payload).await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+            let before: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM system_states WHERE hostname=$1")
+                    .bind(&system.hostname)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let response = report(&state, &fresh_key, &payload).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let response: crate::handlers::agent::heartbeat::LogResponse = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                response.desired_target.is_none(),
+                "conversion must not deploy"
+            );
+            let after: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM system_states WHERE hostname=$1")
+                    .bind(&system.hostname)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                after,
+                before + 1,
+                "identical runtime requires a fresh full state"
+            );
+            let current = fetch_system_cve_inventory(&pool, system.id).await.unwrap();
+            assert_eq!(
+                current.current_state,
+                Some(SystemCveCurrentAuthorityState::ExactCurrentScan)
+            );
+            let authority: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM view_current_cve_authority WHERE system_id=$1",
+            )
+            .bind(system.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(authority, 1);
+            let epoch: Option<DateTime<Utc>> =
+                sqlx::query_scalar("SELECT agent_enrolled_at FROM systems WHERE id=$1")
+                    .bind(system.id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(epoch.is_some());
+            sqlx::query("UPDATE systems SET public_key=$2,agent_enrolled_at=NULL WHERE id=$1")
+                .bind(system.id)
+                .bind(STANDARD.encode(verifying.to_bytes()))
+                .execute(&pool)
+                .await
+                .unwrap();
+            let unchanged: Option<DateTime<Utc>> =
+                sqlx::query_scalar("SELECT agent_enrolled_at FROM systems WHERE id=$1")
+                    .bind(system.id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                unchanged, epoch,
+                "metadata and key writes cannot erase the boundary"
+            );
+            assert_eq!(
+                report(&state, &fresh_key, &payload).await.status(),
+                StatusCode::OK
+            );
+            let deduped: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM system_states WHERE hostname=$1")
+                    .bind(&system.hostname)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                deduped, after,
+                "normal heartbeat dedup resumes after enrollment"
+            );
+            key = fresh_key;
+        }
+        let retained: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM system_states WHERE hostname=$1")
+                .bind(&system.hostname)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            retained, 3,
+            "one legacy report and two enrollment reports remain history"
         );
     }
 

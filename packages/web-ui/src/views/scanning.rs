@@ -14,7 +14,7 @@ use crate::api::client::{
     trigger_cve_derivation_rescan, update_scanning_archive_state, update_scanning_schedule,
 };
 use crate::api::models::{
-    ScanRecordCollectionParam, ScanRecordDirectionParam, ScanRecordRevisionParam,
+    ManagementMode, ScanRecordCollectionParam, ScanRecordDirectionParam, ScanRecordRevisionParam,
     ScanRecordSortParam, ScanRecordStatusParam, ScanSchedulePolicyResponse,
     ScanningScanDetailResponse, ScanningScanRecordQuery, ScanningScanRecordResponse,
     ScanningScanRecordsResponse, UpdateScanSchedulePolicyRequest,
@@ -23,6 +23,7 @@ use crate::components::dialog_focus::{
     DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
 };
 use crate::components::icon::{Icon, IconName};
+use crate::components::system::management_mode::MgmtChip;
 use crate::hooks::{InfiniteScroll, use_infinite_scroll};
 use crate::routes::Route;
 
@@ -731,7 +732,12 @@ fn severity_counts(row: &ScanningScanRecordResponse) -> (i32, i32, i32, i32) {
 }
 
 fn revision_class(row: &ScanningScanRecordResponse) -> &'static str {
-    if row.is_current {
+    // `is_current` is a server-owned managed-runtime relation. A shared artifact
+    // may also serve external/reference registrations; those remain config-only.
+    if row.is_current
+        && (row.management_modes.is_empty()
+            || row.management_modes.contains(&ManagementMode::Managed))
+    {
         "deployed"
     } else if row.is_latest_per_flake {
         "recent"
@@ -1066,7 +1072,7 @@ pub fn ScanningView() -> Element {
 
     use_future(move || async move {
         loop {
-            gloo_timers::future::TimeoutFuture::new(LIVE_REFRESH_MS).await;
+            crate::hooks::visibility::visible_tick(LIVE_REFRESH_MS).await;
             live_refresh.set(live_refresh().wrapping_add(1));
         }
     });
@@ -1383,7 +1389,7 @@ pub fn ScanningView() -> Element {
                     } else {
                         { stat_card("Failed", "0", None, "#34d399") }
                     }
-                    { stat_card("Coverage", &format!("{}%", summary.coverage_percent), Some("configs with results"), "#34d399") }
+                    { stat_card("Coverage", &format!("{}%", summary.coverage_percent), Some("configs with results · all modes"), "#34d399") }
                 } else {
                     for (label, color) in [("Scanning now", "#60a5fa"), ("Stale", "#fbbf24"), ("Never scanned", "#9ca3af"), ("Failed", "#f87171"), ("Coverage", "#34d399")] {
                         { stat_card(label, "—", None, color) }
@@ -2130,8 +2136,15 @@ fn record_row(
                     );
                 }
             },
-            td { div { class: "scanning-config-name", "{row.hostname}" } div { class: "scanning-history-flake", "{configuration_meta}" } }
-            td { span { class: if relation == "deployed" { "chip chip-healthy" } else if relation == "recent" { "chip chip-info" } else { "chip chip-unknown" }, "{relation_label}" } }
+            td { div { class: "scanning-config-name", "{row.hostname}"
+                for mode in row.management_modes.iter().copied() { MgmtChip { mode } }
+            } div { class: "scanning-history-flake", title: row.commit_hash.clone().unwrap_or_default(), "{configuration_meta}" } }
+            td { span { class: if relation == "deployed" { "chip chip-healthy" } else if relation == "recent" { "chip chip-info" } else { "chip chip-unknown" }, "{relation_label}" }
+                if row.management_modes.iter().any(|m| *m != ManagementMode::Managed) {
+                    div { class: "mg-dim", "Configuration evidence" }
+                }
+                if relation == "deployed" { div { class: "mg-dim", "Managed runtime relation only" } }
+            }
             td {
                 span { class: "chip {meta.class}", span { class: "chip-dot", style: "background:{meta.color};" } "{meta.label}" }
                 if row.status == "in_progress" {
@@ -2281,7 +2294,7 @@ fn ScanDetailDrawer(
         if running {
             let refresh_selection = poll_selection.clone();
             spawn(async move {
-                gloo_timers::future::TimeoutFuture::new(DETAIL_POLL_MS).await;
+                crate::hooks::visibility::visible_tick(DETAIL_POLL_MS).await;
                 if selected.peek().as_ref().map(|item| item.scan_id)
                     == Some(refresh_selection.scan_id)
                     && matches!(&*state.peek(), ScanDetailState::Loaded(detail) if detail.status == "in_progress")
@@ -2291,17 +2304,20 @@ fn ScanDetailDrawer(
             });
         }
     });
-    use_effect(move || {
-        if matches!(&*state.read(), ScanDetailState::Loaded(detail) if detail.status == "in_progress")
-        {
-            spawn(async move {
-                while selected.peek().is_some()
-                    && matches!(&*state.peek(), ScanDetailState::Loaded(detail) if detail.status == "in_progress")
-                {
-                    gloo_timers::future::TimeoutFuture::new(1_000).await;
-                    now.set(Utc::now());
-                }
-            });
+    // One elapsed-time clock per running scan. The previous effect read `state`
+    // and spawned a new loop on every detail refresh, so tickers accumulated for
+    // as long as the scan ran. The memo changes only when the scan starts or stops
+    // running, and `use_resource` drops the previous task before it starts another.
+    let running = use_memo(
+        move || matches!(&*state.read(), ScanDetailState::Loaded(detail) if detail.status == "in_progress"),
+    );
+    let _elapsed_clock = use_resource(move || async move {
+        if !running() {
+            return;
+        }
+        while selected.peek().is_some() {
+            crate::hooks::visibility::visible_tick(1_000).await;
+            now.set(Utc::now());
         }
     });
 
@@ -2976,6 +2992,7 @@ mod tests {
     ) -> ScanningScanRecordResponse {
         let timestamp = Utc::now() - Duration::hours(hours_ago);
         ScanningScanRecordResponse {
+            management_modes: vec![ManagementMode::Managed],
             scan_id: Uuid::new_v4(),
             derivation_id: critical + hours_ago as i32 + 1,
             hostname: hostname.to_string(),
@@ -3007,6 +3024,50 @@ mod tests {
             archived_at: None,
             cancellable: false,
         }
+    }
+
+    #[test]
+    fn shared_artifact_modes_round_trip_without_promoting_configuration_to_runtime() {
+        let mut value = row("shared-config", "completed", 1, 0);
+        value.management_modes = vec![ManagementMode::External, ManagementMode::Reference];
+        value.is_current = true;
+        value.is_latest_per_flake = true;
+        assert_eq!(revision_class(&value), "recent");
+        let json = serde_json::to_value(&value).unwrap();
+        assert_eq!(
+            json["management_modes"],
+            serde_json::json!(["external", "reference"])
+        );
+        let decoded: ScanningScanRecordResponse = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(decoded.management_modes, value.management_modes);
+        let mut queue_json = json.clone();
+        queue_json["rescan_eligible"] = serde_json::json!(true);
+        let queue: crate::api::models::ScanningQueueItemResponse =
+            serde_json::from_value(queue_json.clone()).unwrap();
+        assert_eq!(queue.management_modes, value.management_modes);
+        queue_json
+            .as_object_mut()
+            .unwrap()
+            .remove("management_modes");
+        assert!(
+            serde_json::from_value::<crate::api::models::ScanningQueueItemResponse>(queue_json)
+                .unwrap()
+                .management_modes
+                .is_empty()
+        );
+        value.management_modes.push(ManagementMode::Managed);
+        assert_eq!(revision_class(&value), "deployed");
+        let mut legacy = json;
+        legacy.as_object_mut().unwrap().remove("management_modes");
+        assert!(
+            serde_json::from_value::<ScanningScanRecordResponse>(legacy)
+                .unwrap()
+                .management_modes
+                .is_empty()
+        );
+        let mut invalid = serde_json::to_value(&value).unwrap();
+        invalid["management_modes"] = serde_json::json!(["invalid"]);
+        assert!(serde_json::from_value::<ScanningScanRecordResponse>(invalid).is_err());
     }
 
     #[test]

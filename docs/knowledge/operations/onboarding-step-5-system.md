@@ -1,14 +1,14 @@
 ---
 type: Operator Guide
 title: "Step 5: Register System"
-description: "Walks through registering the first system: form fields, Ed25519 key pair generation, and how system deployment policy inherits from and overrides the environment."
+description: "Explains mode-first registration of managed machines, external machines and descriptive reference configurations, enrollment requirements, and deployment-policy limits."
 tags:
   - crystal-forge
   - onboarding
   - systems
   - ed25519
   - deployment-policy
-implementation_status: implemented
+implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
   at: 2026-10-03T22:54:29-05:00
@@ -20,7 +20,12 @@ sources:
 
 # Step 5: Register System
 
-**Systems** are the NixOS hosts you want to manage with Crystal Forge. Each system is cryptographically identified by an Ed25519 key pair and associated with an environment, flake, and deployment policy.
+**Systems** are registered resources: managed machines, externally deployed
+machines, or reference configurations. Only managed machines enroll with an
+Ed25519 key. TASK-508 backend and UI changes are present in source; final browser
+and owning integration verification remain pending. See
+[management modes and configuration assurance](../concepts/management-modes-and-configuration-assurance.md)
+for artifact admission, neutral unknown health and remaining integration proof.
 
 ## Why Systems Matter
 
@@ -29,42 +34,54 @@ sources:
 - **Compliance Monitoring**: Track STIG controls and CVE exposure per system
 - **Agent Telemetry**: Receive system fingerprints, heartbeats, and state changes
 
-## Guided Tour: Systems Page
+## Systems page and retained onboarding images
 
 Click the "Register system" step in the coach panel.
 
 ![Systems Page with Coach Callout](../../screenshots/06f-onboarding-systems-callout.png)
 
-The callout explains what systems are and how the agent works:
-
-> **Register Your First System**
->
-> Systems represent NixOS hosts you want to manage with Crystal Forge. Each system runs the Crystal Forge agent, which:
-> - Reports system state (hardware, software, network)
-> - Receives deployment instructions
-> - Executes NixOS activations
->
-> Click **Add System** to begin.
+These screenshots show the earlier managed-only coach. They are historical
+onboarding illustrations, not evidence of management-mode UI parity. Agent
+state reporting, deployment instructions and activations apply only to managed
+machines. External/reference resources need no agent enrollment.
 
 Click **Add System** to open the registration modal.
 
 ## Guided Tour: Add System Form
 
-The form shows progressive guidance: **Hostname → Public Key → Environment → Flake**.
+Choose the management mode before entering enrollment or configuration details.
 
 ![System Form with Callouts](../../screenshots/06f2-onboarding-systems-form-callouts.png)
 
 **Fill in:**
 
-- **Hostname**: The system's hostname (e.g., `web-server-1`, `db-primary`)
-- **Public Key**: Ed25519 public key for this system (you can generate a key pair in the UI)
+- **Management mode**: `managed`, `external`, or `reference`.
+- **Resource name (`hostname`)**: Unique machine identity for managed/external;
+  descriptive name for reference (for example, `Golden workstation baseline`).
+- **Public Key**: Valid Ed25519 public key for managed only. Omit the key for
+  external/reference; do not generate a placeholder key.
 - **Environment**: Which environment this system belongs to
-- **Flake**: Which flake defines this system's configuration
-- **Deployment Policy**: Optionally override the environment default
+- **Flake and configuration**: External/reference require a registered flake and
+  explicit `system_configuration_name`. Several unique registrations can use
+  the same configuration.
+- **Parent host**: Optional for external only; must be an active managed host in
+  the same environment. This permits unit observations, not guest deployment.
+- **Deployment Policy**: Managed deployment behavior, independent of mode.
+- **Tags and description/notes**: Persisted operator metadata in every mode.
+  Tags have fleet suggestions and appear as chips and filter choices.
+- **Address and reachability**: Managed registration persists optional FQDN/IP
+  and `direct` or `pull` reachability. Config sync preserves these values.
+
+The configuration selector and Flake Explorer's **Add to Forge** use exact
+Native declaration inventory even when the optional full module/input snapshot
+is absent. Unknown declaration discovery cannot validate free text. Missing
+Modules/Inputs remain unavailable, not known-empty collections.
 
 ### Generating a Key Pair
 
-If you don't have an Ed25519 key pair for this system yet, click **Generate Key Pair** in the form. Crystal Forge will generate both keys and display them in a modal.
+For a managed system without an Ed25519 key pair, use **Generate Key Pair** in
+the form. The UI displays both keys; the server stores the enrollment public key.
+External and reference registrations do not use this step.
 
 ![System Key Generation](../../screenshots/06f3-onboarding-systems-keygen.png)
 
@@ -72,7 +89,10 @@ If you don't have an Ed25519 key pair for this system yet, click **Generate Key 
 
 ### How Deployment Policies Work
 
-Systems inherit the deployment policy from their environment, but you can override it per system:
+The system's stored deployment policy applies only when mode grants deployment
+authority. Initial external/reference-to-managed conversion requires a new valid
+key and explicit `manual` policy and queues no deploy. A later explicit edit can
+enable `auto_latest` or `pinned`.
 
 - **manual**: An admin must explicitly approve deployments (safest for production)
 - **auto_latest**: Automatically deploy the newest eligible cached derivation for this system configuration across commits of its registered flake. Newer failed or pending commits do not make the deployed system behind; a newer deployable derivation does.

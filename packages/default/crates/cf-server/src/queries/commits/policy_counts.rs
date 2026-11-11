@@ -13,6 +13,8 @@ pub(super) const JOIN: &str = r#"
 LEFT JOIN LATERAL (
     WITH mock AS (
         SELECT m.configuration_name, m.cf_agent_enabled,
+            m.configuration_name=ANY(inv.evidence_configurations)
+                AND m.policy_results #> '{global,artifactAdmission,passed}' = 'true'::jsonb AS artifact_admitted,
             CASE WHEN m.configuration_name=ANY(inv.evidence_configurations)
                  THEN m.policy_requirements_met ELSE NULL END AS policy_requirements_met
         FROM evaluation_mock_outcomes m
@@ -24,6 +26,8 @@ LEFT JOIN LATERAL (
             CASE WHEN n.eval_state='eval_failed' THEN 6
                  WHEN n.eval_state='evaluated' THEN 5 ELSE 0 END AS status_id,
             n.cf_agent_enabled,
+            n.configuration_name=ANY(inv.evidence_configurations)
+                AND n.policy_results #> '{global,artifactAdmission,passed}' = 'true'::jsonb AS artifact_admitted,
             CASE WHEN n.configuration_name=ANY(inv.evidence_configurations)
                  THEN n.policy_requirements_met ELSE NULL END AS policy_requirements_met,
             NULL::jsonb AS policy_results, n.eval_state='eval_failed' AS confirmed_failure,
@@ -34,6 +38,8 @@ LEFT JOIN LATERAL (
             AND n.configuration_name=ANY(inv.agent_configurations)
         UNION ALL
         SELECT d.derivation_name,d.status_id,d.cf_agent_enabled,
+            d.derivation_name=ANY(inv.evidence_configurations)
+                AND d.policy_results #> '{global,artifactAdmission,passed}' = 'true'::jsonb,
             CASE WHEN d.derivation_name=ANY(inv.evidence_configurations)
                  THEN d.policy_requirements_met ELSE NULL END,
             d.policy_results, COALESCE(
@@ -53,7 +59,7 @@ LEFT JOIN LATERAL (
         SELECT d.derivation_name AS configuration_name,
             CASE WHEN d.immutable AND d.status_id=0 THEN 'unknown'
             WHEN d.status_id = 6 OR d.confirmed_failure THEN 'eval_failed'
-            WHEN d.cf_agent_enabled IS TRUE AND d.policy_requirements_met IS TRUE THEN 'pass'
+            WHEN d.artifact_admitted OR (d.cf_agent_enabled IS TRUE AND d.policy_requirements_met IS TRUE) THEN 'pass'
             WHEN d.cf_agent_enabled IS FALSE OR d.policy_requirements_met IS FALSE THEN 'policy_failed'
             ELSE 'unknown' END AS outcome
         FROM native d
@@ -64,7 +70,7 @@ LEFT JOIN LATERAL (
                d.policy_results ? 'evaluation_failure' OR d.policy_results ? 'evaluation_failure_error')))
         UNION ALL
         SELECT m.configuration_name,
-            CASE WHEN m.cf_agent_enabled IS TRUE AND m.policy_requirements_met IS TRUE THEN 'pass'
+             CASE WHEN m.artifact_admitted OR (m.cf_agent_enabled IS TRUE AND m.policy_requirements_met IS TRUE) THEN 'pass'
                  WHEN m.cf_agent_enabled IS FALSE OR m.policy_requirements_met IS FALSE THEN 'policy_failed'
                  ELSE 'unknown' END
         FROM mock m
@@ -103,6 +109,27 @@ mod tests {
     use crate::queries::commits::{list_eval_history, list_eval_queue};
     use serde_json::{Value, json};
     use sqlx::PgPool;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn artifact_admission_counts_pass_without_fabricating_agent_evidence(pool: PgPool) {
+        let commit = super::super::tests::derivation_count_commit(&pool).await;
+        super::super::inventory_summary_tests::inventory(
+            &pool,
+            commit,
+            &["reference", "managed"],
+            &["reference", "managed"],
+        )
+        .await;
+        sqlx::query("INSERT INTO derivations(commit_id,derivation_name,derivation_type,status_id,policy_results,cf_agent_enabled,policy_requirements_met) VALUES
+            ($1,'reference','nixos',5,'{\"evaluation_attempt\":7,\"global\":{\"artifactAdmission\":{\"passed\":true}}}',FALSE,FALSE),
+            ($1,'managed','nixos',5,'{\"evaluation_attempt\":7}',FALSE,FALSE)")
+            .bind(commit).execute(&pool).await.unwrap();
+        assert_counts(&pool, commit, (1, 1, 0, true), 7).await;
+        sqlx::query("UPDATE derivations SET policy_results=jsonb_set(policy_results,'{evaluation_attempt}','6') WHERE commit_id=$1 AND derivation_name='reference'")
+            .bind(commit).execute(&pool).await.unwrap();
+        assert_counts(&pool, commit, (0, 1, 0, true), 7).await;
+    }
 
     async fn assert_counts(
         pool: &PgPool,

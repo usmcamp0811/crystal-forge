@@ -11,6 +11,7 @@ pub mod edit_system_modal;
 pub mod helpers;
 pub mod info_row;
 pub mod key_rotation;
+pub mod management_mode;
 pub mod pending_deploy_banner;
 pub mod system_card;
 pub mod system_card_v2;
@@ -27,6 +28,11 @@ pub use helpers::{
     format_uptime,
 };
 pub use info_row::{BooleanRow, InfoRow, InfoRowMono, StatusBadge};
+pub use management_mode::{
+    DeploymentCell, EvidenceBanner, EvidenceCves, EvidenceFreshness, EvidenceGate,
+    EvidencePipeline, EvidenceStatus, MgmtChip, RuntimeCard, ScanEvidenceChip, evidence_freshness,
+    evidence_status, last_good_scan, scan_evidence_status,
+};
 pub use pending_deploy_banner::PendingDeployBanner;
 pub use system_card::SystemCard;
 pub use system_card_v2::SystemCardV2;

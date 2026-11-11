@@ -53,6 +53,12 @@ sources:
 
 ## Agent Not Connecting
 
+First check `management_mode` and registry activity. Only active managed
+registrations authenticate as agents. External/reference registrations are
+keyless; missing direct heartbeat is expected and must not be diagnosed as a
+guest outage. Parent reports are a separate pull-based observation path. See
+[management modes and upgrade troubleshooting](../concepts/management-modes-and-configuration-assurance.md).
+
 **Symptom**: You enabled the agent on a target system, but it's not showing as connected in the web UI.
 
 **Possible causes:**
@@ -90,6 +96,12 @@ sources:
    Look for Ed25519 signature failures.
 
 ## Builder Not Activating
+
+For an agentless external/reference build, builders claim the job only when
+its saved artifact-admission result passed and an active external/reference
+registration still matches the exact flake and configuration. A queued
+agentless job without that evidence stays queued by design. Do not enable an
+agent or fabricate credentials to force a build.
 
 **Symptom**: You created a builder in the web UI and configured the NixOS module, but builds aren't running.
 

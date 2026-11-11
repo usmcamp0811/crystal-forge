@@ -118,8 +118,10 @@ pub fn EnvironmentsListView(initial_query: String) -> Element {
                 .filter(|env| env.health.critical > 0 || env.health.offline > 0)
                 .collect::<Vec<_>>();
             let attention_count = attention_items.len() as i64;
+            // INVARIANT: Read NAV_BADGES with `peek`. A subscription would rerun this
+            // effect on every acknowledgment response, which carries a new cursor.
             let ack_snapshot = {
-                let badges = NAV_BADGES.read_unchecked();
+                let badges = NAV_BADGES.peek();
                 badges.observed_at.clone()
             };
             let loaded_without_notice = result.notice.is_none() && policies_result.notice.is_none();
@@ -135,10 +137,7 @@ pub fn EnvironmentsListView(initial_query: String) -> Element {
             loading.set(false);
             if loaded_without_notice {
                 if let Some(cursor) = ack_snapshot {
-                    let occurrence_ids = NAV_BADGES
-                        .read_unchecked()
-                        .environments_occurrence_ids
-                        .clone();
+                    let occurrence_ids = NAV_BADGES.peek().environments_occurrence_ids.clone();
                     acknowledge_with_cursor_and_ids("environments", cursor, occurrence_ids);
                 }
             }
@@ -488,7 +487,9 @@ struct EnvironmentTotals {
 impl EnvironmentTotals {
     fn from(items: &[EnvironmentItem]) -> Self {
         Self {
-            systems: items.iter().map(|env| env.system_count).sum(),
+            // Managed machines only, as in the approved design. External and
+            // reference registrations are not machines in an environment tier.
+            systems: items.iter().map(|env| env.health.active).sum(),
             caches: items.iter().filter(|env| env.cache.is_some()).count(),
             manual_policy: items
                 .iter()
@@ -514,7 +515,7 @@ fn StatStrip(props: StatStripProps) -> Element {
     rsx! {
         div { class: "stat-strip",
             StatCard { label: "Total tiers", value: props.total_tiers.to_string(), color: "#a78bfa" }
-            StatCard { label: "Systems", value: props.totals.systems.to_string(), color: "#60a5fa" }
+            StatCard { label: "Resources", value: props.totals.systems.to_string(), color: "#60a5fa" }
             StatCard { label: "Caches", value: cache_value, color: "#34d399" }
             StatCard { label: "Manual policy", value: props.totals.manual_policy.to_string(), color: "#fbbf24" }
             StatCard { label: "Auto-sync off", value: props.totals.auto_sync_off.to_string(), color: "#f87171" }
@@ -784,7 +785,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
     };
     let display_bundle_assignments = env.bundle_assignments.clone();
     let is_production = env.is_production.unwrap_or(false);
-    let total = env.health.total().max(env.system_count).max(1) as f64;
+    let total = env.health.total().max(1) as f64;
     let no_health = env.health.total() == 0;
     let nav = use_navigator();
     let cache_nav = nav.clone();
@@ -875,7 +876,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                 }
 
                 section { class: "panel-section",
-                    h3 { "Health" }
+                    h3 { "Health · active managed machines" }
                     div { class: "env-health-bar", style: "margin-bottom:8px;",
                         if env.health.healthy > 0 {
                             div { style: "width:{pct_f(env.health.healthy, total)}%; background:#34d399;", title: "{env.health.healthy} healthy" }
@@ -907,7 +908,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                             span { span { class: "env-health-sw", style: "background:#6b7280;" } "{env.health.offline} offline" }
                         }
                         if no_health {
-                            span { style: "color:var(--cf-text-muted); font-size:11px;", "No health data" }
+                            span { style: "color:var(--cf-text-muted); font-size:11px;", "No active managed machines" }
                         }
                         if env.cve_critical_high > 0 {
                             span { style: "margin-left:auto;",
@@ -1026,7 +1027,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
 
                 EnvPanelSystems {
                     env_name: env.name.clone(),
-                    expected_count: env.system_count,
+                    expected_count: env.health.active,
                 }
             }
 
@@ -1050,6 +1051,8 @@ fn EnvPanelSystems(props: EnvPanelSystemsProps) -> Element {
         let env_name = env_name.clone();
         async move {
             fetch_systems(&SystemsListParams {
+                tag: None,
+                management_mode: Some(crate::api::models::ManagementMode::Managed),
                 page: Some(1),
                 per_page: Some(200),
                 search: None,
@@ -1088,8 +1091,11 @@ fn EnvPanelSystems(props: EnvPanelSystemsProps) -> Element {
                                         nav.push(Route::SystemDetailView { id: system_id.clone(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() });
                                     }
                                 },
-                                span { class: "status-dot", style: "--status-color: {system_status_color(&system.health_status)};" }
+                                if system.management_mode == crate::api::models::ManagementMode::Managed {
+                                    span { class: "status-dot", style: "--status-color: {system_status_color(&system.health_status)};" }
+                                }
                                 span { class: "mono truncate", style: "flex:1; text-align:left;", "{system.hostname}" }
+                                crate::components::system::management_mode::MgmtChip { mode: system.management_mode }
                             }
                         }
                         if items.len() > 8 {
@@ -1129,6 +1135,7 @@ fn system_status_color(status: &HealthStatus) -> &'static str {
         HealthStatus::Warning => "#fbbf24",
         HealthStatus::Critical => "#f87171",
         HealthStatus::Offline => "#6b7280",
+        HealthStatus::Unknown => "#6b7280",
     }
 }
 

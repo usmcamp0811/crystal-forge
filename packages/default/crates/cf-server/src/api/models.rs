@@ -9,6 +9,7 @@
 //! - `*Detail` — full representation used in detail views
 //! - `*Count` — numeric breakdown by category
 
+use crate::models::systems::ManagementMode;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
@@ -88,20 +89,24 @@ where
 // Common Enums
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Health status derived from heartbeat recency.
+/// Reports operational health from the Systems views.
 ///
-/// Thresholds match `view_fleet_health_status`:
-/// - Healthy: last seen < 15 min ago
-/// - Warning: last seen < 1 hour ago
-/// - Critical: last seen < 4 hours ago
-/// - Offline: last seen >= 4 hours ago (or never)
+/// Managed machines use the view's heartbeat and operational classifications.
+/// Nonmanaged registrations report [`Self::Unknown`], not an offline machine.
+/// This status does not establish configuration or Current CVE evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthStatus {
+    /// Reports a managed machine in the healthy operational category.
     Healthy,
+    /// Reports a managed machine requiring operational review.
     Warning,
+    /// Reports a managed machine in the critical operational category.
     Critical,
+    /// Reports a managed machine with an absent or overdue heartbeat.
     Offline,
+    /// Reports unavailable or inapplicable runtime health, not an outage.
+    Unknown,
 }
 
 /// Deployment status relative to the latest available commit.
@@ -171,16 +176,16 @@ pub enum BuildStatus {
 /// Top-level dashboard response aggregating fleet-wide metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardSummary {
-    /// Breakdown of system count by health status.
+    /// Partitions active managed machines by health status.
     pub fleet_health: FleetHealthSummary,
 
-    /// Breakdown of system count by deployment status.
+    /// Partitions active managed machines by deployment status.
     pub deployment_status: DeploymentStatusSummary,
 
-    /// Fleet-wide CVE totals by severity.
+    /// Sums distinct Current-authorized CVEs per active managed machine.
     pub cve_summary: CveSummary,
 
-    /// Total number of registered systems.
+    /// Counts active managed machines; equals both operational partitions.
     pub total_systems: i64,
 
     /// Number of active builds (in-progress derivations).
@@ -200,7 +205,7 @@ pub struct DashboardSummary {
     pub timestamp: DateTime<Utc>,
 }
 
-/// System counts grouped by health status.
+/// Counts active managed machines grouped by health status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FleetHealthSummary {
     pub healthy: i64,
@@ -216,7 +221,7 @@ impl FleetHealthSummary {
     }
 }
 
-/// System counts grouped by deployment status.
+/// Counts active managed machines grouped by deployment status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentStatusSummary {
     pub up_to_date: i64,
@@ -351,6 +356,11 @@ pub struct ScanningScanRecordsResponse {
 /// Describes one exact persisted scan lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanningScanRecordResponse {
+    /// Contains sorted distinct active registration modes for the exact
+    /// flake/configuration. System-scoped history includes only that resource.
+    /// An empty list means no active matching registration; it is not managed.
+    #[serde(default)]
+    pub management_modes: Vec<ManagementMode>,
     /// Identifies the immutable scan lifecycle.
     pub scan_id: Uuid,
     /// Identifies the exact derivation.
@@ -362,7 +372,7 @@ pub struct ScanningScanRecordResponse {
     /// Contains the exact commit hash when available.
     pub commit_hash: Option<String>,
     /// Is true when the derivation is the exact current deployment of an
-    /// active system with matching flake and configuration identity.
+    /// active managed system with matching flake and configuration identity.
     pub is_current: bool,
     /// Is true when the derivation belongs to the position-0 commit in its
     /// flake's ready branch snapshot.
@@ -433,11 +443,16 @@ pub struct UpdateScanningArchiveResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanningQueueItemResponse {
+    /// Contains sorted distinct active registration modes for this exact
+    /// flake/configuration, or only the selected resource for system history.
+    /// An empty list means no active matching registration; it is not managed.
+    #[serde(default)]
+    pub management_modes: Vec<ManagementMode>,
     /// Identifies the exact derivation represented by the row.
     pub derivation_id: i32,
     /// Is `true` when the derivation has a built store path that can be scanned.
     pub rescan_eligible: bool,
-    /// `None` when the system is deployed but has never been scanned.
+    /// Is absent when the exact derivation has never been scanned.
     pub scan_id: Option<Uuid>,
     pub hostname: String,
     pub flake_name: Option<String>,
@@ -448,9 +463,10 @@ pub struct ScanningQueueItemResponse {
     pub critical_count: i32,
     pub high_count: i32,
     pub medium_count: i32,
-    /// Freshness class: `deployed`, `recent`, or `archived`.
+    /// Contains the scan-age class, not runtime authority: `deployed`, `recent`,
+    /// `archived`, or `never_scanned` for an unscanned deployed derivation.
     pub freshness: String,
-    /// True when this is the latest scan row for its derivation.
+    /// Is true only for an exact active managed runtime deployment.
     pub is_current: bool,
     /// True when this derivation's commit is position-0 in the ready branch
     /// snapshot for its flake.
@@ -479,6 +495,10 @@ pub struct ScanningDeployedResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanningSystemsItemResponse {
+    /// Contains this registered resource's mode. `system_id`, `hostname` and
+    /// `environment` identify the registration, not an arbitrary artifact owner.
+    #[serde(default)]
+    pub management_mode: ManagementMode,
     pub system_id: Uuid,
     pub hostname: String,
     pub flake_name: Option<String>,
@@ -793,11 +813,16 @@ pub enum SystemCveCurrentAuthorityState {
 /// exact schema-1 scan and the actor's normal scope authorization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemCveRunningTarget {
-    /// Identifies the one derivation in the registered flake/configuration.
+    /// Contains `physical_artifact` for mapped artifact provenance, not runtime
+    /// Git attribution. Older responses can omit this additive discriminator.
+    #[serde(default)]
+    pub source_kind: Option<String>,
+    /// Identifies the mapped physical artifact's actual evidence source.
     pub derivation_id: i32,
     /// Gives a generation only when the latest report binds it to the output.
     pub generation: Option<i32>,
-    /// Gives the full registered commit hash of this derivation.
+    /// Gives this artifact source's full registered commit hash. This is not a
+    /// claim that an unknown runtime runs the latest evaluated Git revision.
     pub commit_hash: String,
     /// Gives the latest report's timestamp, not an inferred deployment time.
     pub reported_at: DateTime<Utc>,
@@ -2577,6 +2602,17 @@ pub struct EvalDependencyPackageRow {
 /// Contains just enough data to render a table row or card.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemSummary {
+    /// Stores operator labels independently of management mode and agent state.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Stores optional operator context; never included in metadata audit payloads.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Identifies deployment authority independently of runtime health.
+    #[serde(default)]
+    pub management_mode: ManagementMode,
+    /// Associates an external resource with its authorized managed host.
+    pub parent_host_id: Option<Uuid>,
     pub id: Uuid,
     pub hostname: String,
     pub system_configuration_name: Option<String>,
@@ -2607,6 +2643,20 @@ pub struct SystemSummary {
 /// Full system representation for the detail view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemDetail {
+    /// Stores operator labels retained across configuration sync and conversion.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Stores optional operator context, separate from runtime observations.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Reports a mode change made by this edit only; ordinary reads omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_transition: Option<SystemManagementTransition>,
+    /// Identifies deployment authority independently of configuration evidence.
+    #[serde(default)]
+    pub management_mode: ManagementMode,
+    /// Associates an external resource with its authorized managed host.
+    pub parent_host_id: Option<Uuid>,
     /// Core identity.
     pub id: Uuid,
     pub hostname: String,
@@ -2615,7 +2665,12 @@ pub struct SystemDetail {
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub is_active: bool,
+    /// Stored concrete policy; an environment default was copied when saved.
     pub deployment_policy: String,
+    /// Declared pin (full SHA) for a managed `pinned` system, if recorded.
+    /// This is not a deployment target or an observation of running state.
+    #[serde(default)]
+    pub pinned_commit: Option<String>,
 
     /// Status indicators.
     pub health_status: HealthStatus,
@@ -2674,6 +2729,20 @@ pub struct SystemDetail {
     /// `PublicKey::fingerprint()`. `None` only if the stored key fails to parse.
     #[serde(default)]
     pub public_key_fingerprint: Option<String>,
+}
+
+/// Reports an atomic mode change without implying deployment or runtime proof.
+///
+/// Mode changes never enqueue deployment work. Conversion into managed returns
+/// `manual` policy; automatic or pinned policy requires a subsequent edit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemManagementTransition {
+    /// Identifies the prior authority re-read under the system lock.
+    pub previous_mode: ManagementMode,
+    /// Identifies the authority committed by this edit.
+    pub management_mode: ManagementMode,
+    /// Reports the committed policy, including manual initial enrollment.
+    pub deployment_policy: String,
 }
 
 /// Hardware information subset for system detail.
@@ -2847,12 +2916,12 @@ pub struct FlakeCredentialSummary {
 
 /// Per-environment system health + risk rollup.
 ///
-/// Derived from the `view_environment_rollups` view (TASK-358). All counts are
-/// authoritative and computed from the active systems assigned to the
-/// environment, mirroring the Systems surface health thresholds.
+/// Derives operational counts from active managed machines assigned to the
+/// environment. Health categories sum to `active_system_count`. Flake names
+/// describe active registrations in all management modes.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EnvironmentRollup {
-    /// Active systems included in this health rollup.
+    /// Counts active managed machines included in this health rollup.
     pub active_system_count: i64,
     /// Systems in the `healthy` state.
     pub healthy: i64,
@@ -2862,9 +2931,9 @@ pub struct EnvironmentRollup {
     pub critical: i64,
     /// Systems in the `offline` state.
     pub offline: i64,
-    /// Distinct CRITICAL+HIGH CVEs across this environment's active systems.
+    /// Sums distinct Current-authorized CRITICAL+HIGH CVEs per managed machine.
     pub cve_critical_high: i64,
-    /// Names of the flakes spanning this environment's systems.
+    /// Names flakes assigned to active registrations in all management modes.
     pub flakes: Vec<String>,
 }
 
@@ -2891,7 +2960,7 @@ pub struct EnvironmentSummary {
     pub description: Option<String>,
     pub color_hex: String,
     pub is_active: bool,
-    /// Number of systems assigned to this environment.
+    /// Counts all registrations, including inactive resources and all modes.
     pub system_count: i64,
     /// Per-environment health breakdown, CVE totals, and flakes.
     #[serde(default)]
@@ -3805,25 +3874,76 @@ pub struct CommitDiffResponse {
 /// Request payload for creating a new system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSystemRequest {
+    /// Supplies labels in every mode; whitespace and duplicates are normalized.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Supplies optional operator notes; blank text becomes absent.
+    pub description: Option<String>,
+    /// Records a managed host address without creating a transport channel.
+    pub fqdn: Option<String>,
+    /// Records existing direct/pull reachability; omission retains legacy direct.
+    #[serde(default = "default_system_reachability")]
+    pub reachability: String,
+    /// Defaults legacy registration requests to managed enrollment.
+    #[serde(default)]
+    pub management_mode: ManagementMode,
+    /// Associates external resources only; the server validates host scope.
+    pub parent_host_id: Option<Uuid>,
     pub hostname: String,
     pub system_configuration_name: Option<String>,
-    pub public_key: String,
+    /// Requires a valid enrollment key for managed mode; forbidden otherwise.
+    pub public_key: Option<String>,
     pub environment: Option<String>,
     pub flake_name: Option<String>,
+    /// `manual`, `auto_latest`, `pinned`, or [`ENVIRONMENT_DEFAULT_POLICY`].
+    /// The last is resolved to the environment's current concrete policy when
+    /// saved; only the concrete value is stored.
     pub deployment_policy: String,
 }
 
+/// Request-only deployment policy token.
+///
+/// The server copies the target environment's current `default_policy` at save
+/// time and stores that concrete value. Later environment-default changes do
+/// not update the registration; there is no live inheritance.
+pub const ENVIRONMENT_DEFAULT_POLICY: &str = "environment_default";
+
+/// Updates metadata and explicitly requested management authority atomically.
+/// Conversion into managed requires a new key and an explicit manual policy;
+/// operators can enable automatic deployment in a subsequent edit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSystemRequest {
+    /// Preserves omitted labels; null or an empty array clears all labels.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub tags: FieldUpdate<Vec<String>>,
+    /// Preserves omitted notes; null or blank text clears them.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub description: FieldUpdate<String>,
+    /// Preserves omission; null resets to legacy direct reachability.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub reachability: FieldUpdate<String>,
+    /// Preserves the stored mode when omitted; never implicitly enrolls.
+    pub management_mode: Option<ManagementMode>,
+    /// Supplies new credentials only with an explicit managed-mode request.
+    pub public_key: Option<String>,
+    /// Preserves, clears, or sets the external resource's host association.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub parent_host_id: FieldUpdate<Uuid>,
     pub hostname: String,
     /// Tri-state FQDN update. Omitting the key preserves the persisted FQDN;
     /// sending `null` (or an empty string, normalized server-side) clears it.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
     pub fqdn: FieldUpdate<String>,
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub flake_name: Option<String>,
+    /// Concrete policy or [`ENVIRONMENT_DEFAULT_POLICY`], resolved when saved.
     pub deployment_policy: String,
+    /// Full commit SHA of the registered flake to hold a `pinned` managed
+    /// system on. Omission preserves the pin; null clears it. Saving a pin
+    /// never requests or queues a deployment.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub pinned_commit: FieldUpdate<String>,
     /// Tri-state heartbeat interval in seconds. Omitting the key preserves the persisted value;
     /// sending `null` clears it (falls back to server default of 600s); sending a value sets it.
     /// Valid range: 15-900 seconds.
@@ -3866,6 +3986,10 @@ impl<T> PaginatedResponse<T> {
 /// Query parameters for the systems list endpoint.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SystemsListParams {
+    /// Matches one exact operator label before pagination and total calculation.
+    pub tag: Option<String>,
+    /// Filters authorized resources before pagination and total calculation.
+    pub management_mode: Option<ManagementMode>,
     pub page: Option<i64>,
     pub per_page: Option<i64>,
     pub search: Option<String>,
@@ -4165,11 +4289,28 @@ pub struct CveScanEligibilityResponse {
     pub hostname: Option<String>,
 }
 
+/// Reports accepted scan work with separate configuration and execution IDs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CveScanTriggerResponse {
+    /// Identifies the server-resolved exact artifact, when supplied by the server.
+    #[serde(default)]
+    pub derivation_id: Option<i32>,
+    /// Identifies the selected configuration carrier before physical reuse.
+    #[serde(default)]
+    pub configuration_derivation_id: Option<i32>,
     pub scan_id: uuid::Uuid,
     pub status: String,
     pub message: String,
+}
+
+/// Binds an optional scan-request precondition to a previously displayed artifact.
+/// The identifier is not authority: the server still resolves the authorized
+/// registration's target and rejects mismatches before admitting work.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CveScanIntent {
+    /// Expected server-resolved derivation; omission preserves older clients.
+    #[serde(default)]
+    pub expected_derivation_id: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4851,6 +4992,10 @@ pub enum AuditAction {
     UserRoleAssigned,
     UserEnvironmentMembershipUpdated,
     OidcMappingChanged,
+    /// A system or configuration registration was created.
+    SystemCreated,
+    /// Registration metadata, management authority or parent association changed.
+    SystemUpdated,
     SystemSyncRequested,
     SystemDeployRequested,
     SystemRollbackRequested,
@@ -5258,12 +5403,19 @@ mod tests {
         // Unset must be omitted entirely: serializing as `null` would be
         // interpreted as Clear by the receiving server (the original P1-3 bug).
         let request = UpdateSystemRequest {
+            tags: FieldUpdate::Unset,
+            description: FieldUpdate::Unset,
+            reachability: FieldUpdate::Unset,
+            management_mode: None,
+            public_key: None,
+            parent_host_id: FieldUpdate::Unset,
             hostname: "web01".into(),
             fqdn: FieldUpdate::Unset,
             system_configuration_name: None,
             environment: None,
             flake_name: None,
             deployment_policy: "manual".into(),
+            pinned_commit: FieldUpdate::Unset,
             heartbeat_interval_secs: FieldUpdate::Unset,
         };
 
@@ -5280,12 +5432,19 @@ mod tests {
     #[test]
     fn update_system_request_serializes_clear_heartbeat_interval_as_null() {
         let request = UpdateSystemRequest {
+            tags: FieldUpdate::Unset,
+            description: FieldUpdate::Unset,
+            reachability: FieldUpdate::Unset,
+            management_mode: None,
+            public_key: None,
+            parent_host_id: FieldUpdate::Unset,
             hostname: "web01".into(),
             fqdn: FieldUpdate::Unset,
             system_configuration_name: None,
             environment: None,
             flake_name: None,
             deployment_policy: "manual".into(),
+            pinned_commit: FieldUpdate::Unset,
             heartbeat_interval_secs: FieldUpdate::Clear,
         };
 
@@ -5300,12 +5459,19 @@ mod tests {
     #[test]
     fn update_system_request_serializes_set_heartbeat_interval_as_value() {
         let request = UpdateSystemRequest {
+            tags: FieldUpdate::Unset,
+            description: FieldUpdate::Unset,
+            reachability: FieldUpdate::Unset,
+            management_mode: None,
+            public_key: None,
+            parent_host_id: FieldUpdate::Unset,
             hostname: "web01".into(),
             fqdn: FieldUpdate::Unset,
             system_configuration_name: None,
             environment: None,
             flake_name: None,
             deployment_policy: "manual".into(),
+            pinned_commit: FieldUpdate::Unset,
             heartbeat_interval_secs: FieldUpdate::Set(120),
         };
 
@@ -5393,6 +5559,22 @@ mod tests {
     fn health_status_deserializes_snake_case() {
         let status: HealthStatus = serde_json::from_str(r#""critical""#).unwrap();
         assert_eq!(status, HealthStatus::Critical);
+    }
+
+    #[test]
+    fn health_status_unknown_round_trip_is_distinct_from_offline() {
+        assert_eq!(
+            serde_json::to_string(&HealthStatus::Unknown).unwrap(),
+            r#""unknown""#
+        );
+        assert_eq!(
+            serde_json::from_str::<HealthStatus>(r#""unknown""#).unwrap(),
+            HealthStatus::Unknown
+        );
+        assert_eq!(
+            serde_json::from_str::<HealthStatus>(r#""offline""#).unwrap(),
+            HealthStatus::Offline
+        );
     }
 
     #[test]
