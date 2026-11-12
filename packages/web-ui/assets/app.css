@@ -9112,3 +9112,4 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
 .seg .ms-opt.ms-on{--ms:var(--cf-brand-purple);color:var(--ms);background:color-mix(in oklab,var(--ms) 16%,transparent);box-shadow:0 0 0 1px var(--ms) inset;font-weight:600}
 .seg .ms-opt.ms-on[data-k="critical"]{--ms:#f87171}.seg .ms-opt.ms-on[data-k="high"]{--ms:#fbbf24}.seg .ms-opt.ms-on[data-k="medium"]{--ms:#60a5fa}.seg .ms-opt.ms-on[data-k="low"]{--ms:#9ca3af}
 .seg .ms-opt.ms-on[data-k="available"]{--ms:#34d399}.seg .ms-opt.ms-on[data-k="exploited"]{--ms:#f87171}.seg .ms-opt.ms-on[data-k="outstanding"]{--ms:#f87171}.seg .ms-opt.ms-on[data-k="scheduled"]{--ms:#60a5fa}.seg .ms-opt.ms-on[data-k="accepted"]{--ms:#34d399}
+.cve-invalid-filter{align-items:center;justify-content:space-between;gap:12px}

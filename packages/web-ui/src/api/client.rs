@@ -833,10 +833,27 @@ pub async fn download_cve_export(
         .map_err(|_| ApiClientError::Network("anchor creation failed".into()))?;
     anchor.set_href(&url);
     anchor.set_download(filename);
+    let _ = anchor.set_attribute("style", "display:none");
+    // COMPATIBILITY: Firefox ignores `click()` on an anchor that is not in the
+    // document, so attach it for the click and remove it afterwards.
+    let body = document
+        .body()
+        .ok_or_else(|| ApiClientError::Network("no document body".into()))?;
+    body.append_child(&anchor).map_err(network)?;
     anchor.click();
-    let _ = web_sys::Url::revoke_object_url(&url);
+    let _ = body.remove_child(&anchor);
+    // The browser reads the blob URL asynchronously after `click()`. Revoking
+    // it synchronously can cancel the download, so release it after a delay
+    // that is far longer than the time a browser needs to start a download.
+    wasm_bindgen_futures::spawn_local(async move {
+        gloo_timers::future::TimeoutFuture::new(OBJECT_URL_REVOKE_DELAY_MS).await;
+        let _ = web_sys::Url::revoke_object_url(&url);
+    });
     Ok(())
 }
+
+/// Delay before an export object URL is revoked (60 s).
+const OBJECT_URL_REVOKE_DELAY_MS: u32 = 60_000;
 
 /// Fetch a paginated list of systems.
 pub async fn fetch_systems(

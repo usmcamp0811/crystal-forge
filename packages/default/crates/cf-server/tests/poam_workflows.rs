@@ -8006,7 +8006,174 @@ async fn cve_dashboard_reads_scope_before_aggregation_and_count_distinct_hosts(p
         .unwrap();
         assert!(export.contains(package));
         assert!(!export.contains(hidden_package));
+
+        // TASK-521: environment lists are intersected with the caller scope on
+        // every endpoint and in every export format, for Viewer and Operator.
+        let get = |path: String| {
+            http_request(
+                &client,
+                reqwest::Method::GET,
+                format!("{base}/api/v1/{path}"),
+                token,
+                None,
+            )
+            .send()
+        };
+        let both = format!("{development},{production}");
+        let pairs_total = |body: serde_json::Value| body["total"].as_i64().unwrap();
+        let visible_total = pairs_total(
+            get(format!(
+                "cves/inventory/pairs?limit=200&environment_id={development}"
+            ))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap(),
+        );
+        assert!(visible_total > 0);
+        let both_pairs: serde_json::Value = get(format!(
+            "cves/inventory/pairs?limit=200&environment_id={both}"
+        ))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(
+            pairs_total(both_pairs.clone()),
+            visible_total,
+            "hidden environment adds nothing"
+        );
+        assert!(!both_pairs.to_string().contains(hidden_package));
+        let hidden_only: serde_json::Value = get(format!(
+            "cves/inventory/pairs?limit=200&environment_id={production}"
+        ))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(
+            pairs_total(hidden_only),
+            0,
+            "hidden-only list is empty, never all scope"
+        );
+        let groups: serde_json::Value = get(format!(
+            "cves/inventory/groups?group_by=environment&environment_id={both}"
+        ))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(groups["total"], 1);
+        assert_eq!(groups["items"][0]["group_id"], development.to_string());
+        let members: serde_json::Value = get(format!(
+            "cves/inventory/members?group_by=environment&group_id={production}&environment_id={both}"
+        ))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(members["total"], 0, "hidden group membership stays empty");
+        let csv = get(format!("cves/export?environment_id={both}"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(csv.lines().count() as i64 - 1, visible_total);
+        let empty_csv = get(format!("cves/export?environment_id={production}"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(empty_csv.lines().count(), 1, "header only");
+        let oscal = get(format!(
+            "cves/export?format=oscal-json&environment_id={both}"
+        ))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+        assert!(oscal.contains("Development"));
+        assert!(
+            !oscal.contains("Production"),
+            "unauthorized environment name is not disclosed"
+        );
+        assert!(!oscal.contains(hidden_package));
+        let xml = get(format!(
+            "cves/export?format=oscal-xml&environment_id={both}"
+        ))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+        assert_eq!(xml.matches("<finding ").count() as i64, visible_total);
+        let excel = get(format!(
+            "cves/export?format=excel&environment_id={production}"
+        ))
+        .await
+        .unwrap();
+        assert_eq!(excel.status(), reqwest::StatusCode::OK);
+        // Multiple filter groups at once still agree between page and export.
+        let combined = format!(
+            "severity=critical,high,medium,low&fix_status=available,pending&environment_id={both}"
+        );
+        let combined_total = pairs_total(
+            get(format!("cves/inventory/pairs?limit=200&{combined}"))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap(),
+        );
+        let combined_csv = get(format!("cves/export?{combined}"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(combined_csv.lines().count() as i64 - 1, combined_total);
     }
+
+    // An Admin naming both environments sees both.
+    let admin_both: serde_json::Value = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/api/v1/cves/inventory/groups?group_by=environment&environment_id={development},{production}"),
+        &admin_token,
+        None,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(admin_both["total"], 2);
+    let admin_export = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!(
+            "{base}/api/v1/cves/export?format=oscal-json&environment_id={development},{production}"
+        ),
+        &admin_token,
+        None,
+    )
+    .send()
+    .await
+    .unwrap()
+    .text()
+    .await
+    .unwrap();
+    assert!(admin_export.contains(hidden_package));
+    assert!(admin_export.contains("Development, Production"));
 
     let admin_rows: serde_json::Value = http_request(
         &client,
@@ -13020,6 +13187,18 @@ async fn poam_http_server(pool: PgPool) -> String {
             get(cve_handlers::list_package_names),
         )
         .route("/api/v1/cves/export", get(cve_handlers::export_cves))
+        .route(
+            "/api/v1/cves/inventory/groups",
+            get(cve_handlers::list_inventory_groups),
+        )
+        .route(
+            "/api/v1/cves/inventory/members",
+            get(cve_handlers::list_inventory_members),
+        )
+        .route(
+            "/api/v1/cves/inventory/pairs",
+            get(cve_handlers::list_inventory_pairs),
+        )
         .route("/api/v1/cves/:cve_id", get(cve_handlers::get_cve_detail))
         .route(
             "/api/v1/cves/:cve_id/systems",

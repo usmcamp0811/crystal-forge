@@ -327,13 +327,46 @@ fn filter_param(values: &[String]) -> Option<String> {
     (!values.is_empty()).then(|| values.join(","))
 }
 
-/// Reads the `environment_id` list. Malformed IDs are dropped, as the
-/// single-value parameter dropped an unparsable ID before multi-select.
-fn environment_ids_from_query() -> Vec<crate::api::models::Uuid> {
-    split_filter(query_param("environment_id"))
+/// Parses an `environment_id` list.
+///
+/// # Errors
+///
+/// Returns the raw value when any listed ID is not a UUID.
+///
+/// SECURITY: A malformed ID is never dropped. Dropping every ID would turn a
+/// restrictive URL filter into the unrestricted "all environments" selection.
+fn parse_environment_ids(raw: Option<String>) -> Result<Vec<crate::api::models::Uuid>, String> {
+    let values = split_filter(raw.clone());
+    values
         .iter()
-        .filter_map(|id| id.parse().ok())
+        .map(|id| id.parse().map_err(|_| raw.clone().unwrap_or_default()))
         .collect()
+}
+
+/// Reads the URL environment filter as `(ids, invalid_raw_value)`. When the
+/// value is invalid, `ids` is empty and the view shows an invalid-filter state
+/// instead of findings.
+fn environment_filter_from_query() -> (Vec<crate::api::models::Uuid>, Option<String>) {
+    match parse_environment_ids(query_param("environment_id")) {
+        Ok(ids) => (ids, None),
+        Err(raw) => (Vec::new(), Some(raw)),
+    }
+}
+
+/// Returns the `environment_id` URL value. An invalid value stays in the URL
+/// unchanged so a reload or history step keeps the invalid-filter state.
+fn environment_url_value(
+    ids: &[crate::api::models::Uuid],
+    invalid: Option<&str>,
+) -> Option<String> {
+    invalid.map(str::to_owned).or_else(|| {
+        (!ids.is_empty()).then(|| {
+            ids.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+    })
 }
 
 /// Builds the server filters for the current view selection.
@@ -485,7 +518,7 @@ fn sync_cve_url_query(
     focus_cve: Option<&str>,
     sort: &str,
     view: &str,
-    environment_ids: &[crate::api::models::Uuid],
+    environment: Option<&str>,
     selection: Option<&ExactCveSelection>,
     push_history: bool,
 ) {
@@ -525,9 +558,8 @@ fn sync_cve_url_query(
     if view != "grouped" {
         push(&mut parts, "view", view);
     }
-    if !environment_ids.is_empty() {
-        let ids: Vec<String> = environment_ids.iter().map(ToString::to_string).collect();
-        push(&mut parts, "environment_id", &ids.join(","));
+    if let Some(environment) = environment {
+        push(&mut parts, "environment_id", environment);
     }
     if let Some(selection) = selection {
         push(&mut parts, "cve", &selection.cve_id);
@@ -577,7 +609,7 @@ fn sync_cve_url_state(
         focus_cve.as_deref(),
         &sort,
         &view,
-        &environment_ids,
+        environment_url_value(&environment_ids, None).as_deref(),
         selection,
         push_history,
     );
@@ -613,7 +645,7 @@ pub fn CvesView(query: String) -> Element {
         }
     });
     let initial_selection = selection_from_query();
-    let initial_environment = environment_ids_from_query();
+    let (initial_environment, initial_environment_error) = environment_filter_from_query();
 
     // Filter state
     let mut severity_filter = use_signal(move || initial_severity.clone());
@@ -626,6 +658,9 @@ pub fn CvesView(query: String) -> Element {
     let mut sort_by = use_signal(move || initial_sort.clone());
     let mut view_mode = use_signal(move || initial_view.clone()); // "flat" or "grouped"
     let mut environment_filter = use_signal(move || initial_environment.clone());
+    // Holds a malformed URL `environment_id` value. While set, the view shows
+    // an invalid-filter state and does not show or export findings.
+    let mut environment_filter_error = use_signal(move || initial_environment_error.clone());
     let mut selected_cve = use_signal(move || initial_selection.clone());
     let mut seen_state = use_signal(|| None::<CveSeenState>);
     let mut seen_clock = use_signal(Utc::now);
@@ -701,7 +736,8 @@ pub fn CvesView(query: String) -> Element {
             focus_cve().as_deref(),
             &sort,
             &view,
-            &environment_filter(),
+            environment_url_value(&environment_filter(), environment_filter_error().as_deref())
+                .as_deref(),
             selection.as_ref(),
             false,
         );
@@ -720,7 +756,9 @@ pub fn CvesView(query: String) -> Element {
                     query_param("triage_status").or_else(|| query_param("triage")),
                 ));
                 package_filter.set(query_param("package"));
-                environment_filter.set(environment_ids_from_query());
+                let (ids, invalid) = environment_filter_from_query();
+                environment_filter.set(ids);
+                environment_filter_error.set(invalid);
                 sort_by.set(query_param("sort").unwrap_or_else(|| "severity".into()));
                 view_mode.set(query_param("view").unwrap_or_else(|| "grouped".into()));
                 search_query.set(query_param("search").unwrap_or_default());
@@ -982,6 +1020,7 @@ pub fn CvesView(query: String) -> Element {
                         button {
                             class: "btn btn-ghost focus-ring",
                             aria_expanded: "{export_open()}",
+                            disabled: environment_filter_error().is_some(),
                             onclick: move |_| export_open.set(!export_open()),
                             Icon { name: IconName::Download, size: 14 }
                             " Export {export_count} "
@@ -1227,6 +1266,7 @@ pub fn CvesView(query: String) -> Element {
                         .unwrap_or_default(),
                     selected: environment_filter().iter().map(ToString::to_string).collect::<Vec<_>>(),
                     on_change: move |values: Vec<String>| {
+                        environment_filter_error.set(None);
                         environment_filter.set(values.iter().filter_map(|id| id.parse().ok()).collect());
                     },
                 }
@@ -1285,7 +1325,21 @@ pub fn CvesView(query: String) -> Element {
             if let Some(Err(error)) = environments.read().as_ref() {
                 div { class: "page-subtitle", "Environment choices unavailable: {error}" }
             }
-            if matches!(view_mode().as_str(), "environment" | "host") {
+            if let Some(invalid) = environment_filter_error() {
+                div { class: "sd-callout sd-callout-warn cve-invalid-filter", role: "alert",
+                    span {
+                        "The environment filter in this link is not valid: "
+                        code { "{invalid}" }
+                        ". No findings are shown and export is unavailable."
+                    }
+                    button {
+                        r#type: "button",
+                        class: "btn btn-ghost xs focus-ring",
+                        onclick: move |_| environment_filter_error.set(None),
+                        "Clear environment filter"
+                    }
+                }
+            } else if matches!(view_mode().as_str(), "environment" | "host") {
                 div {
                     key: "{severity_filter():?}|{fix_status_filter():?}|{triage_status_filter():?}|{package_filter():?}|{search_query()}|{view_mode()}|{environment_filter():?}",
                     style: "display: flex; flex-direction: column; gap: 10px;",
@@ -4993,6 +5047,38 @@ mod tests {
         assert_eq!(filters.fix_status, None);
         assert_eq!(filters.search, None);
         assert_eq!(filters.environment_ids, vec![Uuid::from_u128(5)]);
+    }
+
+    #[test]
+    fn malformed_environment_ids_never_widen_to_all_environments() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        assert_eq!(
+            super::parse_environment_ids(Some(format!("{a},{b}"))),
+            Ok(vec![a, b])
+        );
+        assert_eq!(super::parse_environment_ids(None), Ok(Vec::new()));
+        // Mixed and all-invalid lists are rejected as a whole; the valid ID in
+        // a mixed list is not silently used alone either.
+        let mixed = format!("{a},not-a-uuid");
+        assert_eq!(
+            super::parse_environment_ids(Some(mixed.clone())),
+            Err(mixed.clone())
+        );
+        assert_eq!(
+            super::parse_environment_ids(Some("invalid".into())),
+            Err("invalid".into())
+        );
+        // The invalid value stays in the URL instead of being removed.
+        assert_eq!(
+            super::environment_url_value(&[], Some(&mixed)).as_deref(),
+            Some(mixed.as_str())
+        );
+        assert_eq!(super::environment_url_value(&[], None), None);
+        assert_eq!(
+            super::environment_url_value(&[a, b], None),
+            Some(format!("{a},{b}"))
+        );
     }
 
     #[test]

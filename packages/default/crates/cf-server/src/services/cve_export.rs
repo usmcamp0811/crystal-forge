@@ -105,10 +105,11 @@ pub fn encode(
     match format {
         CveExportFormat::Csv => Ok(csv(rows).into_bytes()),
         CveExportFormat::Excel => xlsx(rows),
-        CveExportFormat::OscalJson => {
-            Ok(serde_json::to_string_pretty(&oscal_json(rows, context))?.into_bytes())
-        }
-        CveExportFormat::OscalXml => oscal_xml(rows, context),
+        CveExportFormat::OscalJson => Ok(serde_json::to_string_pretty(&oscal_json(
+            &oscal_document(rows, context),
+        ))?
+        .into_bytes()),
+        CveExportFormat::OscalXml => oscal_xml(&oscal_document(rows, context)),
     }
 }
 
@@ -190,6 +191,32 @@ fn title(context: &ExportContext<'_>) -> String {
     }
 }
 
+/// Collapses whitespace so a value fits the single-line OSCAL `string` and
+/// `markup-line` types (pattern `^\S(.*\S)?$`, no line breaks).
+fn single_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Text of the back-matter resource that `import-ap` references.
+///
+/// OSCAL assessment results MUST reference an assessment plan. Crystal Forge
+/// has no OSCAL assessment-plan document for vulnerability scans. The
+/// reference resolves to this resource, which states that fact and the
+/// method, instead of naming a plan that does not exist.
+const NO_PLAN_TITLE: &str = "Crystal Forge vulnerability scan method";
+const NO_PLAN_DESCRIPTION: &str = "Crystal Forge does not issue an OSCAL assessment plan for \
+    vulnerability scans. Findings are package vulnerabilities that a scanner observed in deployed \
+    or scheduled NixOS configurations, filtered by the export request. This resource is not an \
+    assessment plan.";
+/// Reviewed control: NIST SP 800-53 RA-5 (Vulnerability Monitoring and
+/// Scanning). The OSCAL XML schema requires each control selection to name
+/// `include-all` or explicit controls; `include-all` would claim that every
+/// control was reviewed. A vulnerability scan is evidence for RA-5 only.
+const REVIEWED_CONTROL_ID: &str = "ra-5";
+const REVIEWED_CONTROLS_DESCRIPTION: &str = "Package vulnerability scanning evidence for RA-5. \
+    No other control and no control implementation is assessed.";
+const RESULT_DESCRIPTION: &str = "Filtered Crystal Forge CVE inventory.";
+
 /// One OSCAL observation and finding pair for a CVE/package row.
 struct OscalItem {
     observation_uuid: Uuid,
@@ -198,13 +225,30 @@ struct OscalItem {
     description: String,
     props: Vec<(&'static str, String)>,
     cve_id: String,
-    // OSCAL target status. Accepted risk is `satisfied`; every other triage
-    // status, including scheduled remediation, is `not-satisfied`.
-    state: &'static str,
 }
 
-fn oscal_items(rows: &[CveListItem]) -> Vec<OscalItem> {
-    rows.iter()
+/// The complete OSCAL document. Both encodings render this one value, so the
+/// JSON and XML exports carry the same identities and content.
+struct OscalDocument {
+    uuid: Uuid,
+    result_uuid: Uuid,
+    plan_resource_uuid: Uuid,
+    title: String,
+    generated_at: String,
+    version: String,
+    items: Vec<OscalItem>,
+}
+
+// INVARIANT: Every finding target status is `not-satisfied`. A finding is an
+// observed vulnerable package. Triage, including an accepted risk, does not
+// remove the vulnerability, so it is reported as the `triage-status` property
+// and never as `satisfied`. The target ID is the CVE ID; the objective it
+// names is "no unremediated instance of this CVE in this package".
+const TARGET_STATE: &str = "not-satisfied";
+
+fn oscal_document(rows: &[CveListItem], context: &ExportContext<'_>) -> OscalDocument {
+    let items = rows
+        .iter()
         .map(|cve| {
             let package = cve.package_name.clone().unwrap_or_default();
             let mut props = vec![
@@ -237,66 +281,79 @@ fn oscal_items(rows: &[CveListItem]) -> Vec<OscalItem> {
             if cve.exploited {
                 props.push(("known-exploited", "true".to_owned()));
             }
-            // OSCAL property values must be non-empty.
-            props.retain(|(_, value)| !value.is_empty());
+            let props = props
+                .into_iter()
+                .map(|(name, value)| (name, single_line(&value)))
+                .filter(|(_, value)| !value.is_empty())
+                .collect();
             let description = if cve.title.trim().is_empty() {
                 cve.cve_id.clone()
             } else {
-                cve.title.clone()
+                cve.title.trim().to_owned()
             };
             OscalItem {
                 observation_uuid: Uuid::new_v4(),
                 finding_uuid: Uuid::new_v4(),
-                title: if package.is_empty() {
+                title: single_line(&if package.is_empty() {
                     cve.cve_id.clone()
                 } else {
                     format!("{} in {package}", cve.cve_id)
-                },
+                }),
                 description,
                 props,
                 cve_id: cve.cve_id.clone(),
-                state: if cve.triage_status == "accepted" {
-                    "satisfied"
-                } else {
-                    "not-satisfied"
-                },
             }
         })
-        .collect()
+        .collect();
+    OscalDocument {
+        uuid: Uuid::new_v4(),
+        result_uuid: Uuid::new_v4(),
+        plan_resource_uuid: Uuid::new_v4(),
+        title: single_line(&title(context)),
+        generated_at: context.generated_at.to_rfc3339(),
+        version: context.generated_at.format("%Y-%m-%d").to_string(),
+        items,
+    }
 }
 
-fn oscal_json(rows: &[CveListItem], context: &ExportContext<'_>) -> Value {
-    let now = context.generated_at.to_rfc3339();
-    let items = oscal_items(rows);
-    let prop_json = |props: &[(&str, String)]| -> Vec<Value> {
+fn oscal_json(doc: &OscalDocument) -> Value {
+    let props = |props: &[(&str, String)]| -> Vec<Value> {
         props
             .iter()
             .map(|(name, value)| json!({"name": name, "ns": CF_NS, "value": value}))
             .collect()
     };
     let mut result = json!({
-        "uuid": Uuid::new_v4(),
+        "uuid": doc.result_uuid,
         "title": "Fleet vulnerability scan",
-        "description": "Filtered Crystal Forge CVE inventory.",
-        "start": now,
+        "description": RESULT_DESCRIPTION,
+        "start": doc.generated_at,
+        "reviewed-controls": {
+            "control-selections": [{
+                "description": REVIEWED_CONTROLS_DESCRIPTION,
+                "include-controls": [{"control-id": REVIEWED_CONTROL_ID}],
+            }],
+        },
     });
     // OSCAL arrays require at least one member; omit them for an empty result.
-    if !items.is_empty() {
-        result["observations"] = items
+    if !doc.items.is_empty() {
+        result["observations"] = doc
+            .items
             .iter()
             .map(|item| {
                 json!({
                     "uuid": item.observation_uuid,
                     "title": item.title,
                     "description": item.description,
-                    "props": prop_json(&item.props),
+                    "props": props(&item.props),
                     "methods": ["TEST"],
                     "types": ["finding"],
-                    "collected": now,
+                    "collected": doc.generated_at,
                 })
             })
             .collect();
-        result["findings"] = items
+        result["findings"] = doc
+            .items
             .iter()
             .map(|item| {
                 json!({
@@ -306,7 +363,7 @@ fn oscal_json(rows: &[CveListItem], context: &ExportContext<'_>) -> Value {
                     "target": {
                         "type": "objective-id",
                         "target-id": item.cve_id,
-                        "status": {"state": item.state},
+                        "status": {"state": TARGET_STATE},
                     },
                     "related-observations": [{"observation-uuid": item.observation_uuid}],
                 })
@@ -315,50 +372,66 @@ fn oscal_json(rows: &[CveListItem], context: &ExportContext<'_>) -> Value {
     }
     json!({
         "assessment-results": {
-            "uuid": Uuid::new_v4(),
+            "uuid": doc.uuid,
             "metadata": {
-                "title": title(context),
-                "last-modified": now,
-                "version": context.generated_at.format("%Y-%m-%d").to_string(),
+                "title": doc.title,
+                "last-modified": doc.generated_at,
+                "version": doc.version,
                 "oscal-version": "1.1.2",
             },
-            "import-ap": {"href": "#crystal-forge-scan-policy"},
+            "import-ap": {"href": format!("#{}", doc.plan_resource_uuid)},
             "results": [result],
+            "back-matter": {
+                "resources": [{
+                    "uuid": doc.plan_resource_uuid,
+                    "title": NO_PLAN_TITLE,
+                    "description": NO_PLAN_DESCRIPTION,
+                }],
+            },
         }
     })
 }
 
-fn oscal_xml(rows: &[CveListItem], context: &ExportContext<'_>) -> Result<Vec<u8>> {
-    let now = context.generated_at.to_rfc3339();
-    let items = oscal_items(rows);
+fn oscal_xml(doc: &OscalDocument) -> Result<Vec<u8>> {
     let mut xml = Writer::new(Vec::new());
     xml.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))?;
-    let mut root = BytesStart::new("assessment-results");
-    root.push_attribute(("xmlns", OSCAL_NS));
-    root.push_attribute(("uuid", Uuid::new_v4().to_string().as_str()));
-    xml.write_event(Event::Start(root))?;
-    start(&mut xml, "metadata", &[])?;
-    text(&mut xml, "title", &title(context))?;
-    text(&mut xml, "last-modified", &now)?;
-    text(
+    let document_uuid = doc.uuid.to_string();
+    start(
         &mut xml,
-        "version",
-        &context.generated_at.format("%Y-%m-%d").to_string(),
+        "assessment-results",
+        &[("xmlns", OSCAL_NS), ("uuid", &document_uuid)],
     )?;
+    start(&mut xml, "metadata", &[])?;
+    text(&mut xml, "title", &doc.title)?;
+    text(&mut xml, "last-modified", &doc.generated_at)?;
+    text(&mut xml, "version", &doc.version)?;
     text(&mut xml, "oscal-version", "1.1.2")?;
     end(&mut xml, "metadata")?;
     empty(
         &mut xml,
         "import-ap",
-        &[("href", "#crystal-forge-scan-policy")],
+        &[("href", &format!("#{}", doc.plan_resource_uuid))],
     )?;
-    start(&mut xml, "result", &[("uuid", &Uuid::new_v4().to_string())])?;
+    // INVARIANT: OSCAL XML element order is schema-defined (XSD sequences).
+    start(
+        &mut xml,
+        "result",
+        &[("uuid", &doc.result_uuid.to_string())],
+    )?;
     text(&mut xml, "title", "Fleet vulnerability scan")?;
-    paragraph(&mut xml, "Filtered Crystal Forge CVE inventory.")?;
-    text(&mut xml, "start", &now)?;
-    // INVARIANT: OSCAL XML element order is schema-defined. Observations
-    // precede findings, and child elements follow the OSCAL model order.
-    for item in &items {
+    paragraph(&mut xml, RESULT_DESCRIPTION)?;
+    text(&mut xml, "start", &doc.generated_at)?;
+    start(&mut xml, "reviewed-controls", &[])?;
+    start(&mut xml, "control-selection", &[])?;
+    paragraph(&mut xml, REVIEWED_CONTROLS_DESCRIPTION)?;
+    empty(
+        &mut xml,
+        "include-control",
+        &[("control-id", REVIEWED_CONTROL_ID)],
+    )?;
+    end(&mut xml, "control-selection")?;
+    end(&mut xml, "reviewed-controls")?;
+    for item in &doc.items {
         start(
             &mut xml,
             "observation",
@@ -375,10 +448,10 @@ fn oscal_xml(rows: &[CveListItem], context: &ExportContext<'_>) -> Result<Vec<u8
         }
         text(&mut xml, "method", "TEST")?;
         text(&mut xml, "type", "finding")?;
-        text(&mut xml, "collected", &now)?;
+        text(&mut xml, "collected", &doc.generated_at)?;
         end(&mut xml, "observation")?;
     }
-    for item in &items {
+    for item in &doc.items {
         start(
             &mut xml,
             "finding",
@@ -391,7 +464,7 @@ fn oscal_xml(rows: &[CveListItem], context: &ExportContext<'_>) -> Result<Vec<u8
             "target",
             &[("type", "objective-id"), ("target-id", &item.cve_id)],
         )?;
-        empty(&mut xml, "status", &[("state", item.state)])?;
+        empty(&mut xml, "status", &[("state", TARGET_STATE)])?;
         end(&mut xml, "target")?;
         empty(
             &mut xml,
@@ -401,6 +474,16 @@ fn oscal_xml(rows: &[CveListItem], context: &ExportContext<'_>) -> Result<Vec<u8
         end(&mut xml, "finding")?;
     }
     end(&mut xml, "result")?;
+    start(&mut xml, "back-matter", &[])?;
+    start(
+        &mut xml,
+        "resource",
+        &[("uuid", &doc.plan_resource_uuid.to_string())],
+    )?;
+    text(&mut xml, "title", NO_PLAN_TITLE)?;
+    paragraph(&mut xml, NO_PLAN_DESCRIPTION)?;
+    end(&mut xml, "resource")?;
+    end(&mut xml, "back-matter")?;
     end(&mut xml, "assessment-results")?;
     Ok(xml.into_inner())
 }
@@ -542,7 +625,8 @@ mod tests {
         let findings = result["findings"].as_array().unwrap();
         assert_eq!(findings.len(), 2);
         assert_eq!(findings[0]["target"]["status"]["state"], "not-satisfied");
-        assert_eq!(findings[1]["target"]["status"]["state"], "satisfied");
+        // Accepted risk does not satisfy the objective; triage is a property.
+        assert_eq!(findings[1]["target"]["status"]["state"], "not-satisfied");
         assert_eq!(
             findings[1]["related-observations"][0]["observation-uuid"],
             result["observations"][1]["uuid"]
@@ -570,5 +654,110 @@ mod tests {
         assert_eq!(out.matches("<finding ").count(), 1);
         assert!(out.contains("a&lt;b"));
         assert!(!out.contains("a<b"));
+    }
+
+    #[test]
+    fn oscal_import_ap_resolves_to_a_back_matter_resource() {
+        let rows = [row("CVE-2026-0001", "openssl", "outstanding")];
+        let doc = oscal_document(&rows, &context(&[]));
+        let json = oscal_json(&doc);
+        let ar = &json["assessment-results"];
+        let href = ar["import-ap"]["href"].as_str().unwrap();
+        let resource = &ar["back-matter"]["resources"][0];
+        assert_eq!(href, format!("#{}", resource["uuid"].as_str().unwrap()));
+        assert_eq!(resource["title"], NO_PLAN_TITLE);
+        let xml = String::from_utf8(oscal_xml(&doc).unwrap()).unwrap();
+        assert!(xml.contains(&format!(
+            "<import-ap href=\"#{}\"/>",
+            doc.plan_resource_uuid
+        )));
+        assert!(xml.contains(&format!("<resource uuid=\"{}\">", doc.plan_resource_uuid)));
+        assert!(
+            ar["results"][0]["reviewed-controls"]["control-selections"][0]["description"]
+                .is_string()
+        );
+    }
+
+    #[test]
+    fn oscal_json_and_xml_encode_the_same_document() {
+        let rows = [
+            row("CVE-2026-0001", "openssl", "outstanding"),
+            row("CVE-2026-0002", "curl", "accepted"),
+        ];
+        let doc = oscal_document(&rows, &context(&[]));
+        let json = serde_json::to_string(&oscal_json(&doc)).unwrap();
+        let xml = String::from_utf8(oscal_xml(&doc).unwrap()).unwrap();
+        for id in [doc.uuid, doc.result_uuid, doc.plan_resource_uuid]
+            .into_iter()
+            .chain(
+                doc.items
+                    .iter()
+                    .flat_map(|i| [i.observation_uuid, i.finding_uuid]),
+            )
+        {
+            let id = id.to_string();
+            assert!(json.contains(&id) && xml.contains(&id), "{id} in both");
+        }
+        for item in &doc.items {
+            for (name, value) in &item.props {
+                assert!(json.contains(&format!("\"value\":\"{value}\"")));
+                assert!(xml.contains(&format!("name=\"{name}\"")));
+            }
+        }
+        assert_eq!(
+            json.matches("\"target-id\"").count(),
+            xml.matches("target-id=").count()
+        );
+    }
+
+    #[test]
+    fn oscal_titles_and_property_values_are_single_line() {
+        let mut multi = row("CVE-2026-0003", " zlib\n", "outstanding");
+        multi.title = "line one\nline two".into();
+        multi.cvss_vector = Some("  AV:N/AC:L \n".into());
+        let doc = oscal_document(&[multi], &context(&[]));
+        let item = &doc.items[0];
+        assert_eq!(item.title, "CVE-2026-0003 in zlib");
+        assert!(
+            item.props
+                .iter()
+                .all(|(_, v)| !v.contains('\n') && v.trim() == v)
+        );
+        assert!(item.props.contains(&("cvss-vector", "AV:N/AC:L".into())));
+        // Multi-line text is allowed only in markup-multiline descriptions.
+        assert_eq!(item.description, "line one\nline two");
+    }
+
+    /// Writes empty, single-row, and multi-row OSCAL samples to
+    /// `CF_OSCAL_SAMPLE_DIR` for validation against the official NIST
+    /// schemas. Does nothing when the variable is unset. See the CVE export
+    /// section of `docs/knowledge/api/fleet-cve-triage-api.md`.
+    #[test]
+    fn write_oscal_samples_for_schema_validation() {
+        let Ok(dir) = std::env::var("CF_OSCAL_SAMPLE_DIR") else {
+            return;
+        };
+        let mut multiline = row("CVE-2026-0004", "glibc", "scheduled");
+        multiline.title = "First line.\nSecond line with <tag> & \"quotes\".".into();
+        multiline.exploited = false;
+        multiline.fixed_version = None;
+        let many = [
+            row("CVE-2026-0001", "openssl", "outstanding"),
+            row("CVE-2026-0002", "curl", "accepted"),
+            row("CVE-2026-0003", "zlib", "inventory_only"),
+            multiline,
+        ];
+        let envs = vec!["dev".to_string(), "prod".to_string()];
+        let cases: [(&str, &[CveListItem]); 3] =
+            [("empty", &[]), ("single", &many[..1]), ("multi", &many)];
+        for (name, rows) in cases {
+            for (format, ext) in [
+                (CveExportFormat::OscalJson, "json"),
+                (CveExportFormat::OscalXml, "xml"),
+            ] {
+                let bytes = encode(format, rows, &context(&envs)).unwrap();
+                std::fs::write(format!("{dir}/{name}.{ext}"), bytes).unwrap();
+            }
+        }
     }
 }

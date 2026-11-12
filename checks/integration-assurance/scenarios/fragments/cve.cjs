@@ -138,6 +138,49 @@ async function run(ctx, phase) {
   });
 
   if (phase === "scan") return;
+  // TASK-521 (design bc30ef57): multi-select filters, a scope-preserving
+  // invalid environment link, and the four export formats over real findings.
+  await ctx.step("fleet CVE filters and every export format carry the real finding", async () => {
+    const fs = require("fs");
+    const exportButton = page.locator(".cve-export > button");
+    await expect(exportButton).toHaveText(/Export \d+/);
+    const count = Number((await exportButton.innerText()).match(/Export (\d+)/)[1]);
+    expect(count).toBeGreaterThan(0);
+    // Selecting every severity is a multi-value filter equal to no filter.
+    for (const severity of ["critical", "high", "medium", "low"]) {
+      await page.locator(`.seg .ms-opt[data-k="${severity}"]`).click();
+    }
+    await expect(page).toHaveURL(/severity=critical(%2C|,)high(%2C|,)medium(%2C|,)low/);
+    await page.locator(`.seg:has(.ms-opt[data-k="critical"]) > button`).first().click();
+    await expect(exportButton).toHaveText(`Export ${count}`, { useInnerText: true });
+    for (const format of ["oscal-json", "excel", "csv", "oscal-xml"]) {
+      await exportButton.click();
+      const [download] = await Promise.all([
+        page.waitForEvent("download"),
+        page.locator(`.cve-export [data-format="${format}"]`).click(),
+      ]);
+      const bytes = fs.readFileSync(await download.path());
+      if (format === "excel") {
+        expect(bytes.subarray(0, 2).toString()).toBe("PK");
+        continue;
+      }
+      const text = bytes.toString("utf8");
+      expect(text).toContain(f.cveId);
+      if (format === "csv") expect(text.trim().split("\n").length - 1).toBe(count);
+      if (format === "oscal-json") {
+        const ar = JSON.parse(text)["assessment-results"];
+        expect(ar.results[0].findings.length).toBe(count);
+        expect(ar["import-ap"].href).toBe(`#${ar["back-matter"].resources[0].uuid}`);
+      }
+      if (format === "oscal-xml") expect(text.match(/<finding /g).length).toBe(count);
+    }
+    await page.goto(ctx.url("/cves?environment_id=not-a-uuid"));
+    await expect(page.getByRole("alert").filter({ hasText: "environment filter in this link is not valid" }))
+      .toBeVisible();
+    await expect(exportButton).toBeDisabled();
+    await expect(page.getByTestId("cve-row")).toHaveCount(0);
+    await page.goto(ctx.url("/cves"));
+  });
   await ctx.step("fleet finding navigation returns to the exact Current generation", async () => {
     // The designed ungrouped view exposes the exact pair's inventory action;
     // grouped rows instead make the whole row clickable.
