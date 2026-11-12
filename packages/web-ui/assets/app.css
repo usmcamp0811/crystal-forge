@@ -8880,7 +8880,6 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
 .cve-package-cvss small { color: var(--cf-text-muted); font-size: 10px; text-transform: uppercase; }
 .cve-package-meter { display: block; width: 50px; height: 5px; border-radius: 99px; overflow: hidden; background: var(--cf-subtle-bg); }
 .cve-package-meter > span { display: block; height: 100%; }
-.cve-export .rr-export-pop { z-index: 30; }
 @media (max-width: 800px) { .cve-package-toggle { grid-template-columns: 20px minmax(0, 1fr); } .cve-package-severities, .cve-package-cvss { grid-column: 2; justify-content: flex-start; } }
 .cve-bulk-bar { flex-wrap: wrap; justify-content: center; }
 .cve-bulk-bar small { flex-basis: 100%; text-align: center; color: var(--cf-text-muted); }
@@ -9099,3 +9098,17 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
 .management-complete .modal-head h2{display:flex;align-items:center;gap:8px}
 /* A wrapping runtime line uses at most two lines. */
 .sys-runtime-cell > span.sys-runtime-wrap{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+
+/* CVEs view export menu and multi-select toggles (design bc30ef57, styles.css). */
+.cve-export{position:relative}
+.cve-export .rr-export-backdrop{position:fixed;inset:0;z-index:29}
+.cve-export .rr-export-pop{position:absolute;top:calc(100% + 6px);right:0;z-index:30;width:270px;padding:6px;display:flex;flex-direction:column;gap:2px;box-shadow:0 12px 32px rgba(0,0,0,.35)}
+.cve-export .rr-export-title{font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;font-weight:700;color:var(--cf-text-muted);padding:6px 8px 4px}
+.cve-export .rr-export-item{all:unset;box-sizing:border-box;cursor:pointer;display:flex;flex-direction:column;gap:1px;padding:7px 8px;border-radius:7px}
+.cve-export .rr-export-item:hover,.cve-export .rr-export-item:focus-visible{background:var(--cf-hover-bg)}
+.cve-export .rr-export-item-l{font-size:12.5px;font-weight:600;color:var(--cf-text-primary)}
+.cve-export .rr-export-item-sub{font-size:11px;color:var(--cf-text-muted)}
+.seg .ms-opt{display:inline-flex;align-items:center;gap:5px}
+.seg .ms-opt.ms-on{--ms:var(--cf-brand-purple);color:var(--ms);background:color-mix(in oklab,var(--ms) 16%,transparent);box-shadow:0 0 0 1px var(--ms) inset;font-weight:600}
+.seg .ms-opt.ms-on[data-k="critical"]{--ms:#f87171}.seg .ms-opt.ms-on[data-k="high"]{--ms:#fbbf24}.seg .ms-opt.ms-on[data-k="medium"]{--ms:#60a5fa}.seg .ms-opt.ms-on[data-k="low"]{--ms:#9ca3af}
+.seg .ms-opt.ms-on[data-k="available"]{--ms:#34d399}.seg .ms-opt.ms-on[data-k="exploited"]{--ms:#f87171}.seg .ms-opt.ms-on[data-k="outstanding"]{--ms:#f87171}.seg .ms-opt.ms-on[data-k="scheduled"]{--ms:#60a5fa}.seg .ms-opt.ms-on[data-k="accepted"]{--ms:#34d399}

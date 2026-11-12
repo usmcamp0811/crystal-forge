@@ -30,6 +30,7 @@ use crate::components::chips::EnvBadge;
 use crate::components::cve::triage::{
     CveTriageDraft, EnvironmentTriageChoice, catalog_contains_assignee, fixed_version_label,
 };
+use crate::components::filters::{FilterOption, MultiFilter, toggle_selection};
 use crate::components::dialog_focus::{
     DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
 };
@@ -310,6 +311,135 @@ fn query_param(name: &str) -> Option<String> {
     None
 }
 
+/// Splits a comma-separated multi-select URL value. Empty means no restriction.
+fn split_filter(value: Option<String>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Joins a multi-select value for the API and URL; `None` means no restriction.
+fn filter_param(values: &[String]) -> Option<String> {
+    (!values.is_empty()).then(|| values.join(","))
+}
+
+/// Reads the `environment_id` list. Malformed IDs are dropped, as the
+/// single-value parameter dropped an unparsable ID before multi-select.
+fn environment_ids_from_query() -> Vec<crate::api::models::Uuid> {
+    split_filter(query_param("environment_id"))
+        .iter()
+        .filter_map(|id| id.parse().ok())
+        .collect()
+}
+
+/// Builds the server filters for the current view selection.
+fn view_filters(
+    severity: &[String],
+    fix_status: &[String],
+    triage_status: &[String],
+    package: Option<String>,
+    search: &str,
+    sort: Option<String>,
+    environment_ids: Vec<crate::api::models::Uuid>,
+) -> CveFilters {
+    CveFilters {
+        severity: filter_param(severity),
+        fix_status: filter_param(fix_status),
+        triage_status: filter_param(triage_status),
+        package,
+        search: (!search.is_empty()).then(|| search.to_owned()),
+        sort,
+        limit: None,
+        environment_ids,
+    }
+}
+
+/// Export menu entries from the approved design: format, label, description.
+const CVE_EXPORT_FORMATS: [(&str, &str, &str); 4] = [
+    (
+        "oscal-json",
+        "OSCAL JSON",
+        "Standard machine-readable assessment results",
+    ),
+    (
+        "excel",
+        "Excel",
+        "Spreadsheet for review and external workflows",
+    ),
+    ("csv", "CSV", "Flat data for import into other tools"),
+    ("oscal-xml", "OSCAL XML", "Standards-compatible XML"),
+];
+
+/// Returns the download filename for `format`, labelled with the selected
+/// environment names when the export is environment-scoped.
+fn cve_export_filename(format: &str, scope: Option<&str>, date: &str) -> String {
+    let extension = match format {
+        "excel" => "xlsx",
+        "oscal-json" => "oscal.json",
+        "oscal-xml" => "oscal.xml",
+        _ => "csv",
+    };
+    let suffix = scope
+        .map(|scope| {
+            let slug: String = scope
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            let slug = slug
+                .split('-')
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("-");
+            format!("-{slug}")
+        })
+        .unwrap_or_default();
+    format!("cves-{date}{suffix}.{extension}")
+}
+
+/// Multi-select toggle group from the approved CVEs design (`MultiSeg`).
+///
+/// An empty selection means no restriction and highlights `all_label`.
+/// Selecting `all_label` clears the selection. Each option toggles
+/// independently; a selected option shows a check icon and its `data-k` color.
+#[component]
+fn MultiSeg(
+    all_label: &'static str,
+    options: Vec<(&'static str, &'static str)>,
+    selected: Vec<String>,
+    on_change: EventHandler<Vec<String>>,
+) -> Element {
+    rsx! {
+        div { class: "seg", role: "group",
+            button {
+                class: if selected.is_empty() { "active" } else { "" },
+                onclick: move |_| on_change.call(Vec::new()),
+                "{all_label}"
+            }
+            for (value, label) in options {
+                {
+                    let on = selected.iter().any(|item| item == value);
+                    let current = selected.clone();
+                    rsx! {
+                        button {
+                            key: "{value}",
+                            class: if on { "ms-opt ms-on" } else { "ms-opt" },
+                            aria_pressed: "{on}",
+                            "data-k": value,
+                            onclick: move |_| on_change.call(toggle_selection(&current, value)),
+                            if on { Icon { name: IconName::Check, size: 11 } }
+                            "{label}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 const SUCCESS_TOAST_DURATION_MS: u32 = 3000;
 
 #[derive(Clone, Copy)]
@@ -355,7 +485,7 @@ fn sync_cve_url_query(
     focus_cve: Option<&str>,
     sort: &str,
     view: &str,
-    environment_id: Option<crate::api::models::Uuid>,
+    environment_ids: &[crate::api::models::Uuid],
     selection: Option<&ExactCveSelection>,
     push_history: bool,
 ) {
@@ -395,8 +525,9 @@ fn sync_cve_url_query(
     if view != "grouped" {
         push(&mut parts, "view", view);
     }
-    if let Some(id) = environment_id {
-        push(&mut parts, "environment_id", &id.to_string());
+    if !environment_ids.is_empty() {
+        let ids: Vec<String> = environment_ids.iter().map(ToString::to_string).collect();
+        push(&mut parts, "environment_id", &ids.join(","));
     }
     if let Some(selection) = selection {
         push(&mut parts, "cve", &selection.cve_id);
@@ -425,28 +556,28 @@ fn sync_cve_url_query(
 }
 
 fn sync_cve_url_state(
-    severity: Option<String>,
-    fix_status: Option<String>,
-    triage_status: Option<String>,
+    severity: Vec<String>,
+    fix_status: Vec<String>,
+    triage_status: Vec<String>,
     package: Option<String>,
     search: String,
     focus_cve: Option<String>,
     sort: String,
     view: String,
-    environment_id: Option<crate::api::models::Uuid>,
+    environment_ids: Vec<crate::api::models::Uuid>,
     selection: Option<&ExactCveSelection>,
     push_history: bool,
 ) {
     sync_cve_url_query(
-        severity.as_deref(),
-        fix_status.as_deref(),
-        triage_status.as_deref(),
+        filter_param(&severity).as_deref(),
+        filter_param(&fix_status).as_deref(),
+        filter_param(&triage_status).as_deref(),
         package.as_deref(),
         (!search.trim().is_empty()).then_some(search.as_str()),
         focus_cve.as_deref(),
         &sort,
         &view,
-        environment_id,
+        &environment_ids,
         selection,
         push_history,
     );
@@ -463,9 +594,10 @@ pub fn CvesView(query: String) -> Element {
     let app_state = use_context::<Signal<AppState>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
     let active_user = authenticated_user_id(&app_state.read().auth);
-    let initial_severity = query_param("severity");
-    let initial_fix = query_param("fix_status").or_else(|| query_param("fix"));
-    let initial_triage = query_param("triage_status").or_else(|| query_param("triage"));
+    let initial_severity = split_filter(query_param("severity"));
+    let initial_fix = split_filter(query_param("fix_status").or_else(|| query_param("fix")));
+    let initial_triage =
+        split_filter(query_param("triage_status").or_else(|| query_param("triage")));
     let initial_package = query_param("package");
     let initial_focus_cve = focused_cve_from_query();
     let initial_search = initial_focus_cve
@@ -481,7 +613,7 @@ pub fn CvesView(query: String) -> Element {
         }
     });
     let initial_selection = selection_from_query();
-    let initial_environment = query_param("environment_id").and_then(|id| id.parse().ok());
+    let initial_environment = environment_ids_from_query();
 
     // Filter state
     let mut severity_filter = use_signal(move || initial_severity.clone());
@@ -493,7 +625,7 @@ pub fn CvesView(query: String) -> Element {
     let mut focus_resolved_query = use_signal(|| None::<CveInventoryQuery>);
     let mut sort_by = use_signal(move || initial_sort.clone());
     let mut view_mode = use_signal(move || initial_view.clone()); // "flat" or "grouped"
-    let mut environment_filter = use_signal(move || initial_environment);
+    let mut environment_filter = use_signal(move || initial_environment.clone());
     let mut selected_cve = use_signal(move || initial_selection.clone());
     let mut seen_state = use_signal(|| None::<CveSeenState>);
     let mut seen_clock = use_signal(Utc::now);
@@ -557,9 +689,9 @@ pub fn CvesView(query: String) -> Element {
         let selection = selected_cve();
 
         sync_cve_url_query(
-            severity.as_deref(),
-            fix_status.as_deref(),
-            triage_status.as_deref(),
+            filter_param(&severity).as_deref(),
+            filter_param(&fix_status).as_deref(),
+            filter_param(&triage_status).as_deref(),
             package.as_deref(),
             if search.trim().is_empty() {
                 None
@@ -569,7 +701,7 @@ pub fn CvesView(query: String) -> Element {
             focus_cve().as_deref(),
             &sort,
             &view,
-            environment_filter(),
+            &environment_filter(),
             selection.as_ref(),
             false,
         );
@@ -580,13 +712,15 @@ pub fn CvesView(query: String) -> Element {
         let popstate_listener = use_hook(|| {
             let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
                 selected_cve.set(selection_from_query());
-                severity_filter.set(query_param("severity"));
-                fix_status_filter.set(query_param("fix_status").or_else(|| query_param("fix")));
-                triage_status_filter
-                    .set(query_param("triage_status").or_else(|| query_param("triage")));
+                severity_filter.set(split_filter(query_param("severity")));
+                fix_status_filter.set(split_filter(
+                    query_param("fix_status").or_else(|| query_param("fix")),
+                ));
+                triage_status_filter.set(split_filter(
+                    query_param("triage_status").or_else(|| query_param("triage")),
+                ));
                 package_filter.set(query_param("package"));
-                environment_filter
-                    .set(query_param("environment_id").and_then(|id| id.parse().ok()));
+                environment_filter.set(environment_ids_from_query());
                 sort_by.set(query_param("sort").unwrap_or_else(|| "severity".into()));
                 view_mode.set(query_param("view").unwrap_or_else(|| "grouped".into()));
                 search_query.set(query_param("search").unwrap_or_default());
@@ -648,17 +782,16 @@ pub fn CvesView(query: String) -> Element {
         let _ = batch_refresh();
         let query = CveInventoryQuery {
             group_by: "environment".into(),
-            environment_id: environment_filter(),
             group_id: None,
-            filters: CveFilters {
-                severity: severity_filter(),
-                fix_status: fix_status_filter(),
-                triage_status: triage_status_filter(),
-                package: package_filter(),
-                search: (!search_query().is_empty()).then(|| search_query()),
-                sort: Some(sort_by()),
-                limit: None,
-            },
+            filters: view_filters(
+                &severity_filter(),
+                &fix_status_filter(),
+                &triage_status_filter(),
+                package_filter(),
+                &search_query(),
+                Some(sort_by()),
+                environment_filter(),
+            ),
             offset: 0,
             limit: 200,
         };
@@ -674,17 +807,16 @@ pub fn CvesView(query: String) -> Element {
         let focused = focus_cve();
         let query = CveInventoryQuery {
             group_by: "environment".into(),
-            environment_id: environment_filter(),
             group_id: None,
-            filters: CveFilters {
-                severity: severity_filter(),
-                fix_status: fix_status_filter(),
-                triage_status: triage_status_filter(),
-                package: package_filter(),
-                search: focused.clone(),
-                sort: Some(sort_by()),
-                limit: None,
-            },
+            filters: view_filters(
+                &severity_filter(),
+                &fix_status_filter(),
+                &triage_status_filter(),
+                package_filter(),
+                focused.as_deref().unwrap_or_default(),
+                Some(sort_by()),
+                environment_filter(),
+            ),
             offset: 0,
             limit: 200,
         };
@@ -707,10 +839,10 @@ pub fn CvesView(query: String) -> Element {
             return;
         };
         if result_focus.as_ref() != Some(&focused)
-            || query.environment_id != environment_filter()
-            || query.filters.severity != severity_filter()
-            || query.filters.fix_status != fix_status_filter()
-            || query.filters.triage_status != triage_status_filter()
+            || query.filters.environment_ids != environment_filter()
+            || query.filters.severity != filter_param(&severity_filter())
+            || query.filters.fix_status != filter_param(&fix_status_filter())
+            || query.filters.triage_status != filter_param(&triage_status_filter())
             || query.filters.package != package_filter()
             || query.filters.sort != Some(sort_by())
             || focus_resolved_query().as_ref() == Some(query)
@@ -728,19 +860,37 @@ pub fn CvesView(query: String) -> Element {
         focus_resolved_query.set(Some(query.clone()));
     });
 
-    let current_pair_filters = CveFilters {
-        severity: severity_filter(),
-        fix_status: fix_status_filter(),
-        triage_status: triage_status_filter(),
-        package: package_filter(),
-        search: (!search_query().is_empty()).then(|| search_query()),
-        sort: Some(sort_by()),
-        limit: None,
-    };
-    let scoped_metadata = pair_metadata.read().as_ref().and_then(|(request, result)| {
-        (request.environment_id == environment_filter() && request.filters == current_pair_filters)
-            .then(|| result.clone())
-    });
+    let current_pair_filters = view_filters(
+        &severity_filter(),
+        &fix_status_filter(),
+        &triage_status_filter(),
+        package_filter(),
+        &search_query(),
+        Some(sort_by()),
+        environment_filter(),
+    );
+    let scoped_metadata = pair_metadata
+        .read()
+        .as_ref()
+        .and_then(|(request, result)| {
+            (request.filters == current_pair_filters).then(|| result.clone())
+        });
+    // INVARIANT: The export button count is the server total for exactly the
+    // filters that the export request sends, so it equals the exported rows.
+    let export_filters = current_pair_filters.clone();
+    let environment_names: Vec<String> = environments
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|items| {
+            items
+                .iter()
+                .filter(|env| environment_filter().contains(&env.id))
+                .map(|env| env.name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let export_scope = (!environment_names.is_empty()).then(|| environment_names.join(", "));
     let export_count = scoped_metadata
         .as_ref()
         .and_then(|r| r.as_ref().ok())
@@ -750,7 +900,6 @@ pub fn CvesView(query: String) -> Element {
     use_effect(move || {
         if let (Some(Ok(_s)), Some((request, Ok(_)))) =
             (stats.read().as_ref(), pair_metadata.read().as_ref())
-            && request.environment_id == environment_filter()
             && request.filters == current_pair_filters
         {
             // INVARIANT: Read NAV_BADGES with `peek`. A subscription would rerun this
@@ -780,7 +929,7 @@ pub fn CvesView(query: String) -> Element {
                             "{s.total_cves} vulnerabilities · {s.systems_affected} systems affected · {s.fixable} have fixed versions"
                         }
                     }
-                    if environment_filter().is_some() {
+                    if !environment_filter().is_empty() {
                         p { class: "page-subtitle", "KPIs are fleet-wide · findings below are environment-scoped" }
                     }
                 }
@@ -835,47 +984,62 @@ pub fn CvesView(query: String) -> Element {
                             aria_expanded: "{export_open()}",
                             onclick: move |_| export_open.set(!export_open()),
                             Icon { name: IconName::Download, size: 14 }
-                            " Export {export_count} ▾"
+                            " Export {export_count} "
+                            Icon { name: IconName::ChevronDown, size: 11 }
                         }
                         if export_open() {
-                            div { class: "rr-export-pop card", role: "menu", aria_label: "Export CVEs",
-                                div { class: "rr-export-title", "Export CVEs" }
-                                button {
-                                    class: "rr-export-item focus-ring",
-                                    role: "menuitem",
-                                    disabled: environment_filter().is_some(),
-                                    title: if environment_filter().is_some() { "Environment-scoped CSV is unavailable" } else { "Export filtered fleet-wide CVE pairs" },
-                                    onclick: move |_| {
-                            export_open.set(false);
-                            let mut toast_message = toast_message;
-                            let mut toast_lifecycle = toast_lifecycle;
-                            spawn(async move {
-                                match client::export_cves_csv(&CveFilters {
-                                    severity: severity_filter(),
-                                    fix_status: fix_status_filter(),
-                                    triage_status: triage_status_filter(),
-                                    package: package_filter(),
-                                    search: if search_query().is_empty() { None } else { Some(search_query()) },
-                                    sort: Some(sort_by()),
-                                    limit: None,
-                                }).await {
-                                    Ok(_) => {
-                                        let publication = toast_lifecycle.write().publish(true);
-                                        toast_message.set(Some(("CSV export started".to_string(), true)));
-                                        gloo_timers::future::TimeoutFuture::new(SUCCESS_TOAST_DURATION_MS).await;
-                                        if toast_lifecycle.write().expire(publication) {
-                                            toast_message.set(None);
+                            div { class: "rr-export-backdrop", onclick: move |_| export_open.set(false) }
+                            div {
+                                class: "rr-export-pop card",
+                                role: "menu",
+                                aria_label: "Export CVEs",
+                                onkeydown: move |evt| if evt.key() == Key::Escape { export_open.set(false) },
+                                div { class: "rr-export-title",
+                                    if let Some(scope) = &export_scope { "Export CVEs · {scope}" } else { "Export CVEs" }
+                                }
+                                for (format, label, sub) in CVE_EXPORT_FORMATS {
+                                    {
+                                        let filters = export_filters.clone();
+                                        let scope = export_scope.clone();
+                                        rsx! {
+                                            button {
+                                                key: "{format}",
+                                                r#type: "button",
+                                                class: "rr-export-item focus-ring",
+                                                role: "menuitem",
+                                                "data-format": format,
+                                                onclick: move |_| {
+                                                    export_open.set(false);
+                                                    let filters = filters.clone();
+                                                    let filename = cve_export_filename(
+                                                        format,
+                                                        scope.as_deref(),
+                                                        &Utc::now().format("%Y-%m-%d").to_string(),
+                                                    );
+                                                    let mut toast_message = toast_message;
+                                                    let mut toast_lifecycle = toast_lifecycle;
+                                                    spawn(async move {
+                                                        match client::download_cve_export(&filters, format, &filename).await {
+                                                            Ok(()) => {
+                                                                let publication = toast_lifecycle.write().publish(true);
+                                                                toast_message.set(Some((format!("{label} export downloaded"), true)));
+                                                                gloo_timers::future::TimeoutFuture::new(SUCCESS_TOAST_DURATION_MS).await;
+                                                                if toast_lifecycle.write().expire(publication) {
+                                                                    toast_message.set(None);
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                toast_lifecycle.write().publish(false);
+                                                                toast_message.set(Some((format!("{label} export failed: {e}"), false)));
+                                                            }
+                                                        }
+                                                    });
+                                                },
+                                                span { class: "rr-export-item-l", "{label}" }
+                                                span { class: "rr-export-item-sub", "{sub}" }
+                                            }
                                         }
                                     }
-                                    Err(e) => {
-                                        toast_lifecycle.write().publish(false);
-                                        toast_message.set(Some((format!("Export failed: {e}"), false)));
-                                    }
-                                }
-                            });
-                                    },
-                                    span { class: "rr-export-item-l", "CSV" }
-                                    span { class: "rr-export-item-sub", if environment_filter().is_some() { "Environment-scoped CSV unavailable" } else { "Filtered fleet-wide findings" } }
                                 }
                             }
                         }
@@ -973,58 +1137,25 @@ pub fn CvesView(query: String) -> Element {
                     }
                 }
 
-                // Severity Filter
-                div {
-                    class: "seg",
-                    for (sev, label) in [("all", "All"), ("critical", "Critical"), ("high", "High"), ("medium", "Medium"), ("low", "Low")] {
-                        button {
-                            class: if severity_filter().as_deref() == if sev == "all" { None } else { Some(sev) } { "active" } else { "" },
-                            onclick: move |_| {
-                                if sev == "all" {
-                                    severity_filter.set(None);
-                                } else {
-                                    severity_filter.set(Some(sev.to_string()));
-                                }
-                            },
-                            "{label}"
-                        }
-                    }
+                // Severity, fix status, and triage status are multi-select
+                // toggle groups (design bc30ef57 `MultiSeg`).
+                MultiSeg {
+                    all_label: "All",
+                    options: vec![("critical", "Critical"), ("high", "High"), ("medium", "Medium"), ("low", "Low")],
+                    selected: severity_filter(),
+                    on_change: move |values| severity_filter.set(values),
                 }
-
-                // Fix Status Filter
-                div {
-                    class: "seg",
-                    for status in [("all", "Any status"), ("available", "Has patch"), ("pending", "No patch"), ("exploited", "Exploited")] {
-                        button {
-                            class: if fix_status_filter().as_deref() == if status.0 == "all" { None } else { Some(status.0) } { "active" } else { "" },
-                            onclick: move |_| {
-                                if status.0 == "all" {
-                                    fix_status_filter.set(None);
-                                } else {
-                                    fix_status_filter.set(Some(status.0.to_string()));
-                                }
-                            },
-                            "{status.1}"
-                        }
-                    }
+                MultiSeg {
+                    all_label: "Any status",
+                    options: vec![("available", "Has patch"), ("pending", "No patch"), ("exploited", "Exploited")],
+                    selected: fix_status_filter(),
+                    on_change: move |values| fix_status_filter.set(values),
                 }
-
-                // Triage Status Filter
-                div {
-                    class: "seg",
-                    for status in [("all", "Any triage"), ("outstanding", "Outstanding"), ("scheduled", "Patch scheduled"), ("accepted", "Accepted"), ("inventory_only", "Inventory only")] {
-                        button {
-                            class: if triage_status_filter().as_deref() == if status.0 == "all" { None } else { Some(status.0) } { "active" } else { "" },
-                            onclick: move |_| {
-                                if status.0 == "all" {
-                                    triage_status_filter.set(None);
-                                } else {
-                                    triage_status_filter.set(Some(status.0.to_string()));
-                                }
-                            },
-                            "{status.1}"
-                        }
-                    }
+                MultiSeg {
+                    all_label: "Any triage",
+                    options: vec![("outstanding", "Outstanding"), ("scheduled", "Patch scheduled"), ("accepted", "Accepted"), ("inventory_only", "Inventory only")],
+                    selected: triage_status_filter(),
+                    on_change: move |values| triage_status_filter.set(values),
                 }
 
                 // Package filter
@@ -1076,19 +1207,28 @@ pub fn CvesView(query: String) -> Element {
                     }
                 }
 
-                div {
-                    select {
-                        class: "input focus-ring",
-                        aria_label: "Environment",
-                        value: "{environment_filter().map(|id| id.to_string()).unwrap_or_default()}",
-                        onchange: move |evt| environment_filter.set(evt.value().parse().ok()),
-                        option { value: "", "All environments" }
-                        if let Some(Ok(items)) = environments.read().as_ref() {
-                            for env in items {
-                                option { key: "{env.id}", value: "{env.id}", "{env.name}" }
-                            }
-                        }
-                    }
+                MultiFilter {
+                    label: "Environment",
+                    all_label: "All environments",
+                    options: environments
+                        .read()
+                        .as_ref()
+                        .and_then(|result| result.as_ref().ok())
+                        .map(|items| {
+                            items
+                                .iter()
+                                .map(|env| FilterOption {
+                                    value: env.id.to_string(),
+                                    label: env.name.clone(),
+                                    count: None,
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                    selected: environment_filter().iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    on_change: move |values: Vec<String>| {
+                        environment_filter.set(values.iter().filter_map(|id| id.parse().ok()).collect());
+                    },
                 }
 
                 // Group label + toggle
@@ -1155,14 +1295,11 @@ pub fn CvesView(query: String) -> Element {
                     CveInventoryGroupsView {
                     query: CveInventoryQuery {
                         group_by: "environment".into(),
-                        environment_id: environment_filter(),
                         group_id: None,
-                        filters: CveFilters {
-                            severity: severity_filter(), fix_status: fix_status_filter(),
-                            triage_status: triage_status_filter(), package: package_filter(),
-                            search: (!search_query().is_empty()).then(|| search_query()),
-                            sort: None, limit: None,
-                        },
+                        filters: view_filters(
+                            &severity_filter(), &fix_status_filter(), &triage_status_filter(),
+                            package_filter(), &search_query(), None, environment_filter(),
+                        ),
                         offset: 0, limit: 50,
                     },
                     nested_hosts: view_mode() == "host",
@@ -1194,17 +1331,15 @@ pub fn CvesView(query: String) -> Element {
                     CvePairsView {
                     refresh: batch_refresh,
                     environment_colors: environments.read().as_ref().and_then(|result| result.as_ref().ok()).map(|items| items.iter().map(|env| (env.id, env.color_hex.clone())).collect()).unwrap_or_default(),
-                    active_environment: environment_filter(),
+                    active_environments: environment_filter(),
                     can_triage: auth::is_operator_or_above(&app_state.read().auth),
                     fleet_stats: stats.read().as_ref().and_then(|result| result.as_ref().ok()).cloned(),
                     query: CveInventoryQuery {
-                        group_by: "environment".into(), environment_id: environment_filter(), group_id: None,
-                        filters: CveFilters {
-                            severity: severity_filter(), fix_status: fix_status_filter(),
-                            triage_status: triage_status_filter(), package: package_filter(),
-                            search: (!search_query().is_empty()).then(|| search_query()),
-                            sort: Some(sort_by()), limit: None,
-                        },
+                        group_by: "environment".into(), group_id: None,
+                        filters: view_filters(
+                            &severity_filter(), &fix_status_filter(), &triage_status_filter(),
+                            package_filter(), &search_query(), Some(sort_by()), environment_filter(),
+                        ),
                         offset: 0, limit: 200,
                     },
                     grouped: view_mode() == "grouped",
@@ -1299,24 +1434,23 @@ fn loaded_package_groups(items: &[CveListItem]) -> BTreeMap<String, Vec<CveListI
 /// Applies the same pair-level predicates as the scoped inventory request.
 /// The environment restriction is enforced by the server and its request
 /// identity, because a pair's environment names are not stable UUID scopes.
+/// Mirrors the server filter contract for loaded rows: values within one
+/// comma-separated filter are OR-combined; different filters AND-combine.
 fn matches_pair_filters(item: &CveListItem, filters: &CveFilters) -> bool {
-    filters
-        .severity
-        .as_deref()
-        .is_none_or(|severity| item.severity.eq_ignore_ascii_case(severity))
-        && filters
-            .triage_status
-            .as_deref()
-            .is_none_or(|status| item.triage_status.eq_ignore_ascii_case(status))
-        && filters
-            .fix_status
-            .as_deref()
-            .is_none_or(|status| match status {
-                "available" => item.fix_status == "fix_available",
-                "pending" => item.fix_status == "open",
-                "exploited" => item.exploited,
-                _ => false,
-            })
+    let any_of = |filter: &Option<String>, matches: &dyn Fn(&str) -> bool| {
+        let values = split_filter(filter.clone());
+        values.is_empty() || values.iter().any(|value| matches(value))
+    };
+    any_of(&filters.severity, &|severity| {
+        item.severity.eq_ignore_ascii_case(severity)
+    }) && any_of(&filters.triage_status, &|status| {
+        item.triage_status.eq_ignore_ascii_case(status)
+    }) && any_of(&filters.fix_status, &|status| match status {
+        "available" => item.fix_status == "fix_available",
+        "pending" => item.fix_status == "open",
+        "exploited" => item.exploited,
+        _ => false,
+    })
         && filters.package.as_deref().is_none_or(|package| {
             item.package_name
                 .as_deref()
@@ -1456,39 +1590,31 @@ impl QuickCveSelection {
         let mut request = base.clone();
         request.offset = 0;
         request.limit = 200;
+        // A filter value list is OR-combined. The quick selection narrows it to
+        // its own value only when that value is in the list or no list is set.
+        let narrow = |filter: &mut Option<String>, value: &str| -> Option<()> {
+            let allowed = split_filter(filter.clone());
+            if !allowed.is_empty() && !allowed.iter().any(|item| item == value) {
+                return None;
+            }
+            *filter = Some(value.into());
+            Some(())
+        };
         match self {
-            Self::Critical | Self::High => {
-                let severity = if self == Self::Critical {
-                    "critical"
+            Self::Critical => narrow(&mut request.filters.severity, "critical")?,
+            Self::High => narrow(&mut request.filters.severity, "high")?,
+            Self::Patchable => {
+                let allowed = split_filter(request.filters.fix_status.clone());
+                if allowed.is_empty() || allowed.iter().any(|item| item == "available") {
+                    request.filters.fix_status = Some("available".into());
+                } else if allowed.iter().any(|item| item == "exploited") {
+                    // Returned rows are checked with `matches`.
+                    request.filters.fix_status = Some("exploited".into());
                 } else {
-                    "high"
-                };
-                if request
-                    .filters
-                    .severity
-                    .as_deref()
-                    .is_some_and(|value| value != severity)
-                {
                     return None;
                 }
-                request.filters.severity = Some(severity.into());
             }
-            Self::Patchable => match request.filters.fix_status.as_deref() {
-                Some("pending") => return None,
-                None => request.filters.fix_status = Some("available".into()),
-                _ => {}
-            },
-            Self::Outstanding => {
-                if request
-                    .filters
-                    .triage_status
-                    .as_deref()
-                    .is_some_and(|value| value != "outstanding")
-                {
-                    return None;
-                }
-                request.filters.triage_status = Some("outstanding".into());
-            }
+            Self::Outstanding => narrow(&mut request.filters.triage_status, "outstanding")?,
         }
         Some(request)
     }
@@ -1650,10 +1776,24 @@ fn batch_assignee(
     None
 }
 
+/// Preselects the filtered environments that the batch can triage. When no
+/// filtered environment is applicable, every applicable environment is chosen.
+fn default_batch_environments(
+    active: &[uuid::Uuid],
+    applicable: BTreeSet<uuid::Uuid>,
+) -> BTreeSet<uuid::Uuid> {
+    let chosen: BTreeSet<_> = active
+        .iter()
+        .filter(|id| applicable.contains(id))
+        .copied()
+        .collect();
+    if chosen.is_empty() { applicable } else { chosen }
+}
+
 #[component]
 fn CveBatchTriageDialog(
     selection: BTreeSet<ExactCveSelection>,
-    active_environment: Option<uuid::Uuid>,
+    active_environments: Vec<uuid::Uuid>,
     environment_colors: BTreeMap<uuid::Uuid, String>,
     on_close: EventHandler<()>,
     on_success: EventHandler<poam_api::FleetCveBatchTriageResponse>,
@@ -1680,9 +1820,11 @@ fn CveBatchTriageDialog(
     use_effect({
         let selection = selection.clone();
         let component_active = component_active.clone();
+        let active_environments = active_environments.clone();
         move || {
             let component_active = component_active.clone();
             let selection = selection.clone();
+            let active_environments = active_environments.clone();
             let catalog_active = component_active.clone();
             spawn(async move {
                 let response =
@@ -1707,12 +1849,7 @@ fn CveBatchTriageDialog(
                         .filter(|env| env.exact_affected_system_count > 0)
                         .map(|env| env.environment_id)
                         .collect::<BTreeSet<_>>();
-                    picked.set(
-                        active_environment
-                            .filter(|id| applicable.contains(id))
-                            .map(|id| BTreeSet::from([id]))
-                            .unwrap_or(applicable),
-                    );
+                    picked.set(default_batch_environments(&active_environments, applicable));
                     let most_severe = response
                         .items
                         .iter()
@@ -2254,7 +2391,7 @@ fn initially_expanded(group_by: &str, offset: i64, index: usize) -> bool {
 fn CvePairsView(
     refresh: Signal<u64>,
     environment_colors: BTreeMap<uuid::Uuid, String>,
-    active_environment: Option<uuid::Uuid>,
+    active_environments: Vec<uuid::Uuid>,
     can_triage: bool,
     fleet_stats: Option<CveFleetStats>,
     query: CveInventoryQuery,
@@ -2467,7 +2604,7 @@ fn CvePairsView(
         }
         if let Some(message) = batch_notice() { p { class: "sd-callout sd-callout-info", role: "status", "{message}" } }
         if let Some((request, revision, Err(error))) = page.read().as_ref()
-            && *revision == refresh() && request.offset == offset() && request.filters == query.filters && request.environment_id == query.environment_id {
+            && *revision == refresh() && request.offset == offset() && request.filters == query.filters {
             div { class: "empty", "Unable to load CVE pairs: {error}" }
         }
         if loaded().is_empty() && page.read().is_none() {
@@ -2494,7 +2631,7 @@ fn CvePairsView(
                 let worst = cves.iter().filter_map(|c| c.cvss_v3_score).reduce(f32::max);
                 // The union describes the full filtered pair set. A focused CVE
                 // hides its siblings, and environment scope is not fleet-wide.
-                let aggregate = if focused.is_none() && query.environment_id.is_none() {
+                let aggregate = if focused.is_none() && query.filters.environment_ids.is_empty() {
                     matching_pair_union(pair_snapshot.read().as_ref(), &query, refresh(), &loaded(), &package).cloned()
                 } else {
                     None
@@ -2609,7 +2746,7 @@ fn CvePairsView(
             } }
         }
         if batch_open() {
-            CveBatchTriageDialog { selection: selected(), active_environment,
+            CveBatchTriageDialog { selection: selected(), active_environments: active_environments.clone(),
                 environment_colors: environment_colors.clone(),
                 on_close: move |_| batch_open.set(false),
                 on_success: move |response: poam_api::FleetCveBatchTriageResponse| {
@@ -3036,7 +3173,8 @@ fn CveInventoryGroupCard(
                     CveInventoryGroupsView {
                         key: "hosts-{group_id:?}",
                         query: CveInventoryQuery {
-                            group_by: "host".into(), environment_id: group_id,
+                            group_by: "host".into(),
+                            filters: CveFilters { environment_ids: group_id.into_iter().collect(), ..query.filters.clone() },
                             group_id: None, ..query.clone()
                         },
                         nested_hosts: false,
@@ -4489,6 +4627,8 @@ fn FleetCveTriageDialog(
 #[cfg(test)]
 mod tests {
     use super::{
+        CVE_EXPORT_FORMATS, cve_export_filename, default_batch_environments, filter_param,
+        split_filter, view_filters,
         CveSeenState, FleetDetailState, QuickCveSelection, ToastLifecycle, authenticated_user_id,
         batch_tokens, complete_focus_package, deployment_dot, environment_triage_eligible,
         fleet_cve_header_title, fleet_error_state, fleet_fix_label, fleet_triage_draft,
@@ -4603,7 +4743,6 @@ mod tests {
     fn batch_package_union_requires_same_complete_request_and_first_page() {
         let query = super::CveInventoryQuery {
             group_by: "environment".into(),
-            environment_id: None,
             group_id: None,
             filters: CveFilters::default(),
             offset: 0,
@@ -4835,13 +4974,104 @@ mod tests {
     }
 
     #[test]
+    fn multi_select_filters_round_trip_as_comma_lists() {
+        let values = split_filter(Some("critical, high,,".into()));
+        assert_eq!(values, vec!["critical".to_string(), "high".to_string()]);
+        assert_eq!(filter_param(&values).as_deref(), Some("critical,high"));
+        assert_eq!(filter_param(&[]), None);
+        assert!(split_filter(None).is_empty());
+        let filters = view_filters(
+            &values,
+            &[],
+            &["outstanding".into()],
+            None,
+            "",
+            Some("severity".into()),
+            vec![Uuid::from_u128(5)],
+        );
+        assert_eq!(filters.severity.as_deref(), Some("critical,high"));
+        assert_eq!(filters.fix_status, None);
+        assert_eq!(filters.search, None);
+        assert_eq!(filters.environment_ids, vec![Uuid::from_u128(5)]);
+    }
+
+    #[test]
+    fn loaded_rows_match_any_value_of_a_multi_value_filter() {
+        let mut high = cve_item("CVE-2025-0001", Some("curl"), Some(1));
+        high.severity = "HIGH".into();
+        high.fix_status = "open".into();
+        let mut low = cve_item("CVE-2025-0002", Some("curl"), Some(1));
+        low.severity = "LOW".into();
+        low.fix_status = "open".into();
+        let filters = CveFilters {
+            severity: Some("critical,high".into()),
+            fix_status: Some("available,pending".into()),
+            ..Default::default()
+        };
+        assert!(super::matches_pair_filters(&high, &filters));
+        assert!(!super::matches_pair_filters(&low, &filters));
+        let filters = CveFilters {
+            severity: Some("critical,high".into()),
+            fix_status: Some("available".into()),
+            ..Default::default()
+        };
+        assert!(!super::matches_pair_filters(&high, &filters));
+    }
+
+    #[test]
+    fn quick_selection_narrows_multi_value_filters_or_reports_conflict() {
+        let mut query = CveInventoryQuery {
+            group_by: "environment".into(),
+            group_id: None,
+            filters: CveFilters {
+                severity: Some("critical,high".into()),
+                fix_status: Some("pending,exploited".into()),
+                triage_status: Some("accepted".into()),
+                ..Default::default()
+            },
+            offset: 0,
+            limit: 200,
+        };
+        let high = QuickCveSelection::High.query(&query).unwrap();
+        assert_eq!(high.filters.severity.as_deref(), Some("high"));
+        let patchable = QuickCveSelection::Patchable.query(&query).unwrap();
+        assert_eq!(patchable.filters.fix_status.as_deref(), Some("exploited"));
+        assert!(QuickCveSelection::Outstanding.query(&query).is_none());
+        query.filters.fix_status = Some("pending".into());
+        assert!(QuickCveSelection::Patchable.query(&query).is_none());
+    }
+
+    #[test]
+    fn batch_defaults_to_applicable_filtered_environments() {
+        let (a, b, c) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3));
+        let applicable = BTreeSet::from([a, b]);
+        assert_eq!(
+            default_batch_environments(&[b, c], applicable.clone()),
+            BTreeSet::from([b])
+        );
+        assert_eq!(default_batch_environments(&[c], applicable.clone()), applicable);
+        assert_eq!(default_batch_environments(&[], applicable.clone()), applicable);
+    }
+
+    #[test]
+    fn export_filename_carries_format_extension_and_environment_scope() {
+        assert_eq!(
+            cve_export_filename("oscal-json", Some("Prod East, Dev"), "2026-11-11"),
+            "cves-2026-11-11-Prod-East-Dev.oscal.json"
+        );
+        assert_eq!(cve_export_filename("excel", None, "2026-11-11"), "cves-2026-11-11.xlsx");
+        assert_eq!(cve_export_filename("csv", None, "2026-11-11"), "cves-2026-11-11.csv");
+        assert_eq!(CVE_EXPORT_FORMATS.map(|(format, _, _)| format), ["oscal-json", "excel", "csv", "oscal-xml"]);
+    }
+
+    #[test]
     fn quick_selection_retains_active_scope_and_does_not_replace_conflicting_filters() {
         let query = CveInventoryQuery {
             group_by: "environment".into(),
-            environment_id: Some(Uuid::from_u128(11)),
             group_id: None,
             filters: CveFilters {
                 severity: Some("low".into()),
+                environment_ids: vec![Uuid::from_u128(11), Uuid::from_u128(12)],
                 search: Some("nginx".into()),
                 sort: Some("severity".into()),
                 ..Default::default()
@@ -4851,7 +5081,7 @@ mod tests {
         };
         assert!(QuickCveSelection::Critical.query(&query).is_none());
         let low = QuickCveSelection::Patchable.query(&query).unwrap();
-        assert_eq!(low.environment_id, query.environment_id);
+        assert_eq!(low.filters.environment_ids, query.filters.environment_ids);
         assert_eq!(low.offset, 0);
         assert_eq!(low.filters.severity, query.filters.severity);
         assert_eq!(low.filters.search, query.filters.search);

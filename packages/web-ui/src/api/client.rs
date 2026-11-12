@@ -576,6 +576,11 @@ fn cve_filter_query_parts(filters: &CveFilters) -> Vec<String> {
         parts.push(format!("limit={limit}"));
     }
 
+    if !filters.environment_ids.is_empty() {
+        let ids: Vec<String> = filters.environment_ids.iter().map(ToString::to_string).collect();
+        parts.push(format!("environment_id={}", ids.join(",")));
+    }
+
     parts
 }
 
@@ -586,9 +591,6 @@ fn cve_inventory_url(query: &CveInventoryQuery, members: bool) -> String {
         format!("offset={}", query.offset),
         format!("limit={}", query.limit),
     ];
-    if let Some(id) = query.environment_id {
-        parts.push(format!("environment_id={id}"));
-    }
     if let Some(id) = query.group_id {
         parts.push(format!("group_id={id}"));
     }
@@ -636,9 +638,6 @@ pub async fn fetch_cve_inventory_pairs(
         format!("offset={}", query.offset),
         format!("limit={}", query.limit),
     ];
-    if let Some(id) = query.environment_id {
-        parts.push(format!("environment_id={id}"));
-    }
     parts.extend(cve_filter_query_parts(&CveFilters {
         limit: None,
         ..query.filters.clone()
@@ -760,23 +759,82 @@ pub async fn trigger_cve_derivation_rescan(
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
-/// Export CVEs as CSV (triggers browser download).
-pub async fn export_cves_csv(filters: &CveFilters) -> Result<(), ApiClientError> {
-    let parts = cve_filter_query_parts(filters);
+/// Builds the export URL for `filters` in `format` (`csv`, `excel`,
+/// `oscal-json`, or `oscal-xml`). List pagination does not apply to export.
+pub fn cve_export_url(filters: &CveFilters, format: &str) -> String {
+    let mut parts = cve_filter_query_parts(&CveFilters {
+        limit: None,
+        ..filters.clone()
+    });
+    parts.push(format!("format={}", encode_query_value(format)));
+    format!("{}/cves/export?{}", base_url(), parts.join("&"))
+}
 
-    let mut url = format!("{}/cves/export", base_url());
-    if !parts.is_empty() {
-        url.push('?');
-        url.push_str(&parts.join("&"));
+/// Downloads the server-filtered CVE export and saves it as `filename`.
+///
+/// The request runs with the session cookie. The browser saves the file only
+/// after a successful response, so a rejected export (for example `422` when
+/// the result exceeds the server row limit) leaves the page in place.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError::Status`] with the server message for a non-2xx
+/// response, or [`ApiClientError::Network`] when the request or the browser
+/// download fails.
+pub async fn download_cve_export(
+    filters: &CveFilters,
+    format: &str,
+    filename: &str,
+) -> Result<(), ApiClientError> {
+    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen_futures::JsFuture;
+
+    let network = |e: JsValue| ApiClientError::Network(format!("{e:?}"));
+    let window = web_sys::window().ok_or_else(|| ApiClientError::Network("no window".into()))?;
+    let opts = web_sys::RequestInit::new();
+    opts.set_method("GET");
+    let _ = js_sys::Reflect::set(
+        opts.as_ref(),
+        &JsValue::from_str("credentials"),
+        &JsValue::from_str("include"),
+    );
+    let request =
+        web_sys::Request::new_with_str_and_init(&cve_export_url(filters, format), &opts)
+            .map_err(network)?;
+    let response: web_sys::Response = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(network)?
+        .dyn_into()
+        .map_err(|_| ApiClientError::Network("response is not a Response".into()))?;
+    if !response.ok() {
+        let body = JsFuture::from(response.text().map_err(network)?)
+            .await
+            .map_err(network)?
+            .as_string()
+            .unwrap_or_default();
+        return Err(ApiClientError::Status {
+            code: response.status(),
+            body: decode_api_error_message(&body),
+        });
     }
-
-    // Trigger browser download by setting window.location
-    let window = web_sys::window().expect("no window");
-    window
-        .location()
-        .set_href(&url)
-        .map_err(|_| ApiClientError::Network("Failed to trigger download".to_string()))?;
-
+    let blob: web_sys::Blob = JsFuture::from(response.blob().map_err(network)?)
+        .await
+        .map_err(network)?
+        .dyn_into()
+        .map_err(|_| ApiClientError::Network("response body is not a Blob".into()))?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(network)?;
+    let document = window
+        .document()
+        .ok_or_else(|| ApiClientError::Network("no document".into()))?;
+    let anchor: web_sys::HtmlAnchorElement = document
+        .create_element("a")
+        .map_err(network)?
+        .dyn_into()
+        .map_err(|_| ApiClientError::Network("anchor creation failed".into()))?;
+    anchor.set_href(&url);
+    anchor.set_download(filename);
+    anchor.click();
+    let _ = web_sys::Url::revoke_object_url(&url);
     Ok(())
 }
 

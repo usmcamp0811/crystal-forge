@@ -20,6 +20,7 @@ use crate::queries::cve_scans::{
     EnqueueCveScanOutcome, FleetEnqueueOutcome, enqueue_exact_cve_scan, enqueue_fleet_cve_scans,
 };
 use crate::queries::cves;
+use crate::services::cve_export;
 
 fn validate_projection(
     params: &CveInventoryProjectionParams,
@@ -483,33 +484,39 @@ pub struct DerivationRescanResponse {
     pub message: String,
 }
 
-/// Escape a single CSV field per RFC 4180:
-/// wrap in double-quotes if the value contains commas, double-quotes, or newlines;
-/// double up any internal double-quotes.
-fn csv_field(value: &str) -> String {
-    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value.to_string()
-    }
+/// Selects the download encoding for [`export_cves`].
+#[derive(Debug, Deserialize)]
+pub struct CveExportFormatParam {
+    /// `csv` (default), `excel`, `oscal-json`, or `oscal-xml`.
+    pub format: Option<String>,
 }
 
-/// Exports the caller's complete filtered CVE result as CSV.
+/// Exports the caller's complete filtered CVE result.
 ///
-/// List pagination does not apply. The handler returns `422 Unprocessable
-/// Entity` and no CSV when the result exceeds
-/// [`cves::MAX_CVE_EXPORT_ROWS`].
+/// The `format` query parameter selects CSV (default), Excel (XLSX), OSCAL
+/// 1.1.2 assessment-results JSON, or OSCAL XML. Every format contains the
+/// same rows: the filters and `environment_id` list of [`CveFilters`],
+/// intersected with the caller's read scope. List pagination does not apply.
 ///
 /// # Errors
 ///
-/// Returns an authentication or scope-resolution error before querying rows.
-/// Returns `422 Unprocessable Entity` when the caller must narrow the filters.
-/// Returns `500 Internal Server Error` when PostgreSQL cannot load the export.
+/// Returns `400 Bad Request` for an unsupported format. Returns an
+/// authentication or scope-resolution error before querying rows. Returns
+/// `422 Unprocessable Entity`, with no document, when the result exceeds
+/// [`cves::MAX_CVE_EXPORT_ROWS`]. Returns `500 Internal Server Error` when
+/// PostgreSQL cannot load the export or serialization fails.
 pub async fn export_cves(
     State(state): State<CFState>,
     Query(filters): Query<CveFilters>,
+    Query(format): Query<CveExportFormatParam>,
     RequireAuth(user): RequireAuth,
 ) -> Result<Response, (StatusCode, String)> {
+    let format = cve_export::CveExportFormat::parse(format.format.as_deref()).map_err(|value| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Unsupported CVE export format: {value}"),
+        )
+    })?;
     let scope = cve_read_scope(&state, &user).await?;
     let cves = cves::fetch_cves_for_export(&state.pool, &scope, &filters)
         .await
@@ -526,62 +533,49 @@ pub async fn export_cves(
                 format!("Failed to fetch CVEs for export: {error}"),
             ),
         })?;
+    let environments = match filters.environment_id.as_deref() {
+        Some(ids) => cves::fetch_scoped_environment_names(&state.pool, &scope, ids)
+            .await
+            .map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to resolve export environments: {error}"),
+                )
+            })?,
+        None => Vec::new(),
+    };
+    let generated_at = chrono::Utc::now();
+    let body = cve_export::encode(
+        format,
+        &cves,
+        &cve_export::ExportContext {
+            environments: &environments,
+            generated_at,
+        },
+    )
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to encode CVE export: {error}"),
+        )
+    })?;
 
-    // Build CSV with proper RFC 4180 field escaping
-    let mut csv_output = String::new();
-    csv_output.push_str("CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,Affected Systems,Currently Affected Systems,Scheduled Deployment Targets,Historical Inventory Systems,Environments,Fix Status,Triage Status,Age (days),First Seen,Last Seen\n");
-
-    for cve in cves {
-        let environments = cve.affected_environments.unwrap_or_default().join(";");
-        let first_seen = cve
-            .first_seen
-            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_default();
-        let last_seen = cve
-            .last_seen
-            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_default();
-        let cvss = cve.cvss_v3_score.map(|s| s.to_string()).unwrap_or_default();
-
-        let row = [
-            csv_field(&cve.cve_id),
-            csv_field(&cve.severity),
-            csv_field(&cvss),
-            csv_field(&cve.package_name.unwrap_or_default()),
-            csv_field(&cve.installed_version.unwrap_or_default()),
-            csv_field(&cve.fixed_version.unwrap_or_default()),
-            cve.affected_count.to_string(),
-            cve.current_affected_count.to_string(),
-            cve.scheduled_deployment_target_count.to_string(),
-            cve.historical_inventory_count.to_string(),
-            csv_field(&environments),
-            csv_field(&cve.fix_status),
-            csv_field(&cve.triage_status),
-            cve.age_days.to_string(),
-            csv_field(&first_seen),
-            csv_field(&last_seen),
-        ]
-        .join(",");
-
-        csv_output.push_str(&row);
-        csv_output.push('\n');
-    }
-
+    let (extension, content_type) = format.file_type();
     let filename = format!(
-        "crystal-forge-cves-{}.csv",
-        chrono::Utc::now().format("%Y-%m-%d")
+        "crystal-forge-cves-{}.{extension}",
+        generated_at.format("%Y-%m-%d")
     );
 
     Ok((
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "text/csv"),
+            (header::CONTENT_TYPE, content_type.to_owned()),
             (
                 header::CONTENT_DISPOSITION,
-                &format!("attachment; filename=\"{}\"", filename),
+                format!("attachment; filename=\"{filename}\""),
             ),
         ],
-        csv_output,
+        body,
     )
         .into_response())
 }
@@ -605,6 +599,7 @@ async fn cve_read_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::cve_export::csv_field;
 
     // Admin enforcement for trigger_fleet_rescan is exercised end-to-end against
     // the real route below, because the extractor is what actually rejects a

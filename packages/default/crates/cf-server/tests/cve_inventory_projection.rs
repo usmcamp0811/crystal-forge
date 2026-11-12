@@ -378,13 +378,13 @@ async fn scoped_groups_and_members_keep_all_sections_and_page_past_200(pool: PgP
         );
         pairs_query.offset = None;
     }
-    pairs_query.environment_id = Some(b);
+    pairs_query.environment_id = Some(vec![b]);
     let denied_pairs = fetch_cve_inventory_pairs(&pool, &scope, &pairs_query)
         .await
         .expect("unauthorized environment pairs");
     assert_eq!(denied_pairs.total, 0);
     assert!(denied_pairs.items.is_empty());
-    pairs_query.environment_id = Some(a);
+    pairs_query.environment_id = Some(vec![a]);
     pairs_query.search = Some("CVE-2099-0205".into());
     pairs_query.limit = Some(1);
     let filtered_pairs = fetch_cve_inventory_pairs(&pool, &scope, &pairs_query)
@@ -478,7 +478,7 @@ async fn scoped_groups_and_members_keep_all_sections_and_page_past_200(pool: PgP
     );
     pairs_query.offset = None;
     pairs_query.search = None;
-    pairs_query.environment_id = Some(b);
+    pairs_query.environment_id = Some(vec![b]);
     let admin_pairs = fetch_cve_inventory_pairs(&pool, &CveReadScope::All, &pairs_query)
         .await
         .expect("admin environment pairs");
@@ -531,7 +531,7 @@ async fn scoped_groups_and_members_keep_all_sections_and_page_past_200(pool: PgP
         ),
         (2, 1, 1)
     );
-    query.environment_id = Some(b);
+    query.environment_id = Some(vec![b]);
     let denied = fetch_cve_inventory_groups(&pool, &scope, &query)
         .await
         .expect("hidden filter");
@@ -546,6 +546,120 @@ async fn scoped_groups_and_members_keep_all_sections_and_page_past_200(pool: PgP
     assert_eq!(admin_b.items[0].critical_pair_count, 1);
     assert_eq!(admin_b.items[0].exploited_pair_count, 1);
     assert_eq!(admin_b.items[0].patchable_pair_count, 0);
+    // TASK-521: an environment list is a union intersected with scope. A
+    // scoped caller naming both environments sees only environment A.
+    query.environment_id = Some(vec![a, b]);
+    let scoped_union = fetch_cve_inventory_groups(&pool, &scope, &query)
+        .await
+        .expect("scoped environment list");
+    assert_eq!(
+        scoped_union
+            .items
+            .iter()
+            .map(|g| g.group_id)
+            .collect::<Vec<_>>(),
+        vec![Some(a)]
+    );
+    let admin_union = fetch_cve_inventory_groups(&pool, &CveReadScope::All, &query)
+        .await
+        .expect("admin environment list");
+    assert_eq!(admin_union.total, 2);
+    let union_export = fetch_cves_for_export(
+        &pool,
+        &scope,
+        &CveFilters {
+            environment_id: Some(vec![a, b]),
+            ..CveFilters::default()
+        },
+    )
+    .await
+    .expect("scoped export with environment list");
+    let a_only_export = fetch_cves_for_export(
+        &pool,
+        &scope,
+        &CveFilters {
+            environment_id: Some(vec![a]),
+            ..CveFilters::default()
+        },
+    )
+    .await
+    .expect("scoped export for A");
+    assert_eq!(union_export.len(), a_only_export.len());
+    let hidden_only_export = fetch_cves_for_export(
+        &pool,
+        &scope,
+        &CveFilters {
+            environment_id: Some(vec![b]),
+            ..CveFilters::default()
+        },
+    )
+    .await
+    .expect("scoped export for hidden B");
+    assert!(hidden_only_export.is_empty());
+    let admin_b_export = fetch_cves_for_export(
+        &pool,
+        &CveReadScope::All,
+        &CveFilters {
+            environment_id: Some(vec![b]),
+            ..CveFilters::default()
+        },
+    )
+    .await
+    .expect("admin export for B");
+    assert!(!admin_b_export.is_empty());
+    let mut pairs_for_count = params("environment");
+    pairs_for_count.environment_id = Some(vec![a, b]);
+    pairs_for_count.limit = Some(200);
+    assert_eq!(
+        fetch_cve_inventory_pairs(&pool, &scope, &pairs_for_count)
+            .await
+            .expect("pair total for export count")
+            .total,
+        union_export.len() as i64,
+        "the export button count equals the exported rows"
+    );
+    // Values within one filter are OR-combined.
+    let critical = fetch_cves_for_export(
+        &pool,
+        &scope,
+        &CveFilters {
+            severity: Some("critical".into()),
+            ..CveFilters::default()
+        },
+    )
+    .await
+    .expect("critical export");
+    let high = fetch_cves_for_export(
+        &pool,
+        &scope,
+        &CveFilters {
+            severity: Some("high".into()),
+            ..CveFilters::default()
+        },
+    )
+    .await
+    .expect("high export");
+    let both = fetch_cves_for_export(
+        &pool,
+        &scope,
+        &CveFilters {
+            severity: Some("critical,high".into()),
+            ..CveFilters::default()
+        },
+    )
+    .await
+    .expect("critical or high export");
+    assert!(!critical.is_empty() && !high.is_empty());
+    assert_eq!(both.len(), critical.len() + high.len());
+    pairs_for_count.severity = Some("critical,high".into());
+    pairs_for_count.fix_status = Some("available,exploited".into());
+    let multi = fetch_cve_inventory_pairs(&pool, &scope, &pairs_for_count)
+        .await
+        .expect("multi-value pair filters");
+    assert!(multi.items.iter().all(|pair| {
+        matches!(pair.severity.as_str(), "CRITICAL" | "HIGH")
+            && (pair.fix_status == "fix_available" || pair.exploited)
+    }));
     query.environment_id = None;
     query.group_id = Some(b);
     let denied = fetch_cve_inventory_members(&pool, &scope, &query)
@@ -827,7 +941,7 @@ async fn fleet_substrings_are_literal_across_list_export_groups_and_pages(pool: 
         0
     );
     query.severity = None;
-    query.environment_id = Some(Uuid::new_v4());
+    query.environment_id = Some(vec![Uuid::new_v4()]);
     assert_eq!(
         fetch_cve_inventory_pairs(&pool, &scope, &query)
             .await

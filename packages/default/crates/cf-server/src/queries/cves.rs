@@ -18,7 +18,7 @@ use crate::api::models::{
     SystemCveEvidenceRepresentation, SystemCveInventoryAttempt, SystemCveInventoryAuthority,
     SystemCveInventoryCandidate, SystemCveInventoryMetadata, SystemCveInventoryParams,
     SystemCveInventorySelection, SystemCveInventorySeverityCounts, SystemCveInventorySource,
-    SystemCveRunningTarget,
+    SystemCveRunningTarget, comma_filter_values,
 };
 use crate::auth::extractors::AuthenticatedUser;
 
@@ -378,6 +378,16 @@ impl SystemCveInventoryPageRequest {
 
 // INVARIANT: Every user-supplied fleet substring uses this pattern with an
 // explicit SQL ESCAPE '\' clause. Only the outer percent signs are wildcards.
+/// Severity filter values, upper-cased to match `severity_from_cvss`.
+fn severity_filter_values(value: Option<&str>) -> Option<Vec<String>> {
+    comma_filter_values(value).map(|values| values.iter().map(|v| v.to_uppercase()).collect())
+}
+
+/// Fix-status or triage-status filter values, lower-cased for comparison.
+fn status_filter_values(value: Option<&str>) -> Option<Vec<String>> {
+    comma_filter_values(value).map(|values| values.iter().map(|v| v.to_lowercase()).collect())
+}
+
 fn cve_substring_pattern(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
@@ -1699,12 +1709,12 @@ const FLEET_INVENTORY_PROJECTION_CTE: &str = r#"
 , filtered_pairs AS (
   SELECT item.*
   FROM inventory_list item
-  WHERE ($3::text IS NULL OR UPPER(item.severity)=$3)
-    AND ($4::text IS NULL
-      OR ($4='available' AND item.fix_status='fix_available')
-      OR ($4='pending' AND item.fix_status='open')
-      OR ($4='exploited' AND item.exploited))
-    AND ($5::text IS NULL OR LOWER(item.triage_status)=LOWER($5))
+  WHERE ($3::text[] IS NULL OR UPPER(item.severity)=ANY($3))
+    AND ($4::text[] IS NULL
+      OR ('available'=ANY($4) AND item.fix_status='fix_available')
+      OR ('pending'=ANY($4) AND item.fix_status='open')
+      OR ('exploited'=ANY($4) AND item.exploited))
+    AND ($5::text[] IS NULL OR LOWER(item.triage_status)=ANY($5))
     AND ($6::text IS NULL OR item.package_name ILIKE $6 ESCAPE '\')
     AND ($7::text IS NULL OR item.cve_id ILIKE $7 ESCAPE '\'
       OR item.package_name ILIKE $7 ESCAPE '\' OR item.title ILIKE $7 ESCAPE '\')
@@ -1717,20 +1727,30 @@ const FLEET_INVENTORY_PROJECTION_CTE: &str = r#"
   JOIN systems system ON system.id=subject.system_id AND system.is_active
   LEFT JOIN flakes flake ON flake.id=system.flake_id
   LEFT JOIN view_system_deployment_status status ON status.hostname=system.hostname
-  WHERE ($2::uuid IS NULL OR subject.environment_id=$2)
+  WHERE ($2::uuid[] IS NULL OR subject.environment_id=ANY($2))
 )
 "#;
 
-fn projection_cte() -> String {
-    // SECURITY: Intersect the optional environment filter with the authorized
+/// Returns [`FLEET_INVENTORY_LIST_CTE`] restricted to the requested
+/// environment list bound at `requested` (a `uuid[]` parameter placeholder).
+fn scoped_list_cte(requested: &str) -> String {
+    // SECURITY: Intersect the optional environment list with the authorized
     // scope *inside* each inventory authority, before pair status aggregation.
-    // An unauthorized ID becomes an empty scope, never an all-scope NULL.
+    // Unauthorized IDs drop out of the intersection. A list with no
+    // authorized ID becomes an empty scope, never an all-scope NULL.
     FLEET_INVENTORY_LIST_CTE.replace(
         "$1",
-        "(CASE WHEN $2::uuid IS NULL THEN $1::uuid[] \
-         WHEN $1::uuid[] IS NULL OR $2=ANY($1) THEN ARRAY[$2]::uuid[] \
-         ELSE ARRAY[]::uuid[] END)",
+        &format!(
+            "(CASE WHEN {requested}::uuid[] IS NULL THEN $1::uuid[] \
+             WHEN $1::uuid[] IS NULL THEN {requested}::uuid[] \
+             ELSE ARRAY(SELECT unnest($1::uuid[]) INTERSECT \
+             SELECT unnest({requested}::uuid[])) END)"
+        ),
     )
+}
+
+fn projection_cte() -> String {
+    scoped_list_cte("$2")
 }
 
 fn projection_page(params: &CveInventoryProjectionParams) -> Result<(i64, i64)> {
@@ -1750,10 +1770,10 @@ fn projection_query<'a>(
 ) -> sqlx::query::Query<'a, Postgres, sqlx::postgres::PgArguments> {
     sqlx::query(sql)
         .bind(scope.environment_ids())
-        .bind(params.environment_id)
-        .bind(params.severity.as_ref().map(|s| s.to_uppercase()))
-        .bind(params.fix_status.as_deref())
-        .bind(params.triage_status.as_deref())
+        .bind(params.environment_id.as_deref())
+        .bind(severity_filter_values(params.severity.as_deref()))
+        .bind(status_filter_values(params.fix_status.as_deref()))
+        .bind(status_filter_values(params.triage_status.as_deref()))
         .bind(params.package.as_deref().map(cve_substring_pattern))
         .bind(params.search.as_deref().map(cve_substring_pattern))
 }
@@ -1816,7 +1836,7 @@ pub async fn fetch_cve_inventory_groups(
                  WHERE active_host.is_active
                    AND active_host.environment_id IS NOT DISTINCT FROM grouped.group_id
                    AND ($1::uuid[] IS NULL OR active_host.environment_id=ANY($1))
-                   AND ($2::uuid IS NULL OR active_host.environment_id=$2)
+                   AND ($2::uuid[] IS NULL OR active_host.environment_id=ANY($2))
                ) END AS total_active_hosts,
                flake_name,deployment_status
         FROM grouped ORDER BY name COLLATE "C",group_id NULLS FIRST
@@ -2003,10 +2023,10 @@ pub async fn fetch_cve_inventory_pairs(
         .try_get(0)?;
     let items = sqlx::query_as::<_, CveListItem>(&page_sql)
         .bind(scope.environment_ids())
-        .bind(params.environment_id)
-        .bind(params.severity.as_ref().map(|s| s.to_uppercase()))
-        .bind(params.fix_status.as_deref())
-        .bind(params.triage_status.as_deref())
+        .bind(params.environment_id.as_deref())
+        .bind(severity_filter_values(params.severity.as_deref()))
+        .bind(status_filter_values(params.fix_status.as_deref()))
+        .bind(status_filter_values(params.triage_status.as_deref()))
         .bind(params.package.as_deref().map(cve_substring_pattern))
         .bind(params.search.as_deref().map(cve_substring_pattern))
         .bind(params.sort.as_deref().unwrap_or("severity"))
@@ -2020,10 +2040,10 @@ pub async fn fetch_cve_inventory_pairs(
     let package_host_unions = if offset == 0 && total <= limit && items.len() as i64 == total {
         sqlx::query_as::<_, CveInventoryPackageHostUnion>(&union_sql)
             .bind(scope.environment_ids())
-            .bind(params.environment_id)
-            .bind(params.severity.as_ref().map(|s| s.to_uppercase()))
-            .bind(params.fix_status.as_deref())
-            .bind(params.triage_status.as_deref())
+            .bind(params.environment_id.as_deref())
+            .bind(severity_filter_values(params.severity.as_deref()))
+            .bind(status_filter_values(params.fix_status.as_deref()))
+            .bind(status_filter_values(params.triage_status.as_deref()))
             .bind(params.package.as_deref().map(cve_substring_pattern))
             .bind(params.search.as_deref().map(cve_substring_pattern))
             .fetch_all(&mut *tx)
@@ -2106,21 +2126,47 @@ pub async fn fetch_cves_for_export(
     Ok(rows)
 }
 
+/// Returns the sorted names of requested environments inside the read scope.
+///
+/// Export documents use these names to label their environment scope.
+/// Requested IDs outside the caller's scope are omitted, so the label never
+/// discloses an environment that the caller cannot read.
+///
+/// # Errors
+///
+/// Returns a database error when the names cannot be loaded.
+pub async fn fetch_scoped_environment_names(
+    pool: &PgPool,
+    scope: &CveReadScope,
+    requested: &[Uuid],
+) -> std::result::Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT name FROM environments \
+         WHERE id=ANY($2) AND ($1::uuid[] IS NULL OR id=ANY($1)) \
+         ORDER BY name COLLATE \"C\"",
+    )
+    .bind(scope.environment_ids())
+    .bind(requested)
+    .fetch_all(pool)
+    .await
+}
+
 async fn fetch_cve_rows(
     pool: &PgPool,
     scope: &CveReadScope,
     filters: &CveFilters,
     limit: i64,
 ) -> std::result::Result<Vec<CveListItem>, sqlx::Error> {
-    let severity_param = filters.severity.as_ref().map(|s| s.to_uppercase());
-    let fix_status_param = filters.fix_status.clone();
-    let triage_status_param = filters.triage_status.clone();
+    let severity_param = severity_filter_values(filters.severity.as_deref());
+    let fix_status_param = status_filter_values(filters.fix_status.as_deref());
+    let triage_status_param = status_filter_values(filters.triage_status.as_deref());
     let package_param = filters.package.as_deref().map(cve_substring_pattern);
     let search_param = filters.search.as_deref().map(cve_substring_pattern);
     let sort_param = filters.sort.as_deref().unwrap_or("severity");
 
     let sql = format!(
-        "{FLEET_INVENTORY_LIST_CTE}{}",
+        "{}{}",
+        scoped_list_cte("$9"),
         r#"
         SELECT
             cve_id,
@@ -2147,14 +2193,14 @@ async fn fetch_cve_rows(
             LOWER(COALESCE(triage_status, 'outstanding')) AS triage_status
         FROM inventory_list
         WHERE
-            ($2::text IS NULL OR UPPER(severity) = $2)
+            ($2::text[] IS NULL OR UPPER(severity) = ANY($2))
             AND (
-                $3::text IS NULL
-                OR ($3 = 'available' AND fix_status = 'fix_available')
-                OR ($3 = 'pending' AND fix_status = 'open')
-                OR ($3 = 'exploited' AND exploited = TRUE)
+                $3::text[] IS NULL
+                OR ('available' = ANY($3) AND fix_status = 'fix_available')
+                OR ('pending' = ANY($3) AND fix_status = 'open')
+                OR ('exploited' = ANY($3) AND exploited = TRUE)
             )
-            AND ($4::text IS NULL OR LOWER(triage_status) = LOWER($4))
+            AND ($4::text[] IS NULL OR LOWER(triage_status) = ANY($4))
             AND ($5::text IS NULL OR package_name ILIKE $5 ESCAPE '\')
             AND (
                 $6::text IS NULL
@@ -2192,6 +2238,7 @@ async fn fetch_cve_rows(
         .bind(search_param)
         .bind(sort_param)
         .bind(limit)
+        .bind(filters.environment_id.as_deref())
         .fetch_all(pool)
         .await?;
 
@@ -2211,15 +2258,16 @@ pub async fn fetch_cve_packages_grouped(
     scope: &CveReadScope,
     filters: &CveFilters,
 ) -> Result<Vec<CvePackageGroup>> {
-    let severity_param = filters.severity.as_ref().map(|s| s.to_uppercase());
-    let fix_status_param = filters.fix_status.clone();
-    let triage_status_param = filters.triage_status.clone();
+    let severity_param = severity_filter_values(filters.severity.as_deref());
+    let fix_status_param = status_filter_values(filters.fix_status.as_deref());
+    let triage_status_param = status_filter_values(filters.triage_status.as_deref());
     let package_param = filters.package.as_deref().map(cve_substring_pattern);
     let search_param = filters.search.as_deref().map(cve_substring_pattern);
 
     // 1) Aggregate package cards over the full filtered dataset (no list-row cap).
     let package_sql = format!(
-        "{FLEET_INVENTORY_LIST_CTE}{}",
+        "{}{}",
+        scoped_list_cte("$7"),
         r#", filtered AS (
             SELECT
                 cve_id,
@@ -2236,14 +2284,14 @@ pub async fn fetch_cve_packages_grouped(
                 affected_environments
             FROM inventory_list
             WHERE
-                ($2::text IS NULL OR UPPER(severity) = $2)
+                ($2::text[] IS NULL OR UPPER(severity) = ANY($2))
                 AND (
-                    $3::text IS NULL
-                    OR ($3 = 'available' AND fix_status = 'fix_available')
-                    OR ($3 = 'pending' AND fix_status = 'open')
-                    OR ($3 = 'exploited' AND exploited = TRUE)
+                    $3::text[] IS NULL
+                    OR ('available' = ANY($3) AND fix_status = 'fix_available')
+                    OR ('pending' = ANY($3) AND fix_status = 'open')
+                    OR ('exploited' = ANY($3) AND exploited = TRUE)
                 )
-                AND ($4::text IS NULL OR LOWER(triage_status) = LOWER($4))
+                AND ($4::text[] IS NULL OR LOWER(triage_status) = ANY($4))
                 AND ($5::text IS NULL OR package_name ILIKE $5 ESCAPE '\')
                 AND (
                     $6::text IS NULL
@@ -2333,6 +2381,7 @@ pub async fn fetch_cve_packages_grouped(
         .bind(triage_status_param.clone())
         .bind(package_param.clone())
         .bind(search_param.clone())
+        .bind(filters.environment_id.as_deref())
         .fetch_all(pool)
         .await?;
 
@@ -2343,7 +2392,8 @@ pub async fn fetch_cve_packages_grouped(
 
     // 2) Fetch nested rows in one query; cap nested rows per package via ROW_NUMBER.
     let nested_sql = format!(
-        "{FLEET_INVENTORY_LIST_CTE}{}",
+        "{}{}",
+        scoped_list_cte("$8"),
         r#", filtered AS (
             SELECT
                 cve_id,
@@ -2370,14 +2420,14 @@ pub async fn fetch_cve_packages_grouped(
                 LOWER(COALESCE(triage_status, 'outstanding')) AS triage_status
             FROM inventory_list
             WHERE
-                ($2::text IS NULL OR UPPER(severity) = $2)
+                ($2::text[] IS NULL OR UPPER(severity) = ANY($2))
                 AND (
-                    $3::text IS NULL
-                    OR ($3 = 'available' AND fix_status = 'fix_available')
-                    OR ($3 = 'pending' AND fix_status = 'open')
-                    OR ($3 = 'exploited' AND exploited = TRUE)
+                    $3::text[] IS NULL
+                    OR ('available' = ANY($3) AND fix_status = 'fix_available')
+                    OR ('pending' = ANY($3) AND fix_status = 'open')
+                    OR ('exploited' = ANY($3) AND exploited = TRUE)
                 )
-                AND ($4::text IS NULL OR LOWER(triage_status) = LOWER($4))
+                AND ($4::text[] IS NULL OR LOWER(triage_status) = ANY($4))
                 AND ($5::text IS NULL OR package_name ILIKE $5 ESCAPE '\')
                 AND (
                     $6::text IS NULL
@@ -2427,6 +2477,7 @@ pub async fn fetch_cve_packages_grouped(
         .bind(package_param)
         .bind(search_param)
         .bind(&selected_packages)
+        .bind(filters.environment_id.as_deref())
         .fetch_all(pool)
         .await?;
 
@@ -3090,8 +3141,11 @@ mod tests {
         params.offset = Some(201);
         assert_eq!(projection_page(&params).unwrap(), (201, 200));
         let sql = projection_cte();
-        assert!(sql.contains("ELSE ARRAY[]::uuid[] END"));
+        assert!(sql.contains("INTERSECT SELECT unnest($2::uuid[])"));
         assert!(!sql.contains("environment_id=ANY($1)"));
+        let list_sql = scoped_list_cte("$9");
+        assert!(list_sql.contains("INTERSECT SELECT unnest($9::uuid[])"));
+        assert!(!list_sql.contains("environment_id=ANY($1)"));
     }
 
     #[test]

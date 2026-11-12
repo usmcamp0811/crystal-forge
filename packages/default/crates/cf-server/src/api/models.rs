@@ -1124,7 +1124,47 @@ pub struct SaveSystemCveJustificationRequest {
 // Advanced CVE Dashboard DTOs (TASK-322)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Filter parameters for CVE list queries.
+/// Splits a comma-separated filter value into its non-empty, trimmed values.
+///
+/// The CVE filter parameters `severity`, `fix_status`, `triage_status`, and
+/// `environment_id` accept one value or a comma-separated list. Values in one
+/// list are OR-combined. Returns `None` when the parameter is absent or holds
+/// no non-empty value, so an empty list never means "match nothing".
+pub fn comma_filter_values(value: Option<&str>) -> Option<Vec<String>> {
+    let values: Vec<String> = value?
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect();
+    (!values.is_empty()).then_some(values)
+}
+
+/// Deserializes a comma-separated `environment_id` query value into UUIDs.
+///
+/// # Errors
+///
+/// Rejects the request when any listed value is not a UUID. A malformed ID
+/// MUST NOT be ignored, because ignoring it would widen the requested scope.
+fn deserialize_environment_ids<'de, D>(deserializer: D) -> Result<Option<Vec<Uuid>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    comma_filter_values(raw.as_deref())
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| Uuid::parse_str(value).map_err(serde::de::Error::custom))
+                .collect()
+        })
+        .transpose()
+}
+
+/// Filter parameters for CVE list and export queries.
+///
+/// `severity`, `fix_status`, and `triage_status` accept comma-separated
+/// lists (see [`comma_filter_values`]). Different filters are AND-combined.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CveFilters {
     pub severity: Option<String>,      // "critical", "high", "medium", "low"
@@ -1134,22 +1174,30 @@ pub struct CveFilters {
     pub search: Option<String>,        // Search across CVE ID, package, title
     pub sort: Option<String>,          // "severity", "cvss", "age", "affected"
     pub limit: Option<i64>,            // Max results (default 500, max 1000)
+    /// Restricts rows to the union of these environments, intersected with
+    /// the caller's read scope. Absence means every visible environment.
+    #[serde(default, deserialize_with = "deserialize_environment_ids")]
+    pub environment_id: Option<Vec<Uuid>>,
 }
 
 /// Selects a paged, read-only CVE inventory projection. Filters apply to
 /// CVE/package identities before group counts and membership pagination.
+/// `severity`, `fix_status`, `triage_status`, and `environment_id` accept
+/// comma-separated lists (see [`comma_filter_values`]).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CveInventoryProjectionParams {
     /// Groups by `environment` or `host`; not used by the pairs endpoint.
     #[serde(default)]
     pub group_by: String,
-    /// Narrows the result to one authorized environment; absence means all visible environments.
-    pub environment_id: Option<Uuid>,
-    /// Filters by normalized severity.
+    /// Narrows the result to the union of these authorized environments;
+    /// absence means all visible environments.
+    #[serde(default, deserialize_with = "deserialize_environment_ids")]
+    pub environment_id: Option<Vec<Uuid>>,
+    /// Filters by one or more normalized severities.
     pub severity: Option<String>,
-    /// Filters by available, pending, or exploited fix status.
+    /// Filters by one or more of available, pending, or exploited.
     pub fix_status: Option<String>,
-    /// Filters by the scoped pair's triage status.
+    /// Filters by one or more scoped pair triage statuses.
     pub triage_status: Option<String>,
     /// Matches a package substring.
     pub package: Option<String>,

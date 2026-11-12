@@ -474,7 +474,11 @@ pub struct CveScanFreshnessRow {
 // Advanced CVE Dashboard DTOs (TASK-322)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Filter parameters for CVE list queries.
+/// Filter parameters for CVE list, inventory, and export queries.
+///
+/// `severity`, `fix_status`, and `triage_status` hold one value or a
+/// comma-separated list; the server OR-combines values within one filter and
+/// AND-combines different filters.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CveFilters {
     pub severity: Option<String>,
@@ -484,6 +488,11 @@ pub struct CveFilters {
     pub search: Option<String>,
     pub sort: Option<String>,
     pub limit: Option<i64>,
+    /// Restricts results to the union of these environments, intersected with
+    /// the caller's server-side read scope. Empty means every visible
+    /// environment.
+    #[serde(default)]
+    pub environment_ids: Vec<Uuid>,
 }
 
 /// Selects a server-scoped, filtered page of environment or host CVE inventory.
@@ -492,8 +501,6 @@ pub struct CveFilters {
 pub struct CveInventoryQuery {
     /// `environment` or `host`.
     pub group_by: String,
-    /// Restricts the query to one authorized environment when present.
-    pub environment_id: Option<Uuid>,
     /// Exact group identity for membership requests.
     pub group_id: Option<Uuid>,
     /// Applies CVE/package filters before grouping and pagination.

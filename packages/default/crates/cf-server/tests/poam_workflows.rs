@@ -7539,6 +7539,43 @@ async fn cve_export_ignores_list_pagination_and_preserves_long_exact_identity(po
     assert_eq!(csv.lines().count(), 4, "header plus all complete rows");
     assert!(csv.contains(&long_package));
     assert!(csv.contains(&long_version));
+
+    // TASK-521: every design export format carries the same three rows.
+    let client = reqwest::Client::new();
+    let get = |query: &str| {
+        client
+            .get(format!("{base}/api/v1/cves/export?{query}"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+    };
+    let excel = get("format=excel").await.unwrap();
+    assert_eq!(excel.status(), reqwest::StatusCode::OK);
+    assert!(
+        excel.headers()[reqwest::header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .ends_with(".xlsx\"")
+    );
+    assert!(excel.bytes().await.unwrap().starts_with(b"PK"));
+    let oscal: serde_json::Value = get("format=oscal-json")
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let result = &oscal["assessment-results"]["results"][0];
+    assert_eq!(result["observations"].as_array().unwrap().len(), 3);
+    assert_eq!(result["findings"].as_array().unwrap().len(), 3);
+    let xml = get("format=oscal-xml").await.unwrap().text().await.unwrap();
+    assert_eq!(xml.matches("<finding ").count(), 3);
+    assert_eq!(
+        get("format=pdf").await.unwrap().status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        get("environment_id=not-a-uuid").await.unwrap().status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -7587,6 +7624,19 @@ async fn cve_export_rejects_results_above_the_documented_bound(pool: PgPool) {
     let body = response.text().await.unwrap();
     assert!(body.contains("1000-row limit"));
     assert!(body.contains("narrow the filters"));
+    for format in ["excel", "oscal-json", "oscal-xml"] {
+        let response = reqwest::Client::new()
+            .get(format!("{base}/api/v1/cves/export?format={format}"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            "{format} export honors the row bound"
+        );
+    }
 }
 
 #[sqlx::test(migrations = "./migrations")]
