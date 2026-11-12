@@ -90,5 +90,7 @@ Preview verification (run-ui-dev, fixture + 6 seeded `preview-cve-*` hosts with 
 
 Not run: integration owners (`integration-assurance`), `nix flake check`, MR screenshots. `cf-server-core` package build on the remote builder failed once with 15 unrelated tests timing out on "Nix parser did not finish within 2 seconds" (deployment_policies, compliance_interchange); a rebuild then succeeded. Not committed.
 
+2026-11-11: committed 797bd5c1 and pushed branch TASK-521-cve-multiselect-export (vm-agent cannot reach gitlab.com:22; pushed via altssh.gitlab.com:443). Draft MR opened with GitLab push options targeting dev. Task stays In Progress until owning integration results (integration-assurance) and MR screenshots exist.
+
 Design note: the design's triage MultiSeg omits `inventory_only`; the implementation keeps it because the domain status exists.
 <!-- SECTION:NOTES:END -->
