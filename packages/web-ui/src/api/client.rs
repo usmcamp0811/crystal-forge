@@ -684,12 +684,6 @@ pub async fn fetch_cve_fleet_stats() -> Result<CveFleetStats, ApiClientError> {
     fetch_json(&url).await
 }
 
-/// Fetch package names for autocomplete.
-pub async fn fetch_cve_package_names() -> Result<Vec<String>, ApiClientError> {
-    let url = format!("{}/cves/packages", base_url());
-    fetch_json(&url).await
-}
-
 /// Fetch detailed information for a single CVE.
 pub async fn fetch_cve_detail(cve_id: &str) -> Result<CveDetail, ApiClientError> {
     let url = format!("{}/cves/{}", base_url(), encode_uri_component(cve_id));
@@ -770,9 +764,32 @@ pub fn cve_export_url(filters: &CveFilters, format: &str) -> String {
     format!("{}/cves/export?{}", base_url(), parts.join("&"))
 }
 
-/// Downloads the server-filtered CVE export and saves it as `filename`.
+/// Returns the double-submit CSRF token from the `__Host-cf-csrf` cookie.
+fn csrf_cookie_token() -> Option<String> {
+    let document = web_sys::window()?.document()?;
+    let cookies = js_sys::Reflect::get(&document, &wasm_bindgen::JsValue::from_str("cookie"))
+        .ok()?
+        .as_string()?;
+    cookies
+        .split(';')
+        .find_map(|cookie| cookie.trim().strip_prefix("__Host-cf-csrf="))
+        .map(str::to_owned)
+}
+
+/// Rows that a CVE export request covers.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CveExportTarget {
+    /// The server-filtered result (`GET /cves/export`).
+    Filters(CveFilters),
+    /// Exactly these `(cve_id, canonical_package_name)` pairs
+    /// (`POST /cves/export`). A POST body holds a selection of any size.
+    Pairs(Vec<(String, String)>),
+}
+
+/// Downloads a CVE export of `target` and saves it as `filename`.
 ///
-/// The request runs with the session cookie. The browser saves the file only
+/// The request runs with the session cookie; a selected-pair export also sends
+/// the CSRF token, as every browser POST does. The browser saves the file only
 /// after a successful response, so a rejected export (for example `422` when
 /// the result exceeds the server row limit) leaves the page in place.
 ///
@@ -782,7 +799,7 @@ pub fn cve_export_url(filters: &CveFilters, format: &str) -> String {
 /// response, or [`ApiClientError::Network`] when the request or the browser
 /// download fails.
 pub async fn download_cve_export(
-    filters: &CveFilters,
+    target: &CveExportTarget,
     format: &str,
     filename: &str,
 ) -> Result<(), ApiClientError> {
@@ -792,15 +809,47 @@ pub async fn download_cve_export(
     let network = |e: JsValue| ApiClientError::Network(format!("{e:?}"));
     let window = web_sys::window().ok_or_else(|| ApiClientError::Network("no window".into()))?;
     let opts = web_sys::RequestInit::new();
-    opts.set_method("GET");
     let _ = js_sys::Reflect::set(
         opts.as_ref(),
         &JsValue::from_str("credentials"),
         &JsValue::from_str("include"),
     );
-    let request =
-        web_sys::Request::new_with_str_and_init(&cve_export_url(filters, format), &opts)
+    let url = match target {
+        CveExportTarget::Filters(filters) => {
+            opts.set_method("GET");
+            cve_export_url(filters, format)
+        }
+        CveExportTarget::Pairs(pairs) => {
+            let pairs: Vec<_> = pairs
+                .iter()
+                .map(|(cve_id, package)| {
+                    serde_json::json!({"cve_id": cve_id, "canonical_package_name": package})
+                })
+                .collect();
+            opts.set_method("POST");
+            opts.set_body(&JsValue::from_str(
+                &serde_json::json!({ "pairs": pairs }).to_string(),
+            ));
+            format!(
+                "{}/cves/export?format={}",
+                base_url(),
+                encode_query_value(format)
+            )
+        }
+    };
+    let request = web_sys::Request::new_with_str_and_init(&url, &opts).map_err(network)?;
+    if matches!(target, CveExportTarget::Pairs(_)) {
+        request
+            .headers()
+            .set("Content-Type", "application/json")
             .map_err(network)?;
+        if let Some(token) = csrf_cookie_token() {
+            request
+                .headers()
+                .set("X-CSRF-Token", &token)
+                .map_err(network)?;
+        }
+    }
     let response: web_sys::Response = JsFuture::from(window.fetch_with_request(&request))
         .await
         .map_err(network)?

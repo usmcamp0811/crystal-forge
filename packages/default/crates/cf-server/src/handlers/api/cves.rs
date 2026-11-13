@@ -484,11 +484,85 @@ pub struct DerivationRescanResponse {
     pub message: String,
 }
 
-/// Selects the download encoding for [`export_cves`].
+/// Selects the download encoding for [`export_cves`] and
+/// [`export_selected_cves`].
 #[derive(Debug, Deserialize)]
 pub struct CveExportFormatParam {
     /// `csv` (default), `excel`, `oscal-json`, or `oscal-xml`.
     pub format: Option<String>,
+}
+
+/// Lists the exact CVE/package pairs that the operator selected for export.
+#[derive(Debug, Deserialize)]
+pub struct CveExportSelectionRequest {
+    /// Exact pair identities. Duplicates are exported once.
+    pub pairs: Vec<crate::api::models::CveBatchPairIdentity>,
+}
+
+fn parse_export_format(
+    format: &CveExportFormatParam,
+) -> Result<cve_export::CveExportFormat, (StatusCode, String)> {
+    cve_export::CveExportFormat::parse(format.format.as_deref()).map_err(|value| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Unsupported CVE export format: {value}"),
+        )
+    })
+}
+
+fn export_error(error: cves::CveExportError) -> (StatusCode, String) {
+    match error {
+        cves::CveExportError::TooManyRows => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "CVE export exceeds the {}-row limit; narrow the filters and retry",
+                cves::MAX_CVE_EXPORT_ROWS
+            ),
+        ),
+        cves::CveExportError::Database(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to fetch CVEs for export: {error}"),
+        ),
+    }
+}
+
+fn export_response(
+    format: cve_export::CveExportFormat,
+    cves: &[CveListItem],
+    environments: &[String],
+) -> Result<Response, (StatusCode, String)> {
+    let generated_at = chrono::Utc::now();
+    let body = cve_export::encode(
+        format,
+        cves,
+        &cve_export::ExportContext {
+            environments,
+            generated_at,
+        },
+    )
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to encode CVE export: {error}"),
+        )
+    })?;
+    let (extension, content_type) = format.file_type();
+    let filename = format!(
+        "crystal-forge-cves-{}.{extension}",
+        generated_at.format("%Y-%m-%d")
+    );
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type.to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 /// Exports the caller's complete filtered CVE result.
@@ -511,28 +585,11 @@ pub async fn export_cves(
     Query(format): Query<CveExportFormatParam>,
     RequireAuth(user): RequireAuth,
 ) -> Result<Response, (StatusCode, String)> {
-    let format = cve_export::CveExportFormat::parse(format.format.as_deref()).map_err(|value| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Unsupported CVE export format: {value}"),
-        )
-    })?;
+    let format = parse_export_format(&format)?;
     let scope = cve_read_scope(&state, &user).await?;
     let cves = cves::fetch_cves_for_export(&state.pool, &scope, &filters)
         .await
-        .map_err(|error| match error {
-            cves::CveExportError::TooManyRows => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!(
-                    "CVE export exceeds the {}-row limit; narrow the filters and retry",
-                    cves::MAX_CVE_EXPORT_ROWS
-                ),
-            ),
-            cves::CveExportError::Database(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to fetch CVEs for export: {error}"),
-            ),
-        })?;
+        .map_err(export_error)?;
     let environments = match filters.environment_id.as_deref() {
         Some(ids) => cves::fetch_scoped_environment_names(&state.pool, &scope, ids)
             .await
@@ -544,40 +601,44 @@ pub async fn export_cves(
             })?,
         None => Vec::new(),
     };
-    let generated_at = chrono::Utc::now();
-    let body = cve_export::encode(
-        format,
-        &cves,
-        &cve_export::ExportContext {
-            environments: &environments,
-            generated_at,
-        },
-    )
-    .map_err(|error| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to encode CVE export: {error}"),
-        )
-    })?;
+    export_response(format, &cves, &environments)
+}
 
-    let (extension, content_type) = format.file_type();
-    let filename = format!(
-        "crystal-forge-cves-{}.{extension}",
-        generated_at.format("%Y-%m-%d")
-    );
-
-    Ok((
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, content_type.to_owned()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{filename}\""),
-            ),
-        ],
-        body,
-    )
-        .into_response())
+/// Exports exactly the selected CVE/package pairs (`POST /cves/export`).
+///
+/// The body lists exact pair identities; `format` is the same query parameter
+/// as [`export_cves`]. Rows are fleet-wide within the caller's read scope; a
+/// listed pair outside that scope is omitted and its absence is not reported.
+/// This read is a POST only so that a large selection fits in a request body.
+/// It does not mutate state. It requires the double-submit CSRF token like
+/// every other browser POST.
+///
+/// # Errors
+///
+/// Returns `400 Bad Request` for an unsupported format or an empty selection.
+/// Returns `403 Forbidden` without a matching CSRF token. Returns
+/// `422 Unprocessable Entity` when the selection lists more than
+/// [`cves::MAX_CVE_EXPORT_ROWS`] pairs. Returns `500 Internal Server Error`
+/// when PostgreSQL cannot load the export or serialization fails.
+pub async fn export_selected_cves(
+    State(state): State<CFState>,
+    Query(format): Query<CveExportFormatParam>,
+    RequireAuth(user): RequireAuth,
+    _csrf: RequireCsrf,
+    Json(selection): Json<CveExportSelectionRequest>,
+) -> Result<Response, (StatusCode, String)> {
+    let format = parse_export_format(&format)?;
+    if selection.pairs.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Select at least one CVE to export".into(),
+        ));
+    }
+    let scope = cve_read_scope(&state, &user).await?;
+    let cves = cves::fetch_selected_cves_for_export(&state.pool, &scope, &selection.pairs)
+        .await
+        .map_err(export_error)?;
+    export_response(format, &cves, &[])
 }
 
 use serde::Serialize;

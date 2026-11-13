@@ -10,8 +10,8 @@ use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 use crate::api::models::{
-    CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveInventoryGroup,
-    CveInventoryGroupPage, CveInventoryMember, CveInventoryMemberPage,
+    CveAffectedSystemDetail, CveBatchPairIdentity, CveDetail, CveFilters, CveFleetStats,
+    CveInventoryGroup, CveInventoryGroupPage, CveInventoryMember, CveInventoryMemberPage,
     CveInventoryPackageHostUnion, CveInventoryPairPage, CveInventoryProjectionParams,
     CveJustification, CveJustificationInput, CveListItem, CvePackageGroup,
     ExactCveAuthorityFailureReason, FleetCveInventorySection, SystemCveCurrentAuthorityState,
@@ -2097,7 +2097,7 @@ pub async fn fetch_cve_list(
     filters: &CveFilters,
 ) -> Result<Vec<CveListItem>> {
     let limit = filters.limit.unwrap_or(500).min(1000);
-    Ok(fetch_cve_rows(pool, scope, filters, limit).await?)
+    Ok(fetch_cve_rows(pool, scope, filters, None, limit).await?)
 }
 
 /// Fetches every filtered CVE/package row when the result fits the export bound.
@@ -2117,13 +2117,43 @@ pub async fn fetch_cves_for_export(
     scope: &CveReadScope,
     filters: &CveFilters,
 ) -> std::result::Result<Vec<CveListItem>, CveExportError> {
-    let rows = fetch_cve_rows(pool, scope, filters, MAX_CVE_EXPORT_ROWS + 1)
+    let rows = fetch_cve_rows(pool, scope, filters, None, MAX_CVE_EXPORT_ROWS + 1)
         .await
         .map_err(CveExportError::Database)?;
     if rows.len() > MAX_CVE_EXPORT_ROWS as usize {
         return Err(CveExportError::TooManyRows);
     }
     Ok(rows)
+}
+
+/// Fetches exactly the listed CVE/package pairs that the caller can read.
+///
+/// The rows use the same scoped inventory, columns, and severity order as
+/// [`fetch_cves_for_export`] without view filters. A listed pair outside the
+/// caller's scope, or with no retained inventory, yields no row.
+///
+/// # Errors
+///
+/// Returns [`CveExportError::TooManyRows`] when more than
+/// [`MAX_CVE_EXPORT_ROWS`] pairs are listed. Returns
+/// [`CveExportError::Database`] when PostgreSQL cannot load the rows.
+pub async fn fetch_selected_cves_for_export(
+    pool: &PgPool,
+    scope: &CveReadScope,
+    pairs: &[CveBatchPairIdentity],
+) -> std::result::Result<Vec<CveListItem>, CveExportError> {
+    if pairs.len() > MAX_CVE_EXPORT_ROWS as usize {
+        return Err(CveExportError::TooManyRows);
+    }
+    fetch_cve_rows(
+        pool,
+        scope,
+        &CveFilters::default(),
+        Some(pairs),
+        MAX_CVE_EXPORT_ROWS,
+    )
+    .await
+    .map_err(CveExportError::Database)
 }
 
 /// Returns the sorted names of requested environments inside the read scope.
@@ -2155,6 +2185,7 @@ async fn fetch_cve_rows(
     pool: &PgPool,
     scope: &CveReadScope,
     filters: &CveFilters,
+    pairs: Option<&[CveBatchPairIdentity]>,
     limit: i64,
 ) -> std::result::Result<Vec<CveListItem>, sqlx::Error> {
     let severity_param = severity_filter_values(filters.severity.as_deref());
@@ -2208,6 +2239,13 @@ async fn fetch_cve_rows(
                 OR package_name ILIKE $6 ESCAPE '\'
                 OR title ILIKE $6 ESCAPE '\'
             )
+            AND (
+                $10::text[] IS NULL
+                OR (cve_id, package_name) IN (
+                    SELECT pair.cve_id, pair.package_name
+                    FROM unnest($10::text[], $11::text[]) AS pair(cve_id, package_name)
+                )
+            )
         ORDER BY
             CASE
                 WHEN $7 = 'severity' THEN
@@ -2239,6 +2277,12 @@ async fn fetch_cve_rows(
         .bind(sort_param)
         .bind(limit)
         .bind(filters.environment_id.as_deref())
+        .bind(pairs.map(|p| p.iter().map(|x| x.cve_id.clone()).collect::<Vec<_>>()))
+        .bind(pairs.map(|p| {
+            p.iter()
+                .map(|x| x.canonical_package_name.clone())
+                .collect::<Vec<_>>()
+        }))
         .fetch_all(pool)
         .await?;
 

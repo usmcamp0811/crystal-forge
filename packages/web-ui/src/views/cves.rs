@@ -30,7 +30,7 @@ use crate::components::chips::EnvBadge;
 use crate::components::cve::triage::{
     CveTriageDraft, EnvironmentTriageChoice, catalog_contains_assignee, fixed_version_label,
 };
-use crate::components::filters::{FilterOption, MultiFilter, toggle_selection};
+use crate::components::filters::{FilterOption, MultiFilter};
 use crate::components::dialog_focus::{
     DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
 };
@@ -433,44 +433,73 @@ fn cve_export_filename(format: &str, scope: Option<&str>, date: &str) -> String 
     format!("cves-{date}{suffix}.{extension}")
 }
 
-/// Multi-select toggle group from the approved CVEs design (`MultiSeg`).
-///
-/// An empty selection means no restriction and highlights `all_label`.
-/// Selecting `all_label` clears the selection. Each option toggles
-/// independently; a selected option shows a check icon and its `data-k` color.
-#[component]
-fn MultiSeg(
-    all_label: &'static str,
-    options: Vec<(&'static str, &'static str)>,
-    selected: Vec<String>,
-    on_change: EventHandler<Vec<String>>,
-) -> Element {
-    rsx! {
-        div { class: "seg", role: "group",
-            button {
-                class: if selected.is_empty() { "active" } else { "" },
-                onclick: move |_| on_change.call(Vec::new()),
-                "{all_label}"
-            }
-            for (value, label) in options {
-                {
-                    let on = selected.iter().any(|item| item == value);
-                    let current = selected.clone();
-                    rsx! {
-                        button {
-                            key: "{value}",
-                            class: if on { "ms-opt ms-on" } else { "ms-opt" },
-                            aria_pressed: "{on}",
-                            "data-k": value,
-                            onclick: move |_| on_change.call(toggle_selection(&current, value)),
-                            if on { Icon { name: IconName::Check, size: 11 } }
-                            "{label}"
-                        }
-                    }
-                }
-            }
+/// Builds MultiFilter options with optional severity/status color dots.
+fn dot_options(options: &[(&str, &str, Option<&str>)]) -> Vec<FilterOption> {
+    options
+        .iter()
+        .map(|(value, label, dot)| FilterOption {
+            value: (*value).to_owned(),
+            label: (*label).to_owned(),
+            count: None,
+            dot: dot.map(str::to_owned),
+        })
+        .collect()
+}
+
+/// Describes the active view filters for the export menu (design 18404419
+/// `filterDesc`). Empty means no filter is active.
+fn filter_description(
+    severity: &[String],
+    fix_status: &[String],
+    triage_status: &[String],
+    package: Option<&str>,
+    environments: &[String],
+    search: &str,
+) -> Vec<String> {
+    let mut parts = Vec::new();
+    for (label, values) in [
+        ("Severity", severity),
+        ("Fix", fix_status),
+        ("Triage", triage_status),
+        ("Env", environments),
+    ] {
+        if !values.is_empty() {
+            parts.push(format!("{label}: {}", values.join(", ")));
         }
     }
+    if let Some(package) = package.filter(|p| !p.trim().is_empty()) {
+        parts.push(format!("Package: {package}"));
+    }
+    if !search.trim().is_empty() {
+        parts.push(format!("Search: “{}”", search.trim()));
+    }
+    parts
+}
+
+/// Rows that one export menu choice covers (design 18404419 "What to export").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExportScope {
+    /// The exact pairs the operator selected.
+    Selected,
+    /// The rows of the current filtered view.
+    Filtered,
+    /// Every pair the caller can read, ignoring view filters.
+    All,
+}
+
+/// Returns the scopes the export menu offers, in design order. "Selected"
+/// appears only with a selection; a separate "All CVEs" appears only while a
+/// filter is active, because the unfiltered view already is all CVEs.
+fn export_scopes(has_selection: bool, filtering: bool) -> Vec<ExportScope> {
+    let mut scopes = Vec::new();
+    if has_selection {
+        scopes.push(ExportScope::Selected);
+    }
+    scopes.push(ExportScope::Filtered);
+    if filtering {
+        scopes.push(ExportScope::All);
+    }
+    scopes
 }
 
 const SUCCESS_TOAST_DURATION_MS: u32 = 3000;
@@ -698,6 +727,10 @@ pub fn CvesView(query: String) -> Element {
     let mut toast_lifecycle = use_signal(ToastLifecycle::default);
     let mut fleet_rescan_pending = use_signal(|| false);
     let mut export_open = use_signal(|| false);
+    // Mirrors the pair selection of the Package and None views so the export
+    // menu can offer "Selected". The pairs view owns and clears it.
+    let export_selection = use_signal(BTreeSet::<ExactCveSelection>::new);
+    let mut export_scope_pick = use_signal(|| None::<ExportScope>);
     let mut batch_refresh = use_signal(|| 0_u64);
 
     // Attention flash signal for the Critical stat card (set by the use_effect after stats resolves).
@@ -812,8 +845,6 @@ pub fn CvesView(query: String) -> Element {
         }
     });
 
-    let package_names =
-        use_resource(move || async move { client::fetch_cve_package_names().await });
     let environments = use_resource(|| async move { client::fetch_environments().await });
 
     let pair_metadata = use_resource(move || {
@@ -838,6 +869,22 @@ pub fn CvesView(query: String) -> Element {
                 query.clone(),
                 client::fetch_cve_inventory_pairs(&query).await,
             )
+        }
+    });
+
+    // Total for the export menu's "All CVEs" scope: no view filters, but the
+    // server still applies the caller's read scope.
+    let unfiltered_pairs = use_resource(move || {
+        let _ = batch_refresh();
+        async move {
+            client::fetch_cve_inventory_pairs(&CveInventoryQuery {
+                group_by: "environment".into(),
+                group_id: None,
+                filters: CveFilters::default(),
+                offset: 0,
+                limit: 1,
+            })
+            .await
         }
     });
 
@@ -929,11 +976,34 @@ pub fn CvesView(query: String) -> Element {
         })
         .unwrap_or_default();
     let export_scope = (!environment_names.is_empty()).then(|| environment_names.join(", "));
-    let export_count = scoped_metadata
+    let filtered_total = scoped_metadata
         .as_ref()
         .and_then(|r| r.as_ref().ok())
-        .map(|page| page.total.to_string())
-        .unwrap_or_else(|| "…".into());
+        .map(|page| page.total);
+    let filter_summary = filter_description(
+        &severity_filter(),
+        &fix_status_filter(),
+        &triage_status_filter(),
+        package_filter().as_deref(),
+        &environment_names,
+        &search_query(),
+    );
+    let all_total = unfiltered_pairs
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|page| page.total);
+    let selected_pairs = export_selection();
+    let scopes = export_scopes(!selected_pairs.is_empty(), !filter_summary.is_empty());
+    let current_scope = export_scope_pick()
+        .filter(|scope| scopes.contains(scope))
+        .unwrap_or(scopes[0]);
+    let scope_count = |scope: ExportScope| match scope {
+        ExportScope::Selected => Some(selected_pairs.len() as i64),
+        ExportScope::Filtered => filtered_total,
+        ExportScope::All => all_total,
+    };
+    let current_count = scope_count(current_scope);
 
     use_effect(move || {
         if let (Some(Ok(_s)), Some((request, Ok(_)))) =
@@ -1023,7 +1093,7 @@ pub fn CvesView(query: String) -> Element {
                             disabled: environment_filter_error().is_some(),
                             onclick: move |_| export_open.set(!export_open()),
                             Icon { name: IconName::Download, size: 14 }
-                            " Export {export_count} "
+                            " Export "
                             Icon { name: IconName::ChevronDown, size: 11 }
                         }
                         if export_open() {
@@ -1033,13 +1103,51 @@ pub fn CvesView(query: String) -> Element {
                                 role: "menu",
                                 aria_label: "Export CVEs",
                                 onkeydown: move |evt| if evt.key() == Key::Escape { export_open.set(false) },
-                                div { class: "rr-export-title",
-                                    if let Some(scope) = &export_scope { "Export CVEs · {scope}" } else { "Export CVEs" }
+                                div { class: "rr-export-title", "What to export" }
+                                div { class: "cve-exp-scopes", role: "radiogroup",
+                                    for scope in scopes.iter().copied() {
+                                        {
+                                            let (label, sub) = match scope {
+                                                ExportScope::Selected => ("Selected", "The CVEs you ticked".to_owned()),
+                                                ExportScope::Filtered if filter_summary.is_empty() => ("All CVEs", "No filters applied".to_owned()),
+                                                ExportScope::Filtered => ("Current view", filter_summary.join(" · ")),
+                                                ExportScope::All => ("All CVEs", "Ignore filters".to_owned()),
+                                            };
+                                            let count = scope_count(scope).map(|n| n.to_string()).unwrap_or_else(|| "…".into());
+                                            let on = scope == current_scope;
+                                            rsx! {
+                                                label {
+                                                    key: "{scope:?}",
+                                                    class: if on { "cve-exp-scope on" } else { "cve-exp-scope" },
+                                                    "data-scope": "{scope:?}",
+                                                    input {
+                                                        r#type: "radio",
+                                                        name: "cve-exp",
+                                                        checked: on,
+                                                        onchange: move |_| export_scope_pick.set(Some(scope)),
+                                                    }
+                                                    span { class: "cve-exp-body",
+                                                        span { class: "cve-exp-l", "{label} " b { "{count}" } }
+                                                        span { class: "cve-exp-sub", "{sub}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
+                                div { class: "rr-export-title", "Format" }
                                 for (format, label, sub) in CVE_EXPORT_FORMATS {
                                     {
-                                        let filters = export_filters.clone();
-                                        let scope = export_scope.clone();
+                                        // INVARIANT: Each scope's count is the server total for
+                                        // exactly the request that the format button sends.
+                                        let target = match current_scope {
+                                            ExportScope::Selected => client::CveExportTarget::Pairs(
+                                                selected_pairs.iter().map(|s| (s.cve_id.clone(), s.package.clone())).collect(),
+                                            ),
+                                            ExportScope::Filtered => client::CveExportTarget::Filters(export_filters.clone()),
+                                            ExportScope::All => client::CveExportTarget::Filters(CveFilters::default()),
+                                        };
+                                        let scope = (current_scope == ExportScope::Filtered).then(|| export_scope.clone()).flatten();
                                         rsx! {
                                             button {
                                                 key: "{format}",
@@ -1047,9 +1155,10 @@ pub fn CvesView(query: String) -> Element {
                                                 class: "rr-export-item focus-ring",
                                                 role: "menuitem",
                                                 "data-format": format,
+                                                disabled: current_count == Some(0),
                                                 onclick: move |_| {
                                                     export_open.set(false);
-                                                    let filters = filters.clone();
+                                                    let target = target.clone();
                                                     let filename = cve_export_filename(
                                                         format,
                                                         scope.as_deref(),
@@ -1058,7 +1167,7 @@ pub fn CvesView(query: String) -> Element {
                                                     let mut toast_message = toast_message;
                                                     let mut toast_lifecycle = toast_lifecycle;
                                                     spawn(async move {
-                                                        match client::download_cve_export(&filters, format, &filename).await {
+                                                        match client::download_cve_export(&target, format, &filename).await {
                                                             Ok(()) => {
                                                                 let publication = toast_lifecycle.write().publish(true);
                                                                 toast_message.set(Some((format!("{label} export downloaded"), true)));
@@ -1176,79 +1285,32 @@ pub fn CvesView(query: String) -> Element {
                     }
                 }
 
-                // Severity, fix status, and triage status are multi-select
-                // toggle groups (design bc30ef57 `MultiSeg`).
-                MultiSeg {
-                    all_label: "All",
-                    options: vec![("critical", "Critical"), ("high", "High"), ("medium", "Medium"), ("low", "Low")],
+                // Design 18404419: Severity, Fix, Triage, and Environment are
+                // checkbox MultiFilter dropdowns; Group and Sort are selects.
+                MultiFilter {
+                    label: "Severity",
+                    all_label: "Severity",
+                    options: dot_options(&[("critical", "Critical", Some("#f87171")), ("high", "High", Some("#fbbf24")), ("medium", "Medium", Some("#60a5fa")), ("low", "Low", Some("#9ca3af"))]),
                     selected: severity_filter(),
                     on_change: move |values| severity_filter.set(values),
                 }
-                MultiSeg {
-                    all_label: "Any status",
-                    options: vec![("available", "Has patch"), ("pending", "No patch"), ("exploited", "Exploited")],
+                MultiFilter {
+                    label: "Fix",
+                    all_label: "Fix",
+                    options: dot_options(&[("available", "Patch available", None), ("pending", "No patch", None), ("exploited", "Known exploited", Some("#f87171"))]),
                     selected: fix_status_filter(),
                     on_change: move |values| fix_status_filter.set(values),
                 }
-                MultiSeg {
-                    all_label: "Any triage",
-                    options: vec![("outstanding", "Outstanding"), ("scheduled", "Patch scheduled"), ("accepted", "Accepted"), ("inventory_only", "Inventory only")],
+                MultiFilter {
+                    label: "Triage",
+                    all_label: "Triage",
+                    options: dot_options(&[("outstanding", "Outstanding", Some("#f87171")), ("scheduled", "Scheduled", Some("#60a5fa")), ("accepted", "Accepted", Some("#34d399")), ("inventory_only", "Inventory only", Some("#9ca3af"))]),
                     selected: triage_status_filter(),
                     on_change: move |values| triage_status_filter.set(values),
                 }
-
-                // Package filter
-                div {
-                    style: "position: relative; max-width: 200px;",
-                    input {
-                        class: "input focus-ring mono",
-                        style: if package_filter().is_some() { "font-size: 12px; padding-right: 28px;" } else { "font-size: 12px; padding-right: 12px;" },
-                        r#type: "text",
-                        list: "cve-pkg-list",
-                        placeholder: "All packages…",
-                        value: "{package_filter().unwrap_or_default()}",
-                        oninput: move |evt| {
-                            let value = evt.value();
-                            if value.trim().is_empty() {
-                                package_filter.set(None);
-                            } else {
-                                package_filter.set(Some(value));
-                            }
-                        },
-                    }
-                    datalist {
-                        id: "cve-pkg-list",
-                        if let Some(Ok(packages)) = package_names.read().as_ref() {
-                            for package in packages {
-                                option { value: "{package}" }
-                            }
-                        }
-                    }
-                    if package_filter().is_some() {
-                        button {
-                            class: "btn-icon focus-ring",
-                            style: "position: absolute; right: 4px; top: 50%; transform: translateY(-50%); padding: 4px;",
-                            title: "Clear",
-                            onclick: move |_| package_filter.set(None),
-                            svg {
-                                width: "11",
-                                height: "11",
-                                view_box: "0 0 24 24",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "2",
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                path { d: "M18 6 6 18" }
-                                path { d: "M6 6l12 12" }
-                            }
-                        }
-                    }
-                }
-
                 MultiFilter {
                     label: "Environment",
-                    all_label: "All environments",
+                    all_label: "Environment",
                     options: environments
                         .read()
                         .as_ref()
@@ -1260,6 +1322,7 @@ pub fn CvesView(query: String) -> Element {
                                     value: env.id.to_string(),
                                     label: env.name.clone(),
                                     count: None,
+                                    dot: None,
                                 })
                                 .collect::<Vec<_>>()
                         })
@@ -1270,51 +1333,50 @@ pub fn CvesView(query: String) -> Element {
                         environment_filter.set(values.iter().filter_map(|id| id.parse().ok()).collect());
                     },
                 }
-
-                // Group label + toggle
-                span {
-                    class: "filter-count",
-                    style: "margin-left: auto; margin-right: 0;",
-                    "Group"
-                }
-                div {
-                    class: "seg",
+                if !filter_summary.is_empty() || environment_filter_error().is_some() {
                     button {
-                        class: if view_mode() == "grouped" { "active" } else { "" },
-                        onclick: move |_| view_mode.set("grouped".to_string()),
-                        "Package"
-                    }
-                    button {
-                        class: if view_mode() == "environment" { "active" } else { "" },
-                        onclick: move |_| view_mode.set("environment".to_string()),
-                        "Environment"
-                    }
-                    button {
-                        class: if view_mode() == "host" { "active" } else { "" },
-                        onclick: move |_| view_mode.set("host".to_string()),
-                        "Env › System"
-                    }
-                    button {
-                        class: if view_mode() == "flat" { "active" } else { "" },
-                        onclick: move |_| view_mode.set("flat".to_string()),
-                        "None"
+                        r#type: "button",
+                        class: "btn btn-ghost xs focus-ring",
+                        onclick: move |_| {
+                            severity_filter.set(Vec::new());
+                            fix_status_filter.set(Vec::new());
+                            triage_status_filter.set(Vec::new());
+                            package_filter.set(None);
+                            environment_filter.set(Vec::new());
+                            environment_filter_error.set(None);
+                            search_query.set(String::new());
+                            focus_cve.set(None);
+                            focus_resolved_query.set(None);
+                        },
+                        Icon { name: IconName::X, size: 11 }
+                        " Clear"
                     }
                 }
-
-                if matches!(view_mode().as_str(), "grouped" | "flat") {
-                    span {
-                        class: "filter-count",
-                        style: "margin-left: 0; margin-right: 0;",
-                        "Sort"
+                div { class: "cve-view-opts",
+                    label { class: "cve-opt",
+                        "Group"
+                        select {
+                            class: "input focus-ring",
+                            value: "{view_mode()}",
+                            onchange: move |evt| view_mode.set(evt.value()),
+                            option { value: "grouped", selected: view_mode() == "grouped", "Package" }
+                            option { value: "environment", selected: view_mode() == "environment", "Environment" }
+                            option { value: "host", selected: view_mode() == "host", "Env › System" }
+                            option { value: "flat", selected: view_mode() == "flat", "None" }
+                        }
                     }
-                    div {
-                        class: "seg",
-                        for sort in [("severity", "Severity"), ("cvss", "CVSS"), ("age", "Newest"), ("affected", "Most affected") ] {
-                            button {
-                                class: if sort_by() == sort.0 { "active" } else { "" },
-                                title: if sort.0 == "affected" { "Sort by distinct current or scheduled configuration affected systems" } else { sort.1 },
-                                onclick: move |_| sort_by.set(sort.0.to_string()),
-                                "{sort.1}"
+                    // Environment groupings are ordered by group name on the
+                    // server; Sort applies only to Package and None.
+                    if matches!(view_mode().as_str(), "grouped" | "flat") {
+                        label { class: "cve-opt",
+                            "Sort"
+                            select {
+                                class: "input focus-ring",
+                                value: "{sort_by()}",
+                                onchange: move |evt| sort_by.set(evt.value()),
+                                for (value, text) in [("severity", "Severity"), ("cvss", "CVSS"), ("age", "Newest"), ("affected", "Most affected")] {
+                                    option { value, selected: sort_by() == value, "{text}" }
+                                }
                             }
                         }
                     }
@@ -1383,6 +1445,7 @@ pub fn CvesView(query: String) -> Element {
                         p { class: "page-subtitle", "Focused CVE resolution unavailable: {error}" }
                     }
                     CvePairsView {
+                    export_selection,
                     refresh: batch_refresh,
                     environment_colors: environments.read().as_ref().and_then(|result| result.as_ref().ok()).map(|items| items.iter().map(|env| (env.id, env.color_hex.clone())).collect()).unwrap_or_default(),
                     active_environments: environment_filter(),
@@ -2456,6 +2519,8 @@ fn CvePairsView(
     now: DateTime<Utc>,
     on_mark_seen: EventHandler<Vec<ExactCveSelection>>,
     on_open_cve: EventHandler<ExactCveSelection>,
+    /// Receives a copy of the current pair selection for the export menu.
+    mut export_selection: Signal<BTreeSet<ExactCveSelection>>,
 ) -> Element {
     let mut offset = use_signal(|| 0_i64);
     let mut loaded = use_signal(Vec::<CveListItem>::new);
@@ -2466,6 +2531,21 @@ fn CvePairsView(
     let mut default_package = use_signal(|| None::<String>);
     let mut default_applied = use_signal(|| false);
     let mut selected = use_signal(BTreeSet::<ExactCveSelection>::new);
+    // The parent export menu reads this copy. A remount for new filters starts
+    // with an empty selection, and unmounting clears the copy, so "Selected"
+    // never exports pairs that the current view no longer shows.
+    use_effect(move || {
+        let current = selected();
+        if *export_selection.peek() != current {
+            export_selection.set(current);
+        }
+    });
+    use_drop(move || {
+        // The parent may be dropped first when the route changes.
+        if let Ok(mut copy) = export_selection.try_write() {
+            copy.clear();
+        }
+    });
     let mut batch_open = use_signal(|| false);
     let mut batch_notice = use_signal(|| None::<String>);
     let mut refreshed_at = use_signal(|| refresh());
@@ -2628,7 +2708,7 @@ fn CvePairsView(
     });
     rsx! {
         div { class: "cve-selection-strip", role: "toolbar", aria_label: "CVE selection", "data-coach-target": "cve-selection-strip",
-            span { class: "cve-selection-label", "SELECT" }
+            span { class: "cve-selection-label", "{total()} CVEs · select" }
             if let Some(stats) = fleet_stats.as_ref() {
                 for (kind, count) in [(QuickCveSelection::Critical, stats.critical), (QuickCveSelection::High, stats.high), (QuickCveSelection::Patchable, stats.fixable), (QuickCveSelection::Outstanding, stats.outstanding)] {
                     { let request = query.clone();
@@ -5047,6 +5127,40 @@ mod tests {
         assert_eq!(filters.fix_status, None);
         assert_eq!(filters.search, None);
         assert_eq!(filters.environment_ids, vec![Uuid::from_u128(5)]);
+    }
+
+    #[test]
+    fn export_menu_offers_design_scopes_in_order() {
+        use super::{ExportScope::*, export_scopes};
+        assert_eq!(export_scopes(false, false), vec![Filtered]);
+        assert_eq!(export_scopes(false, true), vec![Filtered, All]);
+        assert_eq!(export_scopes(true, false), vec![Selected, Filtered]);
+        assert_eq!(export_scopes(true, true), vec![Selected, Filtered, All]);
+    }
+
+    #[test]
+    fn export_menu_describes_every_active_filter() {
+        let none = super::filter_description(&[], &[], &[], None, &[], "  ");
+        assert!(none.is_empty());
+        let all = super::filter_description(
+            &["critical".into(), "high".into()],
+            &["available".into()],
+            &["outstanding".into()],
+            Some("openssl"),
+            &["dev".into(), "prod".into()],
+            " curl ",
+        );
+        assert_eq!(
+            all,
+            vec![
+                "Severity: critical, high",
+                "Fix: available",
+                "Triage: outstanding",
+                "Env: dev, prod",
+                "Package: openssl",
+                "Search: “curl”",
+            ]
+        );
     }
 
     #[test]

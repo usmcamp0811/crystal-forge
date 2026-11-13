@@ -876,6 +876,29 @@ const VIEWPORTS = {
   mobile: { width: 375, height: 812 },
 };
 
+// CVEs view controls from design 18404419. Each MultiFilter is a dropdown
+// of checkboxes whose `value` is the API filter value. `cveFilter` sets the
+// exact checked set (empty clears the filter) and closes the menu.
+async function cveFilter(page, label, values) {
+  await page.getByRole("button", { name: `${label} filter`, exact: true }).click();
+  const menu = page.getByRole("listbox", { name: label, exact: true });
+  for (const box of await menu.locator("input[type=checkbox]").all()) {
+    const want = values.includes(await box.getAttribute("value"));
+    if ((await box.isChecked()) !== want) await box.click();
+  }
+  await page.locator(".mf-backdrop").click();
+}
+
+// Group and Sort are labelled selects in the filter bar.
+async function cveViewOption(page, label, value) {
+  await page.locator(".cve-opt").filter({ hasText: label }).locator("select").selectOption(value);
+}
+
+// The package filter has no control in design 18404419; it stays a URL filter.
+async function cvePackage(page, baseUrl, value) {
+  await page.goto(value ? `${baseUrl}/cves?package=${encodeURIComponent(value)}` : `${baseUrl}/cves`);
+}
+
 async function assertVisible(locator, message, timeoutMs = 5000) {
   const visible = await locator
     .waitFor({ state: "visible", timeout: timeoutMs })
@@ -14426,7 +14449,7 @@ const steps = [
       if (legacyGroupedRequests !== 0) throw new Error("Package labels must not fetch the independent grouped snapshot");
       await assertVisible(packageHeader.getByText("Worst CVSS"), "Collapsed package must show worst CVSS");
       await assertVisible(packageHeader.getByText("2 crit"), "Collapsed package must show severity rollup");
-      await assertVisible(page.getByRole("toolbar", { name: "CVE selection" }).getByText("SELECT", { exact: true }), "Source-backed selection strip belongs before package groups");
+      await assertVisible(page.getByRole("toolbar", { name: "CVE selection" }).getByText(/CVEs · select$/), "Source-backed selection strip belongs before package groups");
       await captureWorkflowViewportState(page, "16-cves", "package-groups-visible", "desktop");
       const quickSelection = page.getByRole("toolbar", { name: "CVE selection" });
       const criticalQuick = quickSelection.getByRole("button", { name: "Critical 5" });
@@ -14443,11 +14466,11 @@ const steps = [
       await quickSelection.getByRole("button", { name: "Patchable 20" }).click();
       await assertVisible(quickSelection.getByText("2 selected"), "Overlapping quick selections must union exact CVE/package identities");
       await page.getByRole("toolbar", { name: "Selected CVEs" }).getByRole("button", { name: "Clear" }).click();
-      await page.getByRole("button", { name: "Medium", exact: true }).click();
+      await cveFilter(page, "Severity", ["medium"]);
       await criticalQuick.click();
       await assertVisible(page.getByRole("status").getByText("No matching CVEs in the current filters."), "A fleet statistic with no active-filter matches must not select anything");
       await assertCount(quickSelection.getByText(/\d+ selected/), 0, "Zero matching quick-select must leave selection unchanged");
-      await page.getByRole("button", { name: "All", exact: true }).first().click();
+      await cveFilter(page, "Severity", []);
       const expectedPackageRollup = { critical_count: 2, fixable_count: 2, exploited_count: 2 };
       const initialPairs = inventoryRows(new URL(`${baseUrl}/api/v1/cves/inventory/pairs`)).rows;
       if (initialPairs.filter((row) => row.severity === "critical").length !== expectedPackageRollup.critical_count ||
@@ -14756,7 +14779,7 @@ const steps = [
       }
       await batchDialog.getByRole("button", { name: "Cancel" }).click();
       await selectedBar.getByRole("button", { name: "Clear" }).click();
-      await page.getByRole("button", { name: "High", exact: true }).click();
+      await cveFilter(page, "Severity", ["high"]);
       await assertPackages(["openssl"], [2]);
       const filteredRequestsBefore = inventoryRequests.pairs.length;
       await page.locator(".cve-package-toggle").filter({ hasText: "openssl" }).click({ modifiers: ["Control"] });
@@ -14767,7 +14790,7 @@ const steps = [
       }
       await page.locator(".cve-package-toggle").filter({ hasText: "openssl" }).click({ modifiers: ["Control"] });
       await assertHidden(selectedBar, "Filtered package modifier-click must deselect exactly its two filtered pairs");
-      await page.getByRole("button", { name: "All", exact: true }).first().click();
+      await cveFilter(page, "Severity", []);
       await assertPackages(["openssl"], [200]);
       let releasePackagePage;
       let markPackagePageStarted;
@@ -14782,7 +14805,7 @@ const steps = [
       try {
         await page.locator(".cve-package-toggle").filter({ hasText: "openssl" }).click({ modifiers: ["Control"] });
         await packagePageStarted;
-        await page.getByRole("button", { name: "High", exact: true }).click();
+        await cveFilter(page, "Severity", ["high"]);
         await assertPackages(["openssl"], [2]);
         releasePackagePage();
         await packagePageCompleted;
@@ -14810,65 +14833,66 @@ const steps = [
       }
       await wildcardHeader.click({ modifiers: ["Control"] });
       await assertHidden(selectedBar, "Wildcard-bearing package toggle must deselect only its exact identity");
-      await page.getByPlaceholder("All packages…").fill("lib_foo");
+      await cvePackage(page, baseUrl, "lib_foo");
       await assertPackages(["lib_foo"], [1]);
-      await page.getByPlaceholder("All packages…").fill("lib%foo");
+      await cvePackage(page, baseUrl, "lib%foo");
       await assertPackages(["lib%foo"], [1]);
       await page.locator(".cve-package-toggle").filter({ hasText: "lib%foo" }).click({ modifiers: ["Control"] });
       await expectBulkCount(1, 1);
       await assertVisible(page.getByTestId("cve-row").filter({ hasText: "CVE-2024-7002" }).locator(".mono").first(), "Literal percent package must be selectable");
       if (!inventoryRequests.pairs.some((url) => url.searchParams.get("package") === "lib%foo")) throw new Error("Percent package selection must send literal package filter");
       await selectedBar.getByRole("button", { name: "Clear" }).click();
-      await page.getByPlaceholder("All packages…").fill("lib\\foo");
+      await cvePackage(page, baseUrl, "lib\\foo");
       await assertPackages(["lib\\foo"], [1]);
       wildcardPackageFixture = false;
       packageFilterFixture = true;
       await page.goto(`${baseUrl}/cves`);
       await assertPackages(["openssl", "glibc"], [3, 1]);
-      await page.getByRole("button", { name: "Low", exact: true }).click();
+      await cveFilter(page, "Severity", ["low"]);
       await assertPackages(["openssl"], [1]);
       await assertVisible(page.locator(".cve-package-card tbody tr").getByText("CVE-2024-8080"), "Low filter must retain only the low child");
       await captureWorkflowViewportState(page, "16-cves", "filtered-package-low-expanded", "desktop");
-      await page.getByRole("button", { name: "Medium", exact: true }).click();
+      await cveFilter(page, "Severity", ["medium"]);
       await assertPackages([], []);
-      await page.getByRole("button", { name: "All", exact: true }).first().click();
+      await cveFilter(page, "Severity", []);
       await assertPackages(["openssl", "glibc"], [3, 1]);
-      await page.getByRole("button", { name: "Inventory only", exact: true }).click();
+      await cveFilter(page, "Triage", ["inventory_only"]);
       await assertPackages(["openssl"], [1]);
-      await page.getByRole("button", { name: "Any triage", exact: true }).click();
-      await page.getByRole("button", { name: "Has patch", exact: true }).click();
+      await cveFilter(page, "Triage", []);
+      await cveFilter(page, "Fix", ["available"]);
       await assertPackages(["openssl", "glibc"], [2, 1]);
-      await page.getByRole("button", { name: "No patch", exact: true }).click();
+      await cveFilter(page, "Fix", ["pending"]);
       await assertPackages(["openssl"], [1]);
-      await page.getByRole("button", { name: "Any status", exact: true }).click();
-      await page.getByPlaceholder("All packages…").fill("glibc");
+      await cveFilter(page, "Fix", []);
+      await cvePackage(page, baseUrl, "glibc");
       await assertPackages(["glibc"], [1]);
-      await page.getByPlaceholder("All packages…").fill("");
+      await cvePackage(page, baseUrl, "");
       await page.getByPlaceholder("Search CVE / package / title…").fill("8080");
       await assertPackages(["openssl"], [1]);
       await page.getByPlaceholder("Search CVE / package / title…").fill("");
-      await page.getByRole("combobox", { name: "Environment" }).selectOption(environmentIds.production);
+      await cveFilter(page, "Environment", [environmentIds.production]);
       await assertPackages(["openssl", "glibc"], [2, 1]);
-      await page.getByRole("combobox", { name: "Environment" }).selectOption(environmentIds.development);
+      await cveFilter(page, "Environment", [environmentIds.development]);
       await assertPackages(["openssl"], [2]);
       packageFilterFixture = false;
       await page.goto(`${baseUrl}/cves`);
       await assertPackages(["openssl"], [2]);
 
-      const inventoryOnlyFilter = page.getByRole("button", { name: "Inventory only", exact: true });
       const inventoryOnlyRequest = page.waitForRequest((request) => {
         const url = new URL(request.url());
         return url.pathname === "/api/v1/cves/inventory/pairs" && url.searchParams.get("triage_status") === "inventory_only";
       });
-      await inventoryOnlyFilter.click();
+      await cveFilter(page, "Triage", ["inventory_only"]);
       await inventoryOnlyRequest;
-      await assertAttribute(inventoryOnlyFilter, "class", "active", "Inventory-only filter should retain selected state");
+      await assertAttribute(page.getByRole("button", { name: "Triage filter", exact: true }), "class", "input filter-select mf-btn focus-ring active", "Inventory-only filter should retain selected state");
       if (new URL(page.url()).searchParams.get("triage_status") !== "inventory_only") {
         throw new Error(`Inventory-only filter was not retained in route state: ${page.url()}`);
       }
       const csvDownloadPromise = page.waitForEvent("download");
-      await page.getByRole("button", { name: /Export 1 ▾/ }).click();
-      await assertCount(page.getByRole("menu", { name: "Export CVEs" }).getByRole("menuitem"), 1, "Only working CSV export may appear");
+      await page.locator(".cve-export > button").click();
+      await page.locator('.cve-exp-scope[data-scope="Filtered"] input').check();
+      await assertVisible(page.locator('.cve-exp-scope[data-scope="Filtered"] .cve-exp-l b').getByText("1", { exact: true }), "Current-view export scope must count the one filtered pair");
+      await assertCount(page.getByRole("menu", { name: "Export CVEs" }).getByRole("menuitem"), 4, "All four design export formats must appear");
       await page.getByRole("menuitem", { name: /CSV/ }).click();
       const csvDownload = await csvDownloadPromise;
       const csvStream = await csvDownload.createReadStream();
@@ -14887,14 +14911,13 @@ const steps = [
       if (csvRow.split(",").slice(6, 10).join(",") !== "4,3,2,1") {
         throw new Error(`CVE CSV must preserve overlap-deduplicated active/current/scheduled/historical values: ${csvRow}`);
       }
-      await page.getByRole("button", { name: "Any triage", exact: true }).click();
+      await cveFilter(page, "Triage", []);
       if (!inventoryRequests.pairs.some((url) => url.searchParams.get("triage_status") === "inventory_only")) {
         throw new Error("Paged CVE request did not use triage_status=inventory_only");
       }
 
       // Each grouping must use the exact scoped aggregate and membership IDs.
-      const groupMode = (name) => page.getByRole("button", { name, exact: true }).last();
-      await groupMode("Environment").click();
+      await cveViewOption(page, "Group", "environment");
        const productionGroup = page.getByRole("button", { name: /Production.*2 distinct CVEs/ });
        await assertVisible(productionGroup, "Environment mode must show Production's distinct CVEs");
        await assertVisible(productionGroup.locator("xpath=../..").getByText("1 hosts with findings"), "Environment mode must deduplicate the current/scheduled Production host");
@@ -14904,7 +14927,7 @@ const steps = [
           url.searchParams.get("group_id") === environmentIds.production)) {
         throw new Error("Production expansion did not request exact environment membership");
       }
-      await groupMode("Env › System").click();
+      await cveViewOption(page, "Group", "host");
        const prodHosts = page.getByRole("button", { name: /Production.*2 distinct CVEs/ });
       await prodHosts.click();
        const prodHost = page.getByRole("button", { name: /prod-web-01.*2 distinct CVEs/ });
@@ -14918,7 +14941,7 @@ const steps = [
             url.searchParams.get("group_id") === "00000000-0000-0000-0000-0000000000a2")) {
         throw new Error("Nested host view did not request exact Production host membership");
       }
-      await page.getByRole("combobox", { name: "Environment" }).selectOption(environmentIds.production);
+      await cveFilter(page, "Environment", [environmentIds.production]);
        await assertVisible(page.getByRole("button", { name: /Production.*2 distinct CVEs/ }), "Environment filter must retain matching group");
        await assertCount(page.getByRole("button", { name: /Development.*distinct CVEs/ }), 0, "Environment filter must not leak another environment");
       if (!inventoryRequests.groups.some((url) => url.searchParams.get("environment_id") === environmentIds.production &&
@@ -14932,15 +14955,13 @@ const steps = [
           row.scheduled_deployment_target_count !== 1)) {
         throw new Error(`Scoped pairs must deduplicate the exact current/scheduled Production host: ${JSON.stringify(productionPairs)}`);
       }
-      await page.getByRole("button", { name: /Export \d+ ▾/ }).click();
-      await assertDisabled(page.getByRole("menuitem", { name: /CSV/ }), "Environment-scoped export must not claim fleet CSV scope");
-      await assertVisible(page.getByText("Environment-scoped CSV unavailable"), "Scoped CSV limit must be explicit");
-      await page.getByRole("button", { name: /Export \d+ ▾/ }).click();
-      await page.getByRole("combobox", { name: "Environment" }).selectOption("");
+      await page.locator(".cve-export > button").click();
+      await assertVisible(page.locator('.cve-exp-scope[data-scope="Filtered"]').getByText(/Env: /), "Environment-scoped export must name its environment scope");
+      await assertEnabled(page.getByRole("menuitem", { name: /CSV/ }), "Environment-scoped CSV export must be available");
+      await page.locator(".rr-export-backdrop").click();
+      await cveFilter(page, "Environment", []);
       // Flat mode still opens the same exact fleet drawer and retains inventory-only semantics.
-      const flatViewBtn = groupMode("None");
-      await flatViewBtn.waitFor({ timeout: 5000 });
-      await flatViewBtn.click();
+      await cveViewOption(page, "Group", "flat");
 
       const cveRow = page.locator("main td:has-text('CVE-2024-1234')");
       await assertVisible(cveRow, "Expected CVE row to render");

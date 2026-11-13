@@ -8140,6 +8140,86 @@ async fn cve_dashboard_reads_scope_before_aggregation_and_count_distinct_hosts(p
             .await
             .unwrap();
         assert_eq!(combined_csv.lines().count() as i64 - 1, combined_total);
+
+        // TASK-521 (design 18404419): "Selected" export of exact pairs. A
+        // hidden pair is omitted; duplicates collapse; CSRF is required.
+        let selected_body = serde_json::json!({"pairs": [
+            {"cve_id": cve, "canonical_package_name": package},
+            {"cve_id": cve, "canonical_package_name": package},
+            {"cve_id": hidden_cve, "canonical_package_name": hidden_package},
+        ]});
+        let post = |query: &str, csrf: Option<&'static str>, body: &serde_json::Value| {
+            http_request(
+                &client,
+                reqwest::Method::POST,
+                format!("{base}/api/v1/cves/export?{query}"),
+                token,
+                csrf,
+            )
+            .json(body)
+            .send()
+        };
+        let selected_csv = post("format=csv", Some("cve-export-selected"), &selected_body)
+            .await
+            .unwrap();
+        assert_eq!(selected_csv.status(), reqwest::StatusCode::OK);
+        let selected_csv = selected_csv.text().await.unwrap();
+        assert_eq!(
+            selected_csv.lines().count(),
+            2,
+            "header plus the one visible pair"
+        );
+        assert!(selected_csv.contains(cve) && selected_csv.contains(package));
+        assert!(!selected_csv.contains(hidden_package));
+        let selected_oscal: serde_json::Value = post(
+            "format=oscal-json",
+            Some("cve-export-selected"),
+            &selected_body,
+        )
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(
+            selected_oscal["assessment-results"]["results"][0]["findings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            post("format=csv", None, &selected_body)
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            post(
+                "format=csv",
+                Some("cve-export-selected"),
+                &serde_json::json!({"pairs": []})
+            )
+            .await
+            .unwrap()
+            .status(),
+            reqwest::StatusCode::BAD_REQUEST
+        );
+        let oversized: Vec<_> = (0..=MAX_CVE_EXPORT_ROWS)
+            .map(|n| serde_json::json!({"cve_id": format!("CVE-2099-{n:06}"), "canonical_package_name": "p"}))
+            .collect();
+        assert_eq!(
+            post(
+                "format=excel",
+                Some("cve-export-selected"),
+                &serde_json::json!({"pairs": oversized})
+            )
+            .await
+            .unwrap()
+            .status(),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 
     // An Admin naming both environments sees both.
@@ -13186,7 +13266,10 @@ async fn poam_http_server(pool: PgPool) -> String {
             "/api/v1/cves/packages",
             get(cve_handlers::list_package_names),
         )
-        .route("/api/v1/cves/export", get(cve_handlers::export_cves))
+        .route(
+            "/api/v1/cves/export",
+            get(cve_handlers::export_cves).post(cve_handlers::export_selected_cves),
+        )
         .route(
             "/api/v1/cves/inventory/groups",
             get(cve_handlers::list_inventory_groups),

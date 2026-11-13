@@ -138,21 +138,33 @@ async function run(ctx, phase) {
   });
 
   if (phase === "scan") return;
-  // TASK-521 (design bc30ef57): multi-select filters, a scope-preserving
-  // invalid environment link, and the four export formats over real findings.
+  // TASK-521 (designs bc30ef57, 18404419): multi-select filters, export scopes,
+  // a scope-preserving invalid environment link, and four export formats.
   await ctx.step("fleet CVE filters and every export format carry the real finding", async () => {
     const fs = require("fs");
     const exportButton = page.locator(".cve-export > button");
-    await expect(exportButton).toHaveText(/Export \d+/);
-    const count = Number((await exportButton.innerText()).match(/Export (\d+)/)[1]);
+    const scopeCount = async (scope) => {
+      const label = page.locator(`.cve-exp-scope[data-scope="${scope}"] .cve-exp-l b`);
+      await expect(label).toHaveText(/^\d+$/);
+      return Number(await label.innerText());
+    };
+    await exportButton.click();
+    const count = await scopeCount("Filtered");
     expect(count).toBeGreaterThan(0);
-    // Selecting every severity is a multi-value filter equal to no filter.
-    for (const severity of ["critical", "high", "medium", "low"]) {
-      await page.locator(`.seg .ms-opt[data-k="${severity}"]`).click();
+    await page.keyboard.press("Escape");
+    // Checking every severity is a multi-value filter equal to no filter.
+    await page.getByRole("button", { name: "Severity filter", exact: true }).click();
+    for (const severity of ["Critical", "High", "Medium", "Low"]) {
+      await page.locator(".mf-menu .mf-opt").filter({ hasText: severity }).locator("input").check();
     }
     await expect(page).toHaveURL(/severity=critical(%2C|,)high(%2C|,)medium(%2C|,)low/);
-    await page.locator(`.seg:has(.ms-opt[data-k="critical"]) > button`).first().click();
-    await expect(exportButton).toHaveText(`Export ${count}`, { useInnerText: true });
+    await page.locator(".mf-backdrop").click();
+    await exportButton.click();
+    expect(await scopeCount("Filtered")).toBe(count);
+    expect(await scopeCount("All")).toBe(count);
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Clear", exact: true }).click();
+    await expect(page).not.toHaveURL(/severity=/);
     for (const format of ["oscal-json", "excel", "csv", "oscal-xml"]) {
       await exportButton.click();
       const [download] = await Promise.all([
@@ -184,7 +196,7 @@ async function run(ctx, phase) {
   await ctx.step("fleet finding navigation returns to the exact Current generation", async () => {
     // The designed ungrouped view exposes the exact pair's inventory action;
     // grouped rows instead make the whole row clickable.
-    await page.getByRole("button", {name:"None", exact:true}).click();
+    await page.locator(".cve-opt").filter({ hasText: "Group" }).locator("select").selectOption("flat");
     const row = page.getByTestId("cve-row").filter({ hasText: f.cveId }).filter({
       has: page.getByRole("button", { name: `Open fleet inventory for ${f.cveId} ${f.package}`, exact: true }),
     });

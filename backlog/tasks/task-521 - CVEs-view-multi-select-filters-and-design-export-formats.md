@@ -106,5 +106,13 @@ Verified locally (exit 0): cf-server lib 29 passed; cve_inventory_projection 2 p
 
 Not verified locally: integration-assurance. Farm builds failed twice on infrastructure faults (segfault/abort, stale file handle, unrealisable paths). A local KVM run was killed by agent-session interruptions. Exact-head MR CI is the evidence source.
 
+2026-11-12 design refinement 18404419 (owner: "mostly styling; export may need backend tweaks"):
+- Filter bar: Severity/Fix/Triage/Environment are MultiFilter dropdowns (option color dots; checkbox `value` = API value); Clear button; Group/Sort are selects; package text filter removed (package stays a URL filter and is listed in the export description); MultiSeg and its CSS removed. Selection strip restyled with "N CVEs · select".
+- Export: button has no count; menu asks "What to export": Selected (pairs selected in Package/None view), Current view (named All CVEs when unfiltered), All CVEs (offered only while filtering), each with its count; formats disabled at 0 rows.
+- Backend: `POST /cves/export?format=` exports exact pairs (Viewer+, CSRF, scope-limited, duplicates once, empty 400, >1,000 pairs 422). Unused `fetch_cve_package_names` client call removed.
+- Tests: poam_workflows selected-export cases (visible-only, CSRF 403, empty 400, oversized 422, OSCAL count); web-ui scope/description tests; assurance cve.cjs and web-ui-test 16-cves updated for the new controls. 16b-cves-severity-filter was already stale (looks for a "Flat" button) and is unchanged.
+
+Verification (owner instruction 2026-11-12: remote builders only, no local builds): poam_workflows `cve_` 41 + projection 2 passed locally against disposable PG before that instruction. Farm builds: `.#web-ui` exit 0, 856 web-ui tests passed (41 CVE view); `.#server` ran cf-server lib tests: 1568 passed, 1 failed `handlers::api::builders::tests::niks3_basic_probe_applies_guard_to_path_info_only` (`Configuration` error; file unchanged on this branch), all CVE export/handler tests passed. okf-knowledge exit 0. Not executed: web-ui-test 16-cves and integration-assurance (need a local preview/VM); preview not refreshed for this revision.
+
 Design note: the design's triage MultiSeg omits `inventory_only`; the implementation keeps it because the domain status exists.
 <!-- SECTION:NOTES:END -->
