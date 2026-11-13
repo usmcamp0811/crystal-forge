@@ -1705,8 +1705,16 @@ WITH exact_authority_systems AS (
 
 // SECURITY: Filter the already scoped CVE/package list before joining back to
 // scoped subject rows. A page limit here would silently omit host memberships.
+// PERFORMANCE: `deployment_status_once` is MATERIALIZED so PostgreSQL builds
+// `view_system_deployment_status` once per statement. The planner estimates
+// `visible_members` at one row; without the fence it re-ran the view for each
+// membership row (21,044 times, 272 s, on the reckless production snapshot).
+// `visible_members` carries the pair severity, exploit, and fix fields so that
+// group aggregation does not join `filtered_pairs` a second time.
 const FLEET_INVENTORY_PROJECTION_CTE: &str = r#"
-, filtered_pairs AS (
+, deployment_status_once AS MATERIALIZED (
+  SELECT hostname,deployment_status FROM view_system_deployment_status
+), filtered_pairs AS (
   SELECT item.*
   FROM inventory_list item
   WHERE ($3::text[] IS NULL OR UPPER(item.severity)=ANY($3))
@@ -1720,13 +1728,14 @@ const FLEET_INVENTORY_PROJECTION_CTE: &str = r#"
       OR item.package_name ILIKE $7 ESCAPE '\' OR item.title ILIKE $7 ESCAPE '\')
 ), visible_members AS (
   SELECT subject.*,system.hostname,flake.name AS flake_name,
-         status.deployment_status
+         status.deployment_status,pair.severity AS pair_severity,
+         pair.exploited AS pair_exploited,pair.fix_status AS pair_fix_status
   FROM inventory_subjects subject
   JOIN filtered_pairs pair ON pair.cve_id=subject.cve_id
     AND pair.package_name IS NOT DISTINCT FROM subject.package_name
   JOIN systems system ON system.id=subject.system_id AND system.is_active
   LEFT JOIN flakes flake ON flake.id=system.flake_id
-  LEFT JOIN view_system_deployment_status status ON status.hostname=system.hostname
+  LEFT JOIN deployment_status_once status ON status.hostname=system.hostname
   WHERE ($2::uuid[] IS NULL OR subject.environment_id=ANY($2))
 )
 "#;
@@ -1778,6 +1787,44 @@ fn projection_query<'a>(
         .bind(params.search.as_deref().map(cve_substring_pattern))
 }
 
+/// Starts the read-only repeatable-read snapshot for one projection request.
+///
+/// Every statement of the request runs in this transaction, so totals and page
+/// rows describe the same inventory.
+async fn begin_projection_read(pool: &PgPool) -> Result<Transaction<'_, Postgres>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    // PERFORMANCE: The projection's optional filters (`$n IS NULL OR ...`)
+    // make a cached generic plan estimate one filtered pair. That plan joins
+    // pairs to memberships with nested loops (40 million rejected rows, about
+    // 9 s on the reckless snapshot). A custom plan uses the bound values and
+    // took 1.3 s. `auto` mode can switch to the generic plan after five runs
+    // on one pooled connection, so this transaction forces custom plans.
+    sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan")
+        .execute(&mut *tx)
+        .await?;
+    Ok(tx)
+}
+
+/// Splits a projection result into its complete total and its page rows.
+///
+/// The statement LEFT JOINs a one-row `page_total` side to the page. A NULL
+/// `key` column in the first row means that the page is empty; the LEFT JOIN
+/// then returns that row only.
+fn split_page_total<'r>(
+    rows: &'r [sqlx::postgres::PgRow],
+    key: &str,
+) -> Result<(i64, &'r [sqlx::postgres::PgRow])> {
+    let first = rows
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("projection statement returned no total row"))?;
+    let total: i64 = first.try_get("page_total")?;
+    let empty = sqlx::ValueRef::is_null(&first.try_get_raw(key)?);
+    Ok((total, if empty { &[] } else { rows }))
+}
+
 /// Returns a page of environment or host aggregates over the complete filtered
 /// scoped inventory. Severity, exploited and patchable counts each count one
 /// exact CVE/package pair per group, even across overlapping inventory sections.
@@ -1801,19 +1848,25 @@ pub async fn fetch_cve_inventory_groups(
     let sql = format!(
         "{}{FLEET_INVENTORY_PROJECTION_CTE}{}",
         projection_cte(),
-        r#", grouped AS (
+        // INVARIANT: `visible_members` has one `filtered_pairs` row per
+        // membership, so its `pair_*` fields equal the former second join.
+        // PERFORMANCE: The one-row `total` side keeps the complete group count
+        // when the requested page is past the end. The page is then one row
+        // of NULL group fields, which the caller skips. One statement builds
+        // the inventory once instead of once for a count and once for rows.
+        r#", grouped AS MATERIALIZED (
           SELECT CASE WHEN $8='host' THEN member.system_id ELSE member.environment_id END AS group_id,
                   CASE WHEN $8='host' THEN member.hostname
                        ELSE COALESCE(environment.name,'Unassigned') END AS name,
-                  count(DISTINCT (pair.cve_id,pair.package_name))::bigint AS cve_package_count,
-                  count(DISTINCT pair.cve_id)::bigint AS cve_count,
-                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity)='CRITICAL')::bigint AS critical_pair_count,
-                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity)='HIGH')::bigint AS high_pair_count,
-                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity)='MEDIUM')::bigint AS medium_pair_count,
-                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity)='LOW')::bigint AS low_pair_count,
-                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE UPPER(pair.severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW'))::bigint AS unknown_pair_count,
-                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE pair.exploited)::bigint AS exploited_pair_count,
-                  count(DISTINCT (pair.cve_id,pair.package_name)) FILTER (WHERE pair.fix_status='fix_available')::bigint AS patchable_pair_count,
+                  count(DISTINCT (member.cve_id,member.package_name))::bigint AS cve_package_count,
+                  count(DISTINCT member.cve_id)::bigint AS cve_count,
+                  count(DISTINCT (member.cve_id,member.package_name)) FILTER (WHERE UPPER(member.pair_severity)='CRITICAL')::bigint AS critical_pair_count,
+                  count(DISTINCT (member.cve_id,member.package_name)) FILTER (WHERE UPPER(member.pair_severity)='HIGH')::bigint AS high_pair_count,
+                  count(DISTINCT (member.cve_id,member.package_name)) FILTER (WHERE UPPER(member.pair_severity)='MEDIUM')::bigint AS medium_pair_count,
+                  count(DISTINCT (member.cve_id,member.package_name)) FILTER (WHERE UPPER(member.pair_severity)='LOW')::bigint AS low_pair_count,
+                  count(DISTINCT (member.cve_id,member.package_name)) FILTER (WHERE UPPER(member.pair_severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW'))::bigint AS unknown_pair_count,
+                  count(DISTINCT (member.cve_id,member.package_name)) FILTER (WHERE member.pair_exploited)::bigint AS exploited_pair_count,
+                  count(DISTINCT (member.cve_id,member.package_name)) FILTER (WHERE member.pair_fix_status='fix_available')::bigint AS patchable_pair_count,
                  count(DISTINCT member.system_id)::bigint AS host_count,
                  count(DISTINCT member.system_id) FILTER (WHERE member.inventory_section='current')::bigint AS current_host_count,
                  count(DISTINCT member.system_id) FILTER (WHERE member.inventory_section='scheduled_deployment_target')::bigint AS scheduled_host_count,
@@ -1821,44 +1874,33 @@ pub async fn fetch_cve_inventory_groups(
                  CASE WHEN $8='host' THEN max(member.flake_name) END AS flake_name,
                  CASE WHEN $8='host' THEN max(member.deployment_status) END AS deployment_status
           FROM visible_members member
-          JOIN filtered_pairs pair ON pair.cve_id=member.cve_id
-            AND pair.package_name IS NOT DISTINCT FROM member.package_name
           LEFT JOIN environments environment ON environment.id=member.environment_id
           GROUP BY CASE WHEN $8='host' THEN member.system_id ELSE member.environment_id END,
                    CASE WHEN $8='host' THEN member.hostname ELSE COALESCE(environment.name,'Unassigned') END
+        ), total AS (
+          SELECT count(*)::bigint AS page_total FROM grouped
         )
-        SELECT group_id,name,cve_package_count,cve_count,
-               critical_pair_count,high_pair_count,medium_pair_count,low_pair_count,
-               unknown_pair_count,exploited_pair_count,patchable_pair_count,
-               host_count,current_host_count,scheduled_host_count,historical_host_count,
-               CASE WHEN $8='environment' THEN (
-                 SELECT count(*)::bigint FROM systems active_host
-                 WHERE active_host.is_active
-                   AND active_host.environment_id IS NOT DISTINCT FROM grouped.group_id
-                   AND ($1::uuid[] IS NULL OR active_host.environment_id=ANY($1))
-                   AND ($2::uuid[] IS NULL OR active_host.environment_id=ANY($2))
-               ) END AS total_active_hosts,
-               flake_name,deployment_status
-        FROM grouped ORDER BY name COLLATE "C",group_id NULLS FIRST
-        OFFSET $9 LIMIT $10"#
+        SELECT total.page_total,page.*
+        FROM total
+        LEFT JOIN LATERAL (
+          SELECT group_id,name,cve_package_count,cve_count,
+                 critical_pair_count,high_pair_count,medium_pair_count,low_pair_count,
+                 unknown_pair_count,exploited_pair_count,patchable_pair_count,
+                 host_count,current_host_count,scheduled_host_count,historical_host_count,
+                 CASE WHEN $8='environment' THEN (
+                   SELECT count(*)::bigint FROM systems active_host
+                   WHERE active_host.is_active
+                     AND active_host.environment_id IS NOT DISTINCT FROM grouped.group_id
+                     AND ($1::uuid[] IS NULL OR active_host.environment_id=ANY($1))
+                     AND ($2::uuid[] IS NULL OR active_host.environment_id=ANY($2))
+                 ) END AS total_active_hosts,
+                 flake_name,deployment_status
+          FROM grouped ORDER BY name COLLATE "C",group_id NULLS FIRST
+          OFFSET $9 LIMIT $10
+        ) page ON true
+        ORDER BY page.name COLLATE "C",page.group_id NULLS FIRST"#
     );
-    let count_sql = format!(
-        "{}{FLEET_INVENTORY_PROJECTION_CTE}{}",
-        projection_cte(),
-        r#"SELECT count(DISTINCT CASE WHEN $8='host' THEN system_id ELSE environment_id END)::bigint
-           + CASE WHEN $8='environment' AND COALESCE(bool_or(environment_id IS NULL),false) THEN 1 ELSE 0 END
-           FROM visible_members"#
-    );
-    // A transaction keeps the total and page on the same PostgreSQL snapshot.
-    let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut *tx)
-        .await?;
-    let total: i64 = projection_query(&count_sql, scope, params)
-        .bind(&params.group_by)
-        .fetch_one(&mut *tx)
-        .await?
-        .try_get(0)?;
+    let mut tx = begin_projection_read(pool).await?;
     let rows = projection_query(&sql, scope, params)
         .bind(&params.group_by)
         .bind(offset)
@@ -1866,7 +1908,8 @@ pub async fn fetch_cve_inventory_groups(
         .fetch_all(&mut *tx)
         .await?;
     tx.commit().await?;
-    let items = rows
+    let (total, page) = split_page_total(&rows, "name")?;
+    let items = page
         .iter()
         .map(CveInventoryGroup::from_row)
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1904,36 +1947,30 @@ pub async fn fetch_cve_inventory_members(
     let sql = format!(
         "{}{FLEET_INVENTORY_PROJECTION_CTE}{}",
         projection_cte(),
-        r#", selected AS (
+        // PERFORMANCE: The one-row `total` side keeps the complete membership
+        // count for a page past the end in the same single statement. See
+        // `fetch_cve_inventory_groups`.
+        r#", selected AS MATERIALIZED (
           SELECT member.* FROM visible_members member
           WHERE CASE WHEN $8='host' THEN member.system_id=$9
                      ELSE member.environment_id IS NOT DISTINCT FROM $9 END
+        ), total AS (
+          SELECT count(*)::bigint AS page_total FROM selected
         )
-        SELECT cve_id,package_name,system_id,environment_id,hostname,
-               inventory_section,installed_version,deployment_status,flake_name
-        FROM selected
-        ORDER BY cve_id COLLATE "C",package_name COLLATE "C",system_id,
-                 inventory_section COLLATE "C"
-        OFFSET $10 LIMIT $11"#
+        SELECT total.page_total,page.*
+        FROM total
+        LEFT JOIN LATERAL (
+          SELECT cve_id,package_name,system_id,environment_id,hostname,
+                 inventory_section,installed_version,deployment_status,flake_name
+          FROM selected
+          ORDER BY cve_id COLLATE "C",package_name COLLATE "C",system_id,
+                   inventory_section COLLATE "C"
+          OFFSET $10 LIMIT $11
+        ) page ON true
+        ORDER BY page.cve_id COLLATE "C",page.package_name COLLATE "C",page.system_id,
+                 page.inventory_section COLLATE "C""#
     );
-    // A separate count is needed for an offset past the end of the result.
-    let count_sql = format!(
-        "{}{FLEET_INVENTORY_PROJECTION_CTE}{}",
-        projection_cte(),
-        r#"SELECT count(*)::bigint FROM visible_members member
-           WHERE CASE WHEN $8='host' THEN member.system_id=$9
-                      ELSE member.environment_id IS NOT DISTINCT FROM $9 END"#
-    );
-    let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut *tx)
-        .await?;
-    let total: i64 = projection_query(&count_sql, scope, params)
-        .bind(&params.group_by)
-        .bind(params.group_id)
-        .fetch_one(&mut *tx)
-        .await?
-        .try_get(0)?;
+    let mut tx = begin_projection_read(pool).await?;
     let rows = projection_query(&sql, scope, params)
         .bind(&params.group_by)
         .bind(params.group_id)
@@ -1942,7 +1979,8 @@ pub async fn fetch_cve_inventory_members(
         .fetch_all(&mut *tx)
         .await?;
     tx.commit().await?;
-    let items = rows
+    let (total, page) = split_page_total(&rows, "cve_id")?;
+    let items = page
         .iter()
         .map(CveInventoryMember::from_row)
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -2013,10 +2051,7 @@ pub async fn fetch_cve_inventory_pairs(
     );
     // Both statements must see the same scoped inventory snapshot, including
     // an empty page requested past the end of the filtered pair set.
-    let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut *tx)
-        .await?;
+    let mut tx = begin_projection_read(pool).await?;
     let total: i64 = projection_query(&count_sql, scope, params)
         .fetch_one(&mut *tx)
         .await?

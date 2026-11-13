@@ -731,6 +731,8 @@ pub fn CvesView(query: String) -> Element {
     // menu can offer "Selected". The pairs view owns and clears it.
     let export_selection = use_signal(BTreeSet::<ExactCveSelection>::new);
     let mut export_scope_pick = use_signal(|| None::<ExportScope>);
+    // Becomes true when the export menu first opens; see `unfiltered_pairs`.
+    let mut all_total_wanted = use_signal(|| false);
     let mut batch_refresh = use_signal(|| 0_u64);
 
     // Attention flash signal for the Critical stat card (set by the use_effect after stats resolves).
@@ -874,17 +876,26 @@ pub fn CvesView(query: String) -> Element {
 
     // Total for the export menu's "All CVEs" scope: no view filters, but the
     // server still applies the caller's read scope.
+    // PERFORMANCE: Each inventory request rebuilds the scoped inventory on the
+    // server. This total is requested only after the export menu first opens,
+    // not on every page load.
     let unfiltered_pairs = use_resource(move || {
         let _ = batch_refresh();
+        let wanted = all_total_wanted();
         async move {
-            client::fetch_cve_inventory_pairs(&CveInventoryQuery {
-                group_by: "environment".into(),
-                group_id: None,
-                filters: CveFilters::default(),
-                offset: 0,
-                limit: 1,
-            })
-            .await
+            if !wanted {
+                return None;
+            }
+            Some(
+                client::fetch_cve_inventory_pairs(&CveInventoryQuery {
+                    group_by: "environment".into(),
+                    group_id: None,
+                    filters: CveFilters::default(),
+                    offset: 0,
+                    limit: 1,
+                })
+                .await,
+            )
         }
     });
 
@@ -991,6 +1002,7 @@ pub fn CvesView(query: String) -> Element {
     let all_total = unfiltered_pairs
         .read()
         .as_ref()
+        .and_then(|result| result.as_ref())
         .and_then(|result| result.as_ref().ok())
         .map(|page| page.total);
     let selected_pairs = export_selection();
@@ -1091,7 +1103,12 @@ pub fn CvesView(query: String) -> Element {
                             class: "btn btn-ghost focus-ring",
                             aria_expanded: "{export_open()}",
                             disabled: environment_filter_error().is_some(),
-                            onclick: move |_| export_open.set(!export_open()),
+                            onclick: move |_| {
+                                if !all_total_wanted() {
+                                    all_total_wanted.set(true);
+                                }
+                                export_open.set(!export_open());
+                            },
                             Icon { name: IconName::Download, size: 14 }
                             " Export "
                             Icon { name: IconName::ChevronDown, size: 11 }

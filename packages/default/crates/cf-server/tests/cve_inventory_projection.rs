@@ -878,6 +878,19 @@ async fn fleet_substrings_are_literal_across_list_export_groups_and_pages(pool: 
         assert_eq!(members.total, 1);
         assert_eq!(members.items[0].system_id, system_id);
         assert_eq!(members.items[0].cve_id, expected);
+
+        // A page past the end keeps the complete totals and returns no rows.
+        query.offset = Some(5);
+        let past_groups = fetch_cve_inventory_groups(&pool, &scope, &query)
+            .await
+            .expect("groups past end");
+        assert_eq!((past_groups.total, past_groups.items.len()), (1, 0));
+        assert_eq!(past_groups.next_offset, None);
+        let past_members = fetch_cve_inventory_members(&pool, &scope, &query)
+            .await
+            .expect("members past end");
+        assert_eq!((past_members.total, past_members.items.len()), (1, 0));
+        assert_eq!(past_members.next_offset, None);
     }
 
     // Search is case-insensitive, but punctuation in both titles and packages
