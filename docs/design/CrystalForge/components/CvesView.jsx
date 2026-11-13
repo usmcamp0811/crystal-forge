@@ -90,7 +90,8 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn btn-ghost focus-ring"><Icon name="sync" size={14} /> Rescan fleet</button>
-          <CveExportMenuButton list={filtered} scope={envList.length ? envList.join(", ") : null} />
+          <CveExportMenuButton all={CVES} filtered={filtered} selected={selList} envList={envList}
+            filterDesc={[sevFilter.length && "Severity: " + sevFilter.join(", "), fixFilter.length && "Fix: " + fixFilter.join(", "), acceptFilter.length && "Triage: " + acceptFilter.join(", "), envList.length && "Env: " + envList.join(", "), query && "Search: “" + query + "”"].filter(Boolean)} />
         </div>
       </div>
 
@@ -133,57 +134,21 @@ function CvesView({ onOpenSystem, focus, onClearFocus }) {
           <Icon name="search" />
           <input className="input focus-ring" placeholder="Search CVE / package / title…" value={query} onChange={(e) => setQuery(e.target.value)} />
         </div>
-        <MultiSeg value={sevFilter} onChange={setSevFilter} allLabel="All" options={[{ v: "critical", l: "Critical" }, { v: "high", l: "High" }, { v: "medium", l: "Medium" }, { v: "low", l: "Low" }]} />
-        <MultiSeg value={fixFilter} onChange={setFixFilter} allLabel="Any status" options={[{ v: "available", l: "Has patch" }, { v: "pending", l: "No patch" }, { v: "exploited", l: "Exploited" }]} />
-        <MultiSeg value={acceptFilter} onChange={setAcceptFilter} allLabel="Any triage" options={[{ v: "outstanding", l: "Outstanding" }, { v: "scheduled", l: "Scheduled" }, { v: "accepted", l: "Accepted" }]} />
-        <div style={{ position: "relative", maxWidth: 200 }}>
-          <input
-            list="cve-pkg-list"
-            className="input focus-ring mono"
-            placeholder="All packages…"
-            value={pkgFilter === "all" ? "" : pkgFilter}
-            onChange={(e) => setPkgFilter(e.target.value.trim() ? e.target.value.trim() : "all")}
-            style={{ fontSize: 12, paddingRight: pkgFilter !== "all" ? 28 : 12 }} />
-          
-          <datalist id="cve-pkg-list">
-            {packages.map((p) => <option key={p} value={p} />)}
-          </datalist>
-          {pkgFilter !== "all" &&
-          <button className="btn-icon focus-ring"
-          onClick={() => setPkgFilter("all")}
-          title="Clear"
-          style={{ position: "absolute", right: 4, top: "50%", transform: "translateY(-50%)", padding: 4 }}>
-              <Icon name="x" size={11} />
-            </button>
-          }
-        </div>
-        <MultiFilter label="Environment" allLabel="All environments" value={envList} onChange={setEnvList} options={ENVIRONMENTS.map((e) => ({ value: e.name, label: e.name }))} />
-        <span className="filter-count" style={{ marginLeft: "auto", marginRight: 0 }}>Group</span>
-        <div className="seg">
-          {[
-          { v: "package", l: "Package" },
-          { v: "env", l: "Environment" },
-          { v: "system", l: "Env › System" },
-          { v: "flat", l: "None" }].
-          map((o) =>
-          <button key={o.v} className={groupMode === o.v ? "active" : ""} onClick={() => setGroupMode(o.v)}>{o.l}</button>
-          )}
-        </div>
-        <span className="filter-count" style={{ marginLeft: 0, marginRight: 0 }}>Sort</span>
-        <div className="seg">
-          {[
-          { v: "severity", l: "Severity" },
-          { v: "cvss", l: "CVSS" },
-          { v: "age", l: "Newest" },
-          { v: "affected", l: "Most affected" }].
-          map((o) =>
-          <button key={o.v} className={sort === o.v ? "active" : ""} onClick={() => setSort(o.v)}>{o.l}</button>
-          )}
+        <MultiFilter label="Severity" allLabel="Severity" value={sevFilter} onChange={setSevFilter} options={[{ value: "critical", label: "Critical", dot: "#f87171" }, { value: "high", label: "High", dot: "#fbbf24" }, { value: "medium", label: "Medium", dot: "#60a5fa" }, { value: "low", label: "Low", dot: "#9ca3af" }]} />
+        <MultiFilter label="Fix" allLabel="Fix" value={fixFilter} onChange={setFixFilter} options={[{ value: "available", label: "Patch available" }, { value: "pending", label: "No patch" }, { value: "exploited", label: "Known exploited", dot: "#f87171" }]} />
+        <MultiFilter label="Triage" allLabel="Triage" value={acceptFilter} onChange={setAcceptFilter} options={[{ value: "outstanding", label: "Outstanding", dot: "#f87171" }, { value: "scheduled", label: "Scheduled", dot: "#60a5fa" }, { value: "accepted", label: "Accepted", dot: "#34d399" }]} />
+        <MultiFilter label="Environment" allLabel="Environment" value={envList} onChange={setEnvList} options={ENVIRONMENTS.map((e) => ({ value: e.name, label: e.name }))} />
+        {(sevFilter.length + fixFilter.length + acceptFilter.length + envList.length + (query ? 1 : 0)) > 0 && <button className="btn btn-ghost xs focus-ring" onClick={() => { setSevFilter([]); setFixFilter([]); setAcceptFilter([]); setEnvList([]); setQuery(""); }}><Icon name="x" size={11} /> Clear</button>}
+        <div className="cve-view-opts">
+          <label className="cve-opt">Group<select className="input focus-ring" value={groupMode} onChange={(e) => setGroupMode(e.target.value)}>
+            <option value="package">Package</option><option value="env">Environment</option><option value="system">Env › System</option><option value="flat">None</option></select></label>
+          <label className="cve-opt">Sort<select className="input focus-ring" value={sort} onChange={(e) => setSort(e.target.value)}>
+            <option value="severity">Severity</option><option value="cvss">CVSS</option><option value="age">Newest</option><option value="affected">Most affected</option></select></label>
         </div>
       </div>
 
       <div className="cve-sel-bar">
-        <span className="cve-sel-label">Select</span>
+        <span className="cve-sel-label">{filtered.length} CVEs · select</span>
         {quickSel.map(([l, list]) => {
           const on = list.every(c => sel.has(c.id));
           return <button key={l} type="button" className={`cve-sel-chip focus-ring${on ? " on" : ""}`} onClick={() => list.forEach(c => sel.toggle(c.id, !on))}>{l} <span className="mono">{list.length}</span></button>;
@@ -1435,8 +1400,9 @@ const CVE_EXPORT_FORMATS = [
   ["csv",        "CSV",        "Flat data for import into other tools"],
   ["oscal-xml",  "OSCAL XML",  "Standards-compatible XML"],
 ];
-function CveExportMenuButton({ list, scope }) {
+function CveExportMenuButton({ all, filtered, selected, envList, filterDesc }) {
   const [open, setOpen] = React.useState(false);
+  const [pick, setPick] = React.useState(null);
   const ref = React.useRef(null);
   React.useEffect(() => {
     if (!open) return;
@@ -1445,16 +1411,33 @@ function CveExportMenuButton({ list, scope }) {
     document.addEventListener("mousedown", off); document.addEventListener("keydown", esc);
     return () => { document.removeEventListener("mousedown", off); document.removeEventListener("keydown", esc); };
   }, [open]);
+  const filtering = filterDesc.length > 0;
+  const scopes = [
+    ...(selected.length ? [{ k: "selected", l: "Selected", n: selected.length, sub: "The CVEs you ticked", list: selected }] : []),
+    { k: "filtered", l: filtering ? "Current view" : "All CVEs", n: filtered.length, sub: filtering ? filterDesc.join(" · ") : "No filters applied", list: filtered },
+    ...(filtering ? [{ k: "all", l: "All CVEs", n: all.length, sub: "Ignore filters", list: all }] : []),
+  ];
+  const cur = scopes.find((s) => s.k === pick) || scopes[0];
+  const scopeName = cur.k === "all" ? null : envList.length && cur.k === "filtered" ? envList.join(", ") : null;
   return (
     <div className="rr-export" ref={ref}>
       <button type="button" className="btn btn-ghost focus-ring" aria-expanded={open} onClick={() => setOpen(o => !o)}>
-        <Icon name="download" size={14}/> Export {list.length} <Icon name="chevron-down" size={11}/>
+        <Icon name="download" size={14}/> Export <Icon name="chevron-down" size={11}/>
       </button>
       {open && (
         <div className="rr-export-pop card" role="menu" aria-label="Export CVEs">
-          <div className="rr-export-title">Export CVEs{scope ? " · " + scope : ""}</div>
+          <div className="rr-export-title">What to export</div>
+          <div className="cve-exp-scopes" role="radiogroup">
+            {scopes.map((s) => (
+              <label key={s.k} className={"cve-exp-scope" + (cur.k === s.k ? " on" : "")}>
+                <input type="radio" name="cve-exp" checked={cur.k === s.k} onChange={() => setPick(s.k)} />
+                <span className="cve-exp-body"><span className="cve-exp-l">{s.l} <b>{s.n}</b></span><span className="cve-exp-sub">{s.sub}</span></span>
+              </label>
+            ))}
+          </div>
+          <div className="rr-export-title">Format</div>
           {CVE_EXPORT_FORMATS.map(([k, l, sub]) => (
-            <button key={k} type="button" role="menuitem" className="rr-export-item focus-ring" onClick={() => { cveRunExport(k, list, scope); setOpen(false); }}>
+            <button key={k} type="button" role="menuitem" disabled={!cur.n} className="rr-export-item focus-ring" onClick={() => { cveRunExport(k, cur.list, scopeName); setOpen(false); }}>
               <span className="rr-export-item-l">{l}</span>
               <span className="rr-export-item-sub">{sub}</span>
             </button>
