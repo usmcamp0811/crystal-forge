@@ -560,6 +560,10 @@ async fn main() -> anyhow::Result<()> {
             get(poam::system_cve_triage_detail).post(poam::triage_system_cve),
         )
         .route(
+            "/api/v1/systems/:id/cves/batch-triage",
+            post(poam::triage_system_cves_batch),
+        )
+        .route(
             "/api/v1/systems/:id/cve-scan-eligibility",
             get(systems::get_system_cve_scan_eligibility),
         )

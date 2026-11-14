@@ -6,9 +6,9 @@ use crystal_forge::api::models::{
     CveBatchScheduleGrouping, CveBatchUnavailableReason, CveEnvironmentDisposition,
     CveEnvironmentTriageAction, CveFilters, FleetCveBatchDetailRequest, FleetCveBatchTriageRequest,
     FleetCveInventorySection, FleetCveMutationDetailScope, FleetCvePoamRequest,
-    FleetCveTriageRequest, FleetCveTriageRollup, SystemCveEffectiveDispositionSource,
-    SystemCveInventoryParams, SystemCveTriageAction, SystemCveTriageRequest,
-    SystemCveTriageScopeChoice, SystemCveTriageScopeKind,
+    FleetCveTriageRequest, FleetCveTriageRollup, SystemCveBatchTriageRequest,
+    SystemCveEffectiveDispositionSource, SystemCveInventoryParams, SystemCveTriageAction,
+    SystemCveTriageRequest, SystemCveTriageScopeChoice, SystemCveTriageScopeKind,
 };
 use crystal_forge::auth::extractors::AuthenticatedUser;
 use crystal_forge::auth::session::{
@@ -13338,6 +13338,14 @@ async fn poam_http_server(pool: PgPool) -> String {
             axum::routing::post(poam_handlers::triage_fleet_cves_batch),
         )
         .route(
+            "/api/v1/systems/:id/cve-inventory-page",
+            get(system_handlers::get_system_cve_inventory_page),
+        )
+        .route(
+            "/api/v1/systems/:id/cves/batch-triage",
+            axum::routing::post(poam_handlers::triage_system_cves_batch),
+        )
+        .route(
             "/api/v1/cves/:cve_id/fleet",
             get(poam_handlers::fleet_cve_detail),
         )
@@ -21210,4 +21218,304 @@ async fn shared_plan_reopen_fails_closed_when_moved_pair_lost_its_last_link(pool
                 .is_none()
         );
     }
+}
+
+async fn host_disposition_state(
+    pool: &PgPool,
+    system_id: Uuid,
+    cve_id: &str,
+    package: &str,
+) -> Option<(String, Option<Uuid>)> {
+    sqlx::query_as(
+        r#"SELECT state,poam_id FROM cve_system_dispositions
+           WHERE system_id=$1 AND canonical_cve_id=$2
+             AND canonical_package_name=$3 AND retired_at IS NULL"#,
+    )
+    .bind(system_id)
+    .bind(cve_id)
+    .bind(package)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn system_batch_writes_only_path_host_overrides_and_skips_managed_pairs(pool: PgPool) {
+    let host = assessment_fixture(&pool).await;
+    let peer = assessment_fixture(&pool).await;
+    let actor = admin_actor(host.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc::now());
+    let environment_id = assign_environment(&pool, "system-batch", &[&host, &peer]).await;
+    let accept = ("CVE-2027-10301", "openssl");
+    let schedule = ("CVE-2027-10302", "curl");
+    let managed = ("CVE-2027-10303", "zlib");
+    for fixture in [&host, &peer] {
+        seal_exact_cve_scan_many(
+            &pool,
+            fixture,
+            clock.now(),
+            &[
+                (accept.0, accept.1, "3.0.0", false),
+                (schedule.0, schedule.1, "8.0.0", false),
+                (managed.0, managed.1, "1.3", false),
+            ],
+        )
+        .await;
+    }
+    // An environment schedule links both hosts; batch must not touch it.
+    poam_service::triage_fleet_cves_batch(
+        &pool,
+        &actor,
+        FleetCveBatchTriageRequest {
+            pairs: vec![batch_pair(managed.0, managed.1)],
+            environment_ids: vec![environment_id],
+            expected_tokens: batch_tokens(
+                &pool,
+                &actor,
+                &[batch_pair(managed.0, managed.1)],
+                &[environment_id],
+            )
+            .await,
+            skip_existing: true,
+            disposition: CveBatchDisposition::SchedulePatch {
+                grouping: CveBatchScheduleGrouping::One,
+                assignee: PoamAssigneeRequest::User {
+                    user_id: actor.user_id,
+                },
+                target_date: clock.today() + TimeDelta::days(30),
+                plan: String::new(),
+                default_milestones: false,
+            },
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+
+    let accepted = poam_service::triage_system_cves_batch(
+        &pool,
+        &actor,
+        host.system_id,
+        SystemCveBatchTriageRequest {
+            pairs: vec![
+                batch_pair(accept.0, accept.1),
+                batch_pair(managed.0, managed.1),
+            ],
+            skip_existing: true,
+            disposition: CveBatchDisposition::AcceptRisk {
+                justification: "Host-only mitigation applies to this batch.".into(),
+                review_date: None,
+            },
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(accepted.applied.len(), 1);
+    assert_eq!(accepted.applied[0].pair, batch_pair(accept.0, accept.1));
+    assert_eq!(accepted.skipped, vec![batch_pair(managed.0, managed.1)]);
+    assert_eq!(
+        host_disposition_state(&pool, host.system_id, accept.0, accept.1)
+            .await
+            .map(|row| row.0)
+            .as_deref(),
+        Some("accepted")
+    );
+    assert!(
+        host_disposition_state(&pool, peer.system_id, accept.0, accept.1)
+            .await
+            .is_none()
+    );
+    assert!(
+        environment_disposition_row(&pool, accept.0, accept.1, environment_id)
+            .await
+            .is_none(),
+        "host batch must not write the environment default"
+    );
+    assert!(
+        host_disposition_state(&pool, host.system_id, managed.0, managed.1)
+            .await
+            .is_none()
+    );
+
+    let scheduled = poam_service::triage_system_cves_batch(
+        &pool,
+        &actor,
+        host.system_id,
+        SystemCveBatchTriageRequest {
+            pairs: vec![batch_pair(schedule.0, schedule.1)],
+            skip_existing: true,
+            disposition: CveBatchDisposition::SchedulePatch {
+                grouping: CveBatchScheduleGrouping::One,
+                assignee: PoamAssigneeRequest::User {
+                    user_id: actor.user_id,
+                },
+                target_date: clock.today() + TimeDelta::days(30),
+                plan: String::new(),
+                default_milestones: false,
+            },
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(scheduled.poam_ids.len(), 1);
+    let (state, poam_id) = host_disposition_state(&pool, host.system_id, schedule.0, schedule.1)
+        .await
+        .expect("host schedule");
+    assert_eq!(
+        (state.as_str(), poam_id),
+        ("scheduled", Some(scheduled.poam_ids[0]))
+    );
+    let linked: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT system_id FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL",
+    )
+    .bind(scheduled.poam_ids[0])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, vec![host.system_id], "only the path host is linked");
+    assert!(
+        host_disposition_state(&pool, peer.system_id, schedule.0, schedule.1)
+            .await
+            .is_none()
+    );
+
+    // A pair that is not a current exact finding on the host fails atomically.
+    let missing = poam_service::triage_system_cves_batch(
+        &pool,
+        &actor,
+        host.system_id,
+        SystemCveBatchTriageRequest {
+            pairs: vec![batch_pair("CVE-2027-10399", "absent")],
+            skip_existing: true,
+            disposition: CveBatchDisposition::AcceptRisk {
+                justification: "Should never be recorded anywhere.".into(),
+                review_date: None,
+            },
+        },
+        &clock,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        missing,
+        PoamError::Conflict("batch_pair_unavailable", _)
+    ));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn system_batch_http_requires_mutation_role_csrf_and_visible_system(pool: PgPool) {
+    let fixture = assessment_fixture(&pool).await;
+    let hidden = assessment_fixture(&pool).await;
+    let environment_id = assign_environment(&pool, "system-batch-http", &[&fixture]).await;
+    assign_environment(&pool, "system-batch-http-hidden", &[&hidden]).await;
+    let pair = batch_pair("CVE-2027-20601", "http-openssl");
+    for host in [&fixture, &hidden] {
+        seal_exact_cve_scan(
+            &pool,
+            host,
+            Utc::now(),
+            Some((&pair.cve_id, &pair.canonical_package_name, "1", false)),
+        )
+        .await;
+    }
+    let (viewer_id, viewer) = role_session(&pool, AuthRole::Viewer).await;
+    let (operator_id, operator) = role_session(&pool, AuthRole::Operator).await;
+    for user_id in [viewer_id, operator_id] {
+        sqlx::query(
+            "INSERT INTO user_environment_memberships(user_id,environment_id) VALUES($1,$2)",
+        )
+        .bind(user_id)
+        .bind(environment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let base = poam_http_server(pool.clone()).await;
+    let client = reqwest::Client::new();
+    let url = |system_id: Uuid| format!("{base}/api/v1/systems/{system_id}/cves/batch-triage");
+    let body = serde_json::json!({
+        "pairs": [pair],
+        "skip_existing": true,
+        "disposition": {"action": "accept_risk", "justification": "HTTP host batch decision", "review_date": null}
+    });
+    let send = |target: String, session: &str, csrf: Option<&str>| {
+        http_request(&client, reqwest::Method::POST, target, session, csrf)
+            .json(&body)
+            .send()
+    };
+    let viewer_response = send(url(fixture.system_id), &viewer, Some("system-batch-viewer"))
+        .await
+        .unwrap();
+    assert_eq!(viewer_response.status(), reqwest::StatusCode::FORBIDDEN);
+    let missing_csrf = send(url(fixture.system_id), &operator, None).await.unwrap();
+    assert_eq!(missing_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+    let hidden_response = send(
+        url(hidden.system_id),
+        &operator,
+        Some("system-batch-hidden"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(hidden_response.status(), reqwest::StatusCode::NOT_FOUND);
+    assert!(
+        host_disposition_state(
+            &pool,
+            hidden.system_id,
+            &pair.cve_id,
+            &pair.canonical_package_name
+        )
+        .await
+        .is_none()
+    );
+    let applied = send(
+        url(fixture.system_id),
+        &operator,
+        Some("system-batch-operator"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(applied.status(), reqwest::StatusCode::OK);
+    let applied: serde_json::Value = applied.json().await.unwrap();
+    assert_eq!(applied["applied"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        host_disposition_state(
+            &pool,
+            fixture.system_id,
+            &pair.cve_id,
+            &pair.canonical_package_name
+        )
+        .await
+        .map(|row| row.0)
+        .as_deref(),
+        Some("accepted")
+    );
+    // The inventory row reports the new host decision without row hydration.
+    let inventory: serde_json::Value = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!(
+            "{base}/api/v1/systems/{}/cve-inventory-page",
+            fixture.system_id
+        ),
+        &operator,
+        None,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let row = inventory["vulnerabilities"]
+        .as_array()
+        .unwrap_or_else(|| panic!("inventory response: {inventory}"))
+        .iter()
+        .find(|row| row["cve_id"] == pair.cve_id)
+        .expect("inventory row");
+    assert_eq!(row["triage_state"], "accepted");
 }

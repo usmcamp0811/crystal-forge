@@ -5959,6 +5959,11 @@ pub struct SystemCveInventoryVulnerability {
     /// Provides exact remediation context only for an exact row on this page.
     #[serde(default)]
     pub remediation: Option<crate::views::poam_api::CvePoamRelationship>,
+    /// Gives the effective host triage state, `accepted` or `scheduled`.
+    /// `None` means OPEN or a read-only page. It drives quick selection only;
+    /// per-row triage detail remains authoritative.
+    #[serde(default)]
+    pub triage_state: Option<String>,
 }
 
 /// Identifies the evidence authority used for a system CVE inventory read.

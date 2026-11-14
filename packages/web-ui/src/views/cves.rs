@@ -1887,7 +1887,7 @@ fn batch_tokens(
     Ok(tokens)
 }
 
-fn batch_assignee(
+pub(crate) fn batch_assignee(
     value: &str,
     catalog: &poam_api::PoamAssigneeCatalog,
 ) -> Option<poam_api::PoamAssigneeRequest> {

@@ -704,6 +704,14 @@ pub struct SystemCveInventoryVulnerability {
     /// Provides exact remediation context only for an exact row on this page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation: Option<crate::models::poam::CvePoamRelationship>,
+    /// Gives the host-precedence effective triage state, `accepted` or
+    /// `scheduled`, for an exact row of a mutable page. `None` means OPEN, or
+    /// that the page is read-only and no triage state applies. A scheduled
+    /// environment default counts only when it is coherent for current exact
+    /// subjects (`cve_coherent_environment_disposition_state`). This is a
+    /// selection aid; the per-row triage detail remains authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triage_state: Option<String>,
 }
 
 /// Identifies the evidence authority used for a system CVE inventory read.
@@ -1759,6 +1767,33 @@ pub struct FleetCveBatchTriageRequest {
     #[serde(default = "default_true_value")]
     pub skip_existing: bool,
     /// Selects the shared disposition applied to every applicable subject.
+    pub disposition: CveBatchDisposition,
+}
+
+/// Requests one atomic host-override decision for many CVE/package pairs on
+/// the path system (System Detail batch triage).
+///
+/// # Invariants
+///
+/// - The request cannot name a system, environment, or host list. The server
+///   writes only host overrides (`cve_system_dispositions`) for the path system.
+///   The system's environment default and its peer hosts are not changed.
+/// - Every named pair must be a current exact occurrence on the path system;
+///   otherwise the complete batch fails with a conflict.
+/// - A pair with an active host `Scheduled` decision or an active POA&M
+///   finding link on this host is skipped, independent of `skip_existing`.
+///   Changing it requires single-CVE System Detail triage, which owns the
+///   POA&M link retirement rules.
+/// - The complete mutation commits in one database transaction.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SystemCveBatchTriageRequest {
+    /// Gives the bounded set of exact CVE/package identities (1 to 100).
+    pub pairs: Vec<CveBatchPairIdentity>,
+    /// Leaves an existing host `Accepted` decision unchanged when true (default).
+    #[serde(default = "default_true_value")]
+    pub skip_existing: bool,
+    /// Selects the shared disposition. `PerEnvironment` schedule grouping is
+    /// equivalent to `One` because one host has one environment.
     pub disposition: CveBatchDisposition,
 }
 
