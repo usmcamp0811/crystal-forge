@@ -151,7 +151,11 @@ async function run(ctx, phase) {
     await exportButton.click();
     const count = await scopeCount("Filtered");
     expect(count).toBeGreaterThan(0);
+    // Escape with focus on the trigger must close the menu and remove its
+    // page-wide backdrop, which would otherwise intercept the next click.
     await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu", { name: "Export CVEs" })).toHaveCount(0);
+    await expect(page.locator(".rr-export-backdrop")).toHaveCount(0);
     // Checking every severity is a multi-value filter equal to no filter.
     await page.getByRole("button", { name: "Severity filter", exact: true }).click();
     for (const severity of ["Critical", "High", "Medium", "Low"]) {
@@ -163,6 +167,7 @@ async function run(ctx, phase) {
     expect(await scopeCount("Filtered")).toBe(count);
     expect(await scopeCount("All")).toBe(count);
     await page.keyboard.press("Escape");
+    await expect(page.locator(".rr-export-backdrop")).toHaveCount(0);
     await page.getByRole("button", { name: "Clear", exact: true }).click();
     await expect(page).not.toHaveURL(/severity=/);
     for (const format of ["oscal-json", "excel", "csv", "oscal-xml"]) {

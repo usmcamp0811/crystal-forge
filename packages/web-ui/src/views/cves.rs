@@ -1098,7 +1098,13 @@ pub fn CvesView(query: String) -> Element {
                             if fleet_rescan_pending() { " Rescanning…" } else { " Rescan fleet" }
                         }
                     }
-                    div { class: "cve-export rr-export",
+                    // INVARIANT: Escape is handled on the wrapper so it closes the menu
+                    // whether focus is on the trigger or inside the popover. The open
+                    // menu's backdrop covers the page and would otherwise intercept
+                    // the next click.
+                    div {
+                        class: "cve-export rr-export",
+                        onkeydown: move |evt| if export_open() && evt.key() == Key::Escape { export_open.set(false) },
                         button {
                             class: "btn btn-ghost focus-ring",
                             aria_expanded: "{export_open()}",
@@ -1119,7 +1125,6 @@ pub fn CvesView(query: String) -> Element {
                                 class: "rr-export-pop card",
                                 role: "menu",
                                 aria_label: "Export CVEs",
-                                onkeydown: move |evt| if evt.key() == Key::Escape { export_open.set(false) },
                                 div { class: "rr-export-title", "What to export" }
                                 div { class: "cve-exp-scopes", role: "radiogroup",
                                     for scope in scopes.iter().copied() {

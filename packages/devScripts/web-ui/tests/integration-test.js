@@ -14888,6 +14888,43 @@ const steps = [
       if (new URL(page.url()).searchParams.get("triage_status") !== "inventory_only") {
         throw new Error(`Inventory-only filter was not retained in route state: ${page.url()}`);
       }
+      // The export menu closes on Escape (focus on the trigger and inside the
+      // popover), on a trigger re-click and on a backdrop click. Its backdrop
+      // covers the page, so each close must leave the next filter click
+      // unobstructed; no click below is forced.
+      {
+        const trigger = page.locator(".cve-export > button");
+        const menu = page.getByRole("menu", { name: "Export CVEs" });
+        const backdrop = page.locator(".rr-export-backdrop");
+        for (let cycle = 0; cycle < 2; cycle += 1) {
+          await trigger.click();
+          await assertVisible(menu, "Export menu must open");
+          await page.keyboard.press("Escape");
+          await assertHidden(menu, "Escape with focus on the trigger must close the export menu");
+          await assertCount(backdrop, 0, "Closed export menu must not leave its backdrop");
+        }
+        await trigger.click();
+        await assertVisible(menu, "Export menu must reopen");
+        await page.locator('.cve-exp-scope[data-scope="Filtered"] input').focus();
+        await page.keyboard.press("Escape");
+        await assertHidden(menu, "Escape with focus inside the popover must close the export menu");
+        await trigger.click();
+        await assertVisible(menu, "Export menu must open before the toggle check");
+        // The open backdrop covers the page, so a re-click is a real user
+        // action only through the trigger's own keyboard activation.
+        await trigger.focus();
+        await page.keyboard.press("Enter");
+        await assertHidden(menu, "Activating the trigger again must close the export menu");
+        await trigger.click();
+        await assertVisible(menu, "Export menu must open before the backdrop check");
+        await backdrop.click();
+        await assertHidden(menu, "A backdrop click must close the export menu");
+        await assertCount(backdrop, 0, "Backdrop click must remove the backdrop");
+        // Unobstructed: the next real filter click works with no forced click.
+        await page.getByRole("button", { name: "Severity filter", exact: true }).click();
+        await assertVisible(page.locator(".mf-menu"), "Severity filter must open once the export menu has closed");
+        await page.locator(".mf-backdrop").click();
+      }
       const csvDownloadPromise = page.waitForEvent("download");
       await page.locator(".cve-export > button").click();
       await page.locator('.cve-exp-scope[data-scope="Filtered"] input').check();
