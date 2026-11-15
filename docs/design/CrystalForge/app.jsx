@@ -502,7 +502,7 @@ function App() {
               if (view === "systems" && sysFlakeArg) setSysFlake(sysFlakeArg);
             }}
             onTagFilter={(t) => { setSysTag(t); setTopView("systems"); setDetailSystem(null); }}
-            onDeploy={(s) => setPendingDeploy({ sysId: detailSystem.id, commit: s.pendingCommit, at: Date.now() })}
+            onDeploy={(s) => setPendingDeploy({ sysId: detailSystem.id, commit: s.pendingCommit, kind: s.pendingKind, gen: s.pendingGen, msg: s.pendingMsg, at: Date.now() })}
             onEdit={(s) => setEditTarget(s)}
             onOpenSystem={(s) => openDetail(s)}
             initialTab={detailTab}

@@ -3,6 +3,7 @@
 // Deployment-command progress banner. Deployments are pull-based: the server queues the
 // command and the agent picks it up on its next heartbeat, so the operator needs to know
 // they're waiting on the agent — not on a stuck server.
+window.PendingDeployBanner = PendingDeployBanner;
 function PendingDeployBanner({ stage, stages, commit, sys, kind, gen, onDismiss, onViewLogs }) {
   const idx = stages.indexOf(stage);
   const done = stage === "activated";
@@ -183,7 +184,7 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
         </div>
         )}
 
-        {deployStage && pendingDeploy && (
+        {deployStage && pendingDeploy && !(tab === "deploy" && !ext && window.FlakePositionCard) && (
           <PendingDeployBanner
             stage={deployStage}
             stages={DEPLOY_STAGES}
@@ -236,8 +237,8 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
         {ext && tab === "hardening" && <EvidenceGate sys={sys} what="Hardening results"><HardeningTab sys={sys} /></EvidenceGate>}
         {ext && tab === "compliance" && <EvidenceGate sys={sys} what="Compliance results"><ComplianceTab sys={sys} onNavigate={onNavigate} /></EvidenceGate>}
         {ext && tab === "config" && window.ConfigExplorerTab && <window.ConfigExplorerTab sys={sys} initialRev={initialRev} onOpenFlake={openCommitPeek} />}
-        {!ext && tab === "overview"   && <OverviewTab sys={sys} onNavigate={onNavigate} onViewCves={() => setTab("cves")} onTagFilter={onTagFilter} deployStage={deployStage} pendingCommit={pendingDeploy?.commit} pendingKind={pendingDeploy?.kind} pendingGen={pendingDeploy?.gen} onViewHistory={() => setTab("history")} onOpenCommit={openCommitPeek} onOpenBuild={() => onNavigate?.("builds")} />}
-        {!ext && tab === "deploy"     && <DeployTab key={sys.id} sys={sys} onDeploy={onDeploy} onOpenCommit={openCommitPeek} preselect={deployPreselect} />}
+        {!ext && tab === "overview"   && <OverviewTab sys={sys} onNavigate={onNavigate} onViewCves={() => setTab("cves")} onTagFilter={onTagFilter} deployStage={deployStage} pendingCommit={pendingDeploy?.commit} pendingKind={pendingDeploy?.kind} pendingGen={pendingDeploy?.gen} onViewHistory={() => setTab("history")} onOpenCommit={openCommitPeek} onOpenBuild={() => onNavigate?.("builds")} onDeployHead={(c) => { setDeployPreselect({ sha: c.sha, nonce: Date.now() }); setTab("deploy"); }} deploy={deployStage && pendingDeploy ? { stage: deployStage, stages: DEPLOY_STAGES, commit: pendingDeploy.commit, kind: pendingDeploy.kind, gen: pendingDeploy.gen, onDismiss: onClearPending, onViewLogs: () => setTab("logs") } : null} />}
+        {!ext && tab === "deploy"     && <DeployTab key={sys.id} sys={sys} onDeploy={onDeploy} onOpenCommit={openCommitPeek} preselect={deployPreselect} onViewHistory={() => setTab("history")} deploy={deployStage && pendingDeploy ? { stage: deployStage, stages: DEPLOY_STAGES, commit: pendingDeploy.commit, kind: pendingDeploy.kind, gen: pendingDeploy.gen, msg: pendingDeploy.msg, onDismiss: onClearPending, onViewLogs: () => setTab("logs") } : null} />}
         {!ext && tab === "history"    && <HistoryTab sys={sys} onRollback={(sha,gen)=>{ setDeployPreselect({ sha, gen, nonce: Date.now() }); setTab("deploy"); }} onLogsJump={(id)=>{ setTab("logs"); setLogsJump({ id, nonce: Date.now() }); }} onOpenCommit={openCommitPeek} />}
         {!ext && tab === "logs"       && <LogsTab sys={sys} jump={logsJump} />}
         {!ext && tab === "config"     && window.ConfigExplorerTab && <window.ConfigExplorerTab sys={sys} initialRev={initialRev} onOpenFlake={openCommitPeek} />}
@@ -400,16 +401,18 @@ function buildActivityFeed(sys, deployStage, pendingCommit, pendingKind, pending
     const map = isRb ? {
       "queued":    { t:`Rollback queued — awaiting agent check-in`, c:"#fbbf24", ic:"rollback", live:true },
       "picked-up": { t:`Agent picked up rollback to gen #${pendingGen}`, c:"#fbbf24", ic:"rollback", live:true },
+      "copying":   { t:`Copying closure for gen #${pendingGen} from cache`, c:"#fbbf24", ic:"rollback", live:true },
       "applying":  { t:`Reverting to gen #${pendingGen} (${pendingCommit})`, c:"#fbbf24", ic:"rollback", live:true },
       "activated": { t:`Rolled back — generation #${targetGen} live`, c:"#34d399", ic:"check" },
     } : {
       "queued":    { t:`Deployment queued — awaiting agent check-in`, c:"#a78bfa", ic:"deploy", live:true },
       "picked-up": { t:`Agent picked up deploy ${pendingCommit}`,     c:"#60a5fa", ic:"deploy", live:true },
+      "copying":   { t:`Copying closure for ${pendingCommit} from cache`, c:"#60a5fa", ic:"deploy", live:true },
       "applying":  { t:`Applying ${pendingCommit} — building & switching`, c:"#60a5fa", ic:"deploy", live:true },
       "activated": { t:`Generation #${targetGen} activated`,  c:"#34d399", ic:"check" },
     };
     const m = map[deployStage];
-    feed.push({ at:"now", title:m.t, color:m.c, icon:m.ic, live:m.live });
+    if (m) feed.push({ at:"now", title:m.t, color:m.c, icon:m.ic, live:m.live });
   }
   // 2) latest heartbeat (the always-fresh signal)
   feed.push({ at: sys.lastHeartbeat, title:`Heartbeat received`, color:"#34d399", icon:"activity",
@@ -431,7 +434,7 @@ function buildActivityFeed(sys, deployStage, pendingCommit, pendingKind, pending
   return feed.slice(0, 9);
 }
 
-function OverviewTab({ sys, onViewCves, onTagFilter, deployStage, pendingCommit, pendingKind, pendingGen, onViewHistory, onOpenCommit, onOpenBuild, onNavigate }) {
+function OverviewTab({ sys, onViewCves, onTagFilter, deployStage, pendingCommit, pendingKind, pendingGen, onViewHistory, onOpenCommit, onOpenBuild, onNavigate, onDeployHead, deploy }) {
   const [tags, setTags] = React.useState(sys.tags || []);
   const [adding, setAdding] = React.useState(false);
   const [draft, setDraft] = React.useState("");
@@ -614,6 +617,15 @@ function resolveInputFlake(input, sys) {
 }
 
 function buildSystemCommits(sys) {
+    // Prefer the same flake history the position graph draws, so list and graph agree on order.
+    const fp = typeof flakePositionOf === "function" ? flakePositionOf(sys) : null;
+    if (fp && fp.list && fp.list.length) {
+      return fp.list.map((c, i) => ({
+        sha: c.sha, message: c.msg, author: c.author, when: c.at,
+        current: !fp.unknown && i === fp.behind, deployed: !fp.unknown && i === fp.behind,
+        buildStatus: i === 0 && fp.behind !== 0 ? "building" : "cached",
+      }));
+    }
     const msgs = [
       "chore: bump nixpkgs to 24.11 snapshot",
       "fix: restart nginx on cert renewal",
@@ -644,21 +656,25 @@ function buildSystemCommits(sys) {
 
 function buildGenerations(sys) {
   const gen = sys.generation;
+  const fp = typeof flakePositionOf === "function" ? flakePositionOf(sys) : null;
+  const older = (k, fb) => (fp && !fp.unknown && fp.list[fp.behind + k]) ? fp.list[fp.behind + k] : { sha: fb };
+  const gsha = (k, fb) => older(k, fb).sha, gmsg = (k, fb) => older(k, fb).msg || fb;
   return [
       { id: gen,     origin: "cf",      sha: sys.commit, flake: sys.flake, msg: sys.commitMessage,            at: "2h ago",     kernel: "6.6.72", by: "mreyes",       current: true,  state: "active" },
       { id: gen - 1, origin: "local",   sha: null,       flake: null,      msg: "Manual rebuild — uncommitted change", at: "8h ago",     kernel: "6.6.72", by: "root@host",   current: false, state: "drift",  driftHint: "modules/services/nginx.nix differs from sys.commit" },
-      { id: gen - 2, origin: "cf",      sha: "a1f2c31",  flake: sys.flake, msg: "chore: bump nixpkgs",        at: "yesterday",  kernel: "6.6.72", by: "ops-bot",     current: false, state: "ok" },
-      { id: gen - 3, origin: "cf",      sha: "ffa2b88",  flake: sys.flake, msg: "cve: patch openssl",         at: "3d ago",     kernel: "6.6.71", by: "ops-bot",     current: false, state: "ok" },
+      { id: gen - 2, origin: "cf",      sha: gsha(1, "a1f2c31"),  flake: sys.flake, msg: gmsg(1, "chore: bump nixpkgs"),        at: "yesterday",  kernel: "6.6.72", by: "ops-bot",     current: false, state: "ok" },
+      { id: gen - 3, origin: "cf",      sha: gsha(2, "ffa2b88"),  flake: sys.flake, msg: gmsg(2, "cve: patch openssl"),         at: "3d ago",     kernel: "6.6.71", by: "ops-bot",     current: false, state: "ok" },
       { id: gen - 4, origin: "unknown", sha: null,       flake: null,      msg: "Closure not in cache",       at: "5d ago",     kernel: "6.6.71", by: "—",           current: false, state: "unknown" },
-      { id: gen - 5, origin: "cf",      sha: "9b3a201",  flake: sys.flake, msg: "feat: prometheus exporter",  at: "1w ago",     kernel: "6.6.70", by: "dchen",       current: false, state: "ok" },
-      { id: gen - 6, origin: "cf",      sha: "44102fa",  flake: sys.flake, msg: "stig: harden sshd defaults", at: "2w ago",     kernel: "6.6.68", by: "mreyes",      current: false, state: "ok" },
+      { id: gen - 5, origin: "cf",      sha: gsha(3, "9b3a201"),  flake: sys.flake, msg: gmsg(3, "feat: prometheus exporter"),  at: "1w ago",     kernel: "6.6.70", by: "dchen",       current: false, state: "ok" },
+      { id: gen - 6, origin: "cf",      sha: gsha(4, "44102fa"),  flake: sys.flake, msg: gmsg(4, "stig: harden sshd defaults"), at: "2w ago",     kernel: "6.6.68", by: "mreyes",      current: false, state: "ok" },
     ];
 }
 
-function DeployTab({ sys, onDeploy, onOpenCommit, preselect }) {
+function DeployTab({ sys, onDeploy, onOpenCommit, preselect, onViewHistory, deploy }) {
   const [mode, setMode] = React.useState("commit"); // 'commit' | 'generation'
   const [target, setTarget] = React.useState(null); // {kind, id, label, sub, sha?}
   const [showDiff, setShowDiff] = React.useState(false);
+  const [showOlder, setShowOlder] = React.useState(false);
   const [approvalQueue, setApprovalQueue] = React.useState(() => (typeof APPROVAL_QUEUE !== "undefined" ? APPROVAL_QUEUE : []));
   const [attestations, setAttestations] = React.useState(() => (typeof ATTESTATION_RECORDS !== "undefined" ? ATTESTATION_RECORDS : []));
   const [reviewApproval, setReviewApproval] = React.useState(null);
@@ -690,9 +706,19 @@ function DeployTab({ sys, onDeploy, onOpenCommit, preselect }) {
   const commits = React.useMemo(() => buildSystemCommits(sys), [sys.id]);
 
   const generations = React.useMemo(() => buildGenerations(sys), [sys.id]);
+  // Approval requests are for promoting a commit; pin it to the history (fall back to HEAD when the fixture sha isn't in it).
+  const approvalSha = pendingApproval ? ((commits.find(c => c.sha === pendingApproval.commit) || commits.find(c => !c.current) || commits[0]) || {}).sha : null;
+  const approvalText = pendingApproval ? `${pendingApproval.approvals.length}/${pendingApproval.neededApprovals}` : null;
+  const attest = needsAttestationDecision ? { label: ATTESTATION_CLASSIFICATIONS[attestationRecord.classification].label, since: timeAgoShort(attestationRecord.firstObserved), onDecide: () => setReviewAttestation(attestationRecord) } : null;
 
   React.useEffect(() => {
     if (!preselect) return;
+    if (preselect.gen == null) {
+      const c = commits.find(x => x.sha && preselect.sha && (x.sha.startsWith(preselect.sha) || preselect.sha.startsWith(x.sha))) || commits[0];
+      setMode("commit");
+      setTarget({ kind: "commit", id: c.sha, label: c.sha, sub: c.message, sha: c.sha });
+      return;
+    }
     const g = generations.find(x => x.id === preselect.gen);
     setMode("generation");
     setTarget({ kind:"generation", id: preselect.gen, label:`gen #${preselect.gen}`, sub: g?.msg || "", sha: preselect.sha, origin: g?.origin });
@@ -712,113 +738,11 @@ function DeployTab({ sys, onDeploy, onOpenCommit, preselect }) {
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
-      {(pendingApproval || needsAttestationDecision) && (
-        <section className="card sd-card" style={{ borderColor:"#f87171", padding:16 }}>
-          {pendingApproval && (
-            <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12, marginBottom: needsAttestationDecision ? 12 : 0, paddingBottom: needsAttestationDecision ? 12 : 0, borderBottom: needsAttestationDecision ? "1px solid var(--cf-divider)" : "none" }}>
-              <div style={{ display:"flex", gap:10 }}>
-                <Icon name="deploy" size={16} style={{ color:"#fbbf24", flexShrink:0, marginTop:2 }}/>
-                <div>
-                  <div style={{ fontWeight:600, fontSize:13 }}>Deploy awaiting approval</div>
-                  <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>
-                    Commit <span className="mono">{pendingApproval.commit}</span> gated by <span className="chip chip-unknown">{pendingApproval.policyId}</span> policy — {pendingApproval.approvals.length}/{pendingApproval.neededApprovals} approved, requested by {pendingApproval.requestedBy}.
-                  </div>
-                </div>
-              </div>
-              <button className="btn btn-primary xs focus-ring" onClick={()=>setReviewApproval(pendingApproval)}>Review</button>
-            </div>
-          )}
-          {needsAttestationDecision && (
-            <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12 }}>
-              <div style={{ display:"flex", gap:10 }}>
-                <Icon name="warn" size={16} style={{ color:"#ef4444", flexShrink:0, marginTop:2 }}/>
-                <div>
-                  <div style={{ fontWeight:600, fontSize:13 }}>{ATTESTATION_CLASSIFICATIONS[attestationRecord.classification].label}</div>
-                  <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>
-                    Signed attestation shows a running artifact CF has no matching deployment authorization for. First observed {timeAgoShort(attestationRecord.firstObserved)}.
-                  </div>
-                </div>
-              </div>
-              <button className="btn btn-primary xs focus-ring" onClick={()=>setReviewAttestation(attestationRecord)}>Decide</button>
-            </div>
-          )}
-        </section>
-      )}
-      {/* Gate panel — shows policy evaluation outcomes for the selected target */}
-      <DeployGatePanel sys={sys} commitSha={selected.sha} userRole="operator"/>
-
+      {window.FlakePositionCard && <window.FlakePositionCard sys={sys} onOpenCommit={onOpenCommit} onViewHistory={onViewHistory} deploy={deploy}
+        pickSha={selected.sha && selected.sha !== "—" ? selected.sha : null} attest={attest} approvalSha={approvalSha} approvalText={approvalText}
+        onPick={(c) => { const g = mode === "generation" && generations.find(x => x.sha && x.sha === c.sha); if (g) { setTarget({ kind: "generation", id: g.id, label: `gen #${g.id}`, sub: g.msg, sha: g.sha, origin: g.origin }); return; } const m = commits.find(x => x.sha === c.sha); setMode("commit"); setTarget({ kind: "commit", id: c.sha, label: c.sha, sub: m ? m.message : c.msg, sha: c.sha }); }} />}
       <div className="sd-grid sd-grid-deploy">
-      <section className="card sd-card">
-        <div className="sd-card-head" style={{ flexDirection: "column", alignItems: "stretch", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-            <h2>Select target</h2>
-            <span className="sd-card-meta mono">{sys.flake}</span>
-          </div>
-          <div className="seg" style={{ alignSelf: "flex-start" }}>
-            <button className={mode === "commit" ? "active" : ""} onClick={() => switchMode("commit")}>
-              <Icon name="git" size={12} /> New commit
-            </button>
-            <button className={mode === "generation" ? "active" : ""} onClick={() => switchMode("generation")}>
-              <Icon name="rollback" size={12} /> Previous generation
-            </button>
-          </div>
-        </div>
-
-        {mode === "commit" ? (
-          <div className="sd-commit-list">
-            {commits.map(c => {
-              const isSel = selected.kind === "commit" && selected.id === c.sha;
-              return (
-                <button key={c.sha}
-                  className={`sd-commit-item focus-ring${isSel ? " selected" : ""}`}
-                  onClick={() => setTarget({ kind: "commit", id: c.sha, label: c.sha, sub: c.message, sha: c.sha })}
-                >
-                  <span className="mono sd-commit-sha sd-commit-sha-link" title={`Open ${c.sha} in Flakes`} onClick={ev => { ev.stopPropagation(); onOpenCommit?.({ sha: c.sha, msg: c.message, flake: sys.flake, author: c.author, at: c.when }); }}><Icon name="git" size={10} /> {c.sha}</span>
-                  <span className="sd-commit-msg">{c.message}</span>
-                  <span className="sd-commit-meta mono">{c.author}</span>
-                  <span className="sd-commit-meta">{c.when}</span>
-                  {c.current
-                    ? <span className="chip chip-info">deployed</span>
-                    : c.buildStatus === "cached"
-                      ? <span className="chip chip-healthy">cached</span>
-                      : <span className="chip chip-info">building</span>}
-                </button>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="sd-commit-list">
-            {generations.map(g => {
-              const isSel = selected.kind === "generation" && selected.id === g.id;
-              const originBadge = g.origin === "cf"
-                ? <span className="chip chip-info" title="Deployed via Crystal Forge"><Icon name="git" size={9}/> commit</span>
-                : g.origin === "local"
-                  ? <span className="chip chip-warning" title={g.driftHint || "Manual nixos-rebuild on host"}><Icon name="warn" size={9}/> local</span>
-                  : <span className="chip chip-unknown" title="Closure no longer in cache or metadata stripped">unknown</span>;
-              const shaCell = g.sha
-                ? <span className="mono sd-commit-sha sd-commit-sha-link" title={`Open ${g.sha} in Flakes`} onClick={ev => { ev.stopPropagation(); onOpenCommit?.({ sha: g.sha, msg: g.msg, flake: g.flake || sys.flake, author: g.by, at: g.at }); }}><Icon name="git" size={10} /> {g.sha}</span>
-                : <span className="mono sd-commit-sha" style={{ color: "var(--cf-text-muted)", fontStyle: "italic" }}>—</span>;
-              return (
-                <button key={g.id}
-                  className={`sd-commit-item focus-ring${isSel ? " selected" : ""}`}
-                  style={{ gridTemplateColumns: "60px 80px 1fr auto auto auto auto" }}
-                  onClick={() => setTarget({ kind: "generation", id: g.id, label: `gen #${g.id}`, sub: g.msg, sha: g.sha, origin: g.origin })}
-                >
-                  <span className="mono sd-commit-sha" style={{ color: "var(--cf-brand-purple)" }}>#{g.id}</span>
-                  {shaCell}
-                  <span className="sd-commit-msg" style={ g.origin !== "cf" ? { color:"var(--cf-text-secondary)", fontStyle:"italic" } : null }>{g.msg}</span>
-                  {originBadge}
-                  <span className="sd-commit-meta mono">k{g.kernel}</span>
-                  <span className="sd-commit-meta">{g.at}</span>
-                  {g.current
-                    ? <span className="chip chip-healthy">active</span>
-                    : <span className="chip chip-unknown">rollback</span>}
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </section>
+      <DeployTargetPicker approvalSha={approvalSha} approvalText={approvalText} sys={sys} mode={mode} switchMode={switchMode} commits={commits} generations={generations} selected={selected} setTarget={setTarget} showOlder={showOlder} setShowOlder={setShowOlder} onOpenCommit={onOpenCommit} />
 
       <section className="card sd-card sd-deploy-panel">
         <div className="sd-card-head">
@@ -906,6 +830,15 @@ nix-env --switch-generation ${selected.id} --profile /nix/var/nix/profiles/syste
           );
         })()}
 
+        {pendingApproval && selected.sha === approvalSha && (
+          <div className="sd-appr-row">
+            <span className="sd-appr-count mono">{approvalText}</span>
+            <div className="sd-appr-text"><strong>Awaiting approval</strong><span>Gated by <span className="mono">{pendingApproval.policyId}</span> policy · requested by {pendingApproval.requestedBy}</span></div>
+            <button className="btn btn-primary xs focus-ring" onClick={() => setReviewApproval(pendingApproval)}>Review</button>
+          </div>
+        )}
+        <DeployGatePanel sys={sys} commitSha={selected.sha} userRole="operator" compact/>
+
         <div className="sd-deploy-actions">
           <button className="btn btn-ghost focus-ring">{selected.kind === "generation" ? "Verify closure" : "Dry-run build"}</button>
           <button className="btn btn-primary focus-ring" onClick={() => {
@@ -914,7 +847,7 @@ nix-env --switch-generation ${selected.id} --profile /nix/var/nix/profiles/syste
               setAutoLatestPrompt({ sha: selected.sha });
               return;
             }
-            onDeploy({ ...sys, pendingCommit: selected.sha });
+            onDeploy(selected.kind === "generation" ? { ...sys, pendingCommit: selected.sha, pendingKind: "rollback", pendingGen: selected.id } : { ...sys, pendingCommit: selected.sha, pendingMsg: selected.sub });
           }}>
             <Icon name={selected.kind === "generation" ? "rollback" : "deploy"} size={13} />
             {selected.kind === "generation" ? ` Switch to gen #${selected.id}` : ` Deploy ${selected.sha}`}

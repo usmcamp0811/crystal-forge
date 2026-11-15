@@ -146,9 +146,31 @@ function evaluateGate(sys, commitSha) {
 
 /* ── Deploy Gate Panel ──
    Drop into the Deploy tab so the operator sees policy decisions before clicking Deploy. */
-function DeployGatePanel({ sys, commitSha, userRole = "operator" }) {
+function DeployGatePanel({ sys, commitSha, userRole = "operator", compact }) {
   const evalResult = evaluateGate(sys, commitSha);
   if (!evalResult.policy) return null;
+  if (compact) return (
+    <div className="dg-compact">
+      <div className="dg-compact-head">
+        <h3>Deploy gate</h3>
+        <GateStatusChip status={evalResult.overall}/>
+        <span className="sd-card-meta">policy: <span className="mono">{evalResult.policy.name}</span></span>
+      </div>
+      {evalResult.overall === "block" && <div className="sd-callout sd-callout-danger"><Icon name="x" size={13}/><div style={{ fontSize:12 }}><strong>Blocked by policy.</strong> Resolve the blocking rules before deploying.</div></div>}
+      <div className="dg-rules">
+        {evalResult.rules.map((r, i) => (
+          <div key={i} className="dg-rule">
+            <span className="dg-rule-name">{ruleDescription(r.rule)}</span>
+            <GateStatusChip status={r.status}/>
+            {r.status !== "allow" && <span className="dg-rule-reason">{r.reason}</span>}
+            {r.next && r.status !== "allow" && <span className="dg-rule-next"><strong>Next:</strong> {r.next}</span>}
+          </div>
+        ))}
+      </div>
+      {evalResult.approvalState && <ApprovalsWorkspace approvalState={evalResult.approvalState} userRole={userRole}/>}
+      {evalResult.canaryState && <CanaryProgress canaryState={evalResult.canaryState}/>}
+    </div>
+  );
 
   return (
     <section className="card sd-card" style={{ display:"flex", flexDirection:"column", gap:14 }}>

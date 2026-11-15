@@ -190,6 +190,7 @@ function ExternalOverview({ sys, onViewCves, onNavigate, onOpenCommit, onOpenSys
         <EvidencePipeline sys={sys} onOpenCommit={onOpenCommit} onNavigate={onNavigate} onViewCves={onViewCves} />
         <div className="mg-copy" style={{ margin: 0 }}>{a.rev.msg}</div>
       </div>
+      {window.FlakePositionCard && <window.FlakePositionCard sys={sys} onOpenCommit={onOpenCommit} onViewHistory={onViewHistory} />}
       <div className="mg-cols">
         <ControlCard sys={sys} />
         {m === "external" && <RuntimeCard sys={sys} onOpenSystem={onOpenSystem} />}
