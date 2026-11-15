@@ -322,7 +322,7 @@ function MultiFilter({ label, options, value, onChange, allLabel }) {
           {options.map((o) => (
             <label key={o.value} className="mf-opt">
               <input type="checkbox" checked={value.includes(o.value)} onChange={() => toggle(o.value)} />
-              <span className="mf-opt-label">{o.label}</span>
+              {o.dot && <span className="chip-dot" style={{ background: o.dot }} />}<span className="mf-opt-label">{o.label}</span>
               {o.count != null && <span className="mf-opt-count">{o.count}</span>}
             </label>
           ))}

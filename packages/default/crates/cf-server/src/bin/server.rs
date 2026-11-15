@@ -452,7 +452,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/cves/rescan/:derivation_id",
             post(cves::trigger_derivation_rescan),
         )
-        .route("/api/v1/cves/export", get(cves::export_cves))
+        .route(
+            "/api/v1/cves/export",
+            get(cves::export_cves).post(cves::export_selected_cves),
+        )
         .route(
             "/api/v1/cves/batch-detail",
             post(poam::fleet_cve_batch_detail),
@@ -555,6 +558,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:id/cves/:cve_id/triage",
             get(poam::system_cve_triage_detail).post(poam::triage_system_cve),
+        )
+        .route(
+            "/api/v1/systems/:id/cves/batch-triage",
+            post(poam::triage_system_cves_batch),
         )
         .route(
             "/api/v1/systems/:id/cve-scan-eligibility",

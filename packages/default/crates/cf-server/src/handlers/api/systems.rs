@@ -9,7 +9,7 @@ use axum::{
 };
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 use crate::api::models::{
@@ -1751,6 +1751,41 @@ pub async fn get_system_cve_inventory_page(
             Err(_) => return internal_error("Failed to load CVE remediation context"),
         }
     };
+    // INVARIANT: Triage state is read only for the same exact rows that may
+    // receive remediation context, in the same snapshot. A host override
+    // takes precedence over the system's current environment default.
+    let triage_states: HashMap<(String, String), String> = if keys.is_empty() {
+        HashMap::new()
+    } else {
+        let cve_ids = inventory.rows.iter().map(|row| row.cve_id.clone()).collect::<Vec<_>>();
+        let packages = inventory
+            .rows
+            .iter()
+            .map(|row| row.canonical_package_name.clone())
+            .collect::<Vec<_>>();
+        match sqlx::query_as::<_, (String, String, Option<String>)>(
+            r#"SELECT key.cve_id,key.package_name,
+                      COALESCE(host.state,cve_coherent_environment_disposition_state(
+                        key.cve_id,key.package_name,system.environment_id))
+               FROM UNNEST($2::text[],$3::text[]) AS key(cve_id,package_name)
+               JOIN systems system ON system.id=$1
+               LEFT JOIN cve_current_system_dispositions host
+                 ON host.system_id=$1 AND host.canonical_cve_id=key.cve_id
+                AND host.canonical_package_name=key.package_name"#,
+        )
+        .bind(system_id)
+        .bind(&cve_ids)
+        .bind(&packages)
+        .fetch_all(&mut *transaction)
+        .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|(cve_id, package, state)| state.map(|state| ((cve_id, package), state)))
+                .collect(),
+            Err(_) => return internal_error("Failed to load CVE triage state"),
+        }
+    };
     if transaction.commit().await.is_err() {
         return internal_error("Failed to load system CVE inventory");
     }
@@ -1766,7 +1801,11 @@ pub async fn get_system_cve_inventory_page(
                             == row.canonical_package_name
                 })
                 .cloned();
+            let triage_state = triage_states
+                .get(&(row.cve_id.clone(), row.canonical_package_name.clone()))
+                .cloned();
             SystemCveInventoryVulnerability {
+                triage_state,
                 stable_identity: SystemCveInventoryRowIdentity {
                     canonical_cve_id: row.cve_id.clone(),
                     canonical_package_name: row.canonical_package_name.clone(),

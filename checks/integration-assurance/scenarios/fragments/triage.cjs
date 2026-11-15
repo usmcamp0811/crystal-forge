@@ -68,6 +68,16 @@ exports.run = async (ctx) => {
     const row = page.getByTestId("system-detail").getByRole("row").filter({ hasText: f.cveId });
     await expect(row).toHaveCount(1);
     await expect(row.getByTestId("system-cve-triage-state")).toHaveText("Outstanding");
+    // Batch selection is local until applied: the chip and a Ctrl/Cmd-click
+    // select the exact row, and Clear leaves no selection or write.
+    const strip = page.getByTestId("system-cve-select-strip");
+    await expect(strip.getByRole("button", { name: "Outstanding 1", exact: true })).toBeVisible();
+    await row.getByRole("cell").first().click({ modifiers: ["ControlOrMeta"] });
+    const bulk = page.getByTestId("system-cve-bulk-bar");
+    await expect(bulk).toContainText("1 selected");
+    await expect(bulk.getByTestId("system-cve-batch-open")).toHaveText("Triage 1 together");
+    await bulk.getByRole("button", { name: "Clear", exact: true }).click();
+    await expect(bulk).toHaveCount(0);
     const [detailResponse] = await Promise.all([
       page.waitForResponse((response) => response.request().method() === "GET" &&
         new URL(response.url()).pathname === triagePath),
@@ -163,6 +173,7 @@ exports.run = async (ctx) => {
     await page.goto(ctx.url(`/systems/${system}?tab=cves`));
     const [inventory] = await Promise.all([inventoryRead(), page.reload()]);
     await assertInventory(inventory);
+    expect(inventory.body.vulnerabilities[0].triage_state).toBe("scheduled");
     const row = page.getByTestId("system-detail").getByRole("row").filter({ hasText: f.cveId });
     await expect(row.getByTestId("system-cve-triage-state")).toHaveText("Scheduled");
     await ctx.screenshot("triage-host-scheduled-reloaded");

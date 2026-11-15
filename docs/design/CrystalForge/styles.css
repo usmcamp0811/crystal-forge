@@ -4647,3 +4647,25 @@ tr.cve-row-new { background-color: color-mix(in oklab, var(--cf-red) 9%, transpa
 .seg .ms-opt.ms-on{--ms:var(--cf-brand-purple);color:var(--ms);background:color-mix(in oklab,var(--ms) 16%,transparent);box-shadow:0 0 0 1px var(--ms) inset;font-weight:600}
 .seg .ms-opt.ms-on[data-k="critical"]{--ms:#f87171}.seg .ms-opt.ms-on[data-k="high"]{--ms:#fbbf24}.seg .ms-opt.ms-on[data-k="medium"]{--ms:#60a5fa}.seg .ms-opt.ms-on[data-k="low"]{--ms:#9ca3af}
 .seg .ms-opt.ms-on[data-k="available"]{--ms:#34d399}.seg .ms-opt.ms-on[data-k="exploited"]{--ms:#f87171}.seg .ms-opt.ms-on[data-k="outstanding"]{--ms:#f87171}.seg .ms-opt.ms-on[data-k="scheduled"]{--ms:#60a5fa}.seg .ms-opt.ms-on[data-k="accepted"]{--ms:#34d399}
+
+.cve-pkg{width:170px}
+.cve-view-opts{margin-left:auto;display:flex;gap:14px;align-items:center}
+.cve-opt{display:inline-flex;align-items:center;gap:7px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:600;color:var(--cf-text-muted)}
+.cve-opt .input{width:auto;padding:5px 26px 5px 9px;font-size:12px;text-transform:none;letter-spacing:0;font-weight:500;color:var(--cf-text-primary)}
+.cve-sel-bar{gap:4px!important;padding:2px 2px!important;background:none!important;border:0!important}
+.cve-sel-bar .cve-sel-label{font-size:12px;color:var(--cf-text-muted);margin-right:6px}
+.cve-sel-bar .cve-sel-chip{background:none;border:0;border-radius:6px;padding:3px 8px;font-size:12px;color:var(--cf-text-secondary)}
+.cve-sel-bar .cve-sel-chip:hover{background:var(--cf-subtle-bg);color:var(--cf-text-primary)}
+.cve-sel-bar .cve-sel-chip.on{background:rgba(139,92,246,.14);color:var(--cf-brand-purple);font-weight:600}
+
+.filterbar .mf{flex-shrink:0}.filterbar .mf-btn{flex-shrink:0;min-width:104px;justify-content:space-between}
+.filterbar .cve-view-opts{flex-shrink:0}
+
+.cve-exp-scopes{display:flex;flex-direction:column;gap:4px;padding:0 6px 8px}
+.cve-exp-scope{display:flex;gap:9px;align-items:flex-start;padding:8px 10px;border:1px solid var(--cf-card-border);border-radius:8px;cursor:pointer}
+.cve-exp-scope.on{border-color:var(--cf-brand-purple);background:rgba(139,92,246,.08)}
+.cve-exp-scope input{margin-top:3px;accent-color:var(--cf-brand-purple)}
+.cve-exp-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.cve-exp-l{font-size:13px;font-weight:600;color:var(--cf-text-primary)}.cve-exp-l b{font-weight:500;color:var(--cf-text-muted);margin-left:4px}
+.cve-exp-sub{font-size:11px;color:var(--cf-text-muted);line-height:1.4}
+.rr-export-pop{min-width:320px}

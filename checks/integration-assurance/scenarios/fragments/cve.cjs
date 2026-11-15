@@ -138,10 +138,75 @@ async function run(ctx, phase) {
   });
 
   if (phase === "scan") return;
+  // TASK-521 (designs bc30ef57, 18404419): multi-select filters, export scopes,
+  // a scope-preserving invalid environment link, and four export formats.
+  await ctx.step("fleet CVE filters and every export format carry the real finding", async () => {
+    const fs = require("fs");
+    const exportButton = page.locator(".cve-export > button");
+    const scopeCount = async (scope) => {
+      const label = page.locator(`.cve-exp-scope[data-scope="${scope}"] .cve-exp-l b`);
+      await expect(label).toHaveText(/^\d+$/);
+      return Number(await label.innerText());
+    };
+    await exportButton.click();
+    const count = await scopeCount("Filtered");
+    expect(count).toBeGreaterThan(0);
+    // Escape with focus on the trigger must close the menu and remove its
+    // page-wide backdrop, which would otherwise intercept the next click.
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu", { name: "Export CVEs" })).toHaveCount(0);
+    await expect(page.locator(".rr-export-backdrop")).toHaveCount(0);
+    // Checking every severity is a multi-value filter equal to no filter.
+    await page.getByRole("button", { name: "Severity filter", exact: true }).click();
+    for (const severity of ["Critical", "High", "Medium", "Low"]) {
+      await page.locator(".mf-menu .mf-opt").filter({ hasText: severity }).locator("input").check();
+    }
+    await expect(page).toHaveURL(/severity=critical(%2C|,)high(%2C|,)medium(%2C|,)low/);
+    // The backdrop covers the viewport and the open menu is drawn above it, so
+    // its centre can land on a menu option. Click the far corner, which no menu
+    // covers, the way a user dismisses a menu by clicking elsewhere.
+    const { width, height } = page.viewportSize();
+    await page.locator(".mf-backdrop").click({ position: { x: width - 8, y: height - 8 } });
+    await expect(page.locator(".mf-menu")).toHaveCount(0);
+    await exportButton.click();
+    expect(await scopeCount("Filtered")).toBe(count);
+    expect(await scopeCount("All")).toBe(count);
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".rr-export-backdrop")).toHaveCount(0);
+    await page.getByRole("button", { name: "Clear", exact: true }).click();
+    await expect(page).not.toHaveURL(/severity=/);
+    for (const format of ["oscal-json", "excel", "csv", "oscal-xml"]) {
+      await exportButton.click();
+      const [download] = await Promise.all([
+        page.waitForEvent("download"),
+        page.locator(`.cve-export [data-format="${format}"]`).click(),
+      ]);
+      const bytes = fs.readFileSync(await download.path());
+      if (format === "excel") {
+        expect(bytes.subarray(0, 2).toString()).toBe("PK");
+        continue;
+      }
+      const text = bytes.toString("utf8");
+      expect(text).toContain(f.cveId);
+      if (format === "csv") expect(text.trim().split("\n").length - 1).toBe(count);
+      if (format === "oscal-json") {
+        const ar = JSON.parse(text)["assessment-results"];
+        expect(ar.results[0].findings.length).toBe(count);
+        expect(ar["import-ap"].href).toBe(`#${ar["back-matter"].resources[0].uuid}`);
+      }
+      if (format === "oscal-xml") expect(text.match(/<finding /g).length).toBe(count);
+    }
+    await page.goto(ctx.url("/cves?environment_id=not-a-uuid"));
+    await expect(page.getByRole("alert").filter({ hasText: "environment filter in this link is not valid" }))
+      .toBeVisible();
+    await expect(exportButton).toBeDisabled();
+    await expect(page.getByTestId("cve-row")).toHaveCount(0);
+    await page.goto(ctx.url("/cves"));
+  });
   await ctx.step("fleet finding navigation returns to the exact Current generation", async () => {
     // The designed ungrouped view exposes the exact pair's inventory action;
     // grouped rows instead make the whole row clickable.
-    await page.getByRole("button", {name:"None", exact:true}).click();
+    await page.locator(".cve-opt").filter({ hasText: "Group" }).locator("select").selectOption("flat");
     const row = page.getByTestId("cve-row").filter({ hasText: f.cveId }).filter({
       has: page.getByRole("button", { name: `Open fleet inventory for ${f.cveId} ${f.package}`, exact: true }),
     });
