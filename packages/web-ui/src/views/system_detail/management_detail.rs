@@ -46,6 +46,9 @@ pub(super) fn ManagementDetail(
         let _ = refresh();
         async move { client::fetch_configuration_assurance(&system_id).await }
     });
+    let flake_position = use_resource(move || async move {
+        client::fetch_system_flake_position(&system_id).await.ok()
+    });
     let mut schedule = use_resource(client::fetch_scanning_schedule);
     let scans = use_resource(move || {
         let _ = refresh();
@@ -292,6 +295,50 @@ pub(super) fn ManagementDetail(
                                     }
                                     if let Some(revision) = &e.selected_revision { p { class: "mg-copy", {revision.message.as_deref().unwrap_or("Commit message unavailable")} } }
                                     EvidenceIdentities { evidence: e.clone() }
+                                }
+                                if let Some(position) = flake_position.read().clone().flatten() {
+                                    {
+                                        // The lane places the system at the revision of the
+                                        // artifact whose evidence is shown. That revision can
+                                        // be older than the selected (HEAD) revision while a
+                                        // newer artifact is not built yet.
+                                        let artifact = e.selected_artifact.as_ref();
+                                        let evidence_sha = artifact
+                                            .map(|a| a.revision.sha.clone())
+                                            .or_else(|| e.selected_revision.as_ref().map(|r| r.sha.clone()));
+                                        let lane = LaneModel::evidence(
+                                            &position,
+                                            evidence_sha.as_deref(),
+                                            e.evaluation.availability == "removed",
+                                        );
+                                        let store_path = artifact
+                                            .and_then(|a| a.output_path.clone().or_else(|| a.expected_output_path.clone()));
+                                        let verb = if system.management_mode == ManagementMode::External { "declared" } else { "tracked" };
+                                        let flake = system.flake.clone();
+                                        rsx! {
+                                            FlakePositionCard {
+                                                lane,
+                                                hostname: system.hostname.clone(),
+                                                verb: verb.to_string(),
+                                                configuration_name: e.configuration_name.clone(),
+                                                store_path,
+                                                on_open_commit: move |commit: FlakePositionCommit| {
+                                                    if let Some(flake) = flake.clone() {
+                                                        on_open_flake_commit.call(FlakeCommitPeekTarget {
+                                                            flake,
+                                                            meta: CommitFocusMeta {
+                                                                msg: Some(commit.message.clone()),
+                                                                author: Some(commit.author.clone()),
+                                                                at: Some(commit.committed_at.to_rfc3339()),
+                                                            },
+                                                            sha: commit.sha,
+                                                        });
+                                                    }
+                                                },
+                                                on_view_history: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::History, true),
+                                            }
+                                        }
+                                    }
                                 }
                                 div { class: "mg-cols",
                                     ControlCard { system: system.clone(), evidence: e.clone(), parent_hostname: parent_hostname.clone() }

@@ -141,6 +141,13 @@ exports.evidence = async ctx => {
           await expect(detail.getByText("not comparable", { exact: true })).toBeVisible();
           await expect(detail.getByText("Verified guest state: not available", { exact: true })).toBeVisible();
         }
+        // Flake-position card (design dev commit bd8d068d, TASK-525.1). The
+        // lane places the registration at the evidence artifact revision.
+        const lane = detail.getByTestId("flake-position-card");
+        await expect(lane).toBeVisible();
+        await expect(lane).toHaveAttribute("data-fp-state", /^(head|behind)$/);
+        await expect(lane.locator(".fp-sub")).toContainText(`The ${mode === "external" ? "declared" : "tracked"} store path was built from`);
+        await expect(lane.locator(".fp-bot").filter({ hasText: artifact.commit.slice(0, 7) })).toHaveCount(1);
         await ctx.screenshot(`configuration-${mode}-overview-${theme}`);
         for (const [tab, title] of [["Deploy", mode === "external" ? "Deployment is controlled outside Crystal Forge" : "Reference configurations are not deployed"], ["Logs", "No runtime logs"]]) {
           await detail.getByRole("tab", { name: tab, exact: true }).click();
@@ -353,6 +360,10 @@ exports.removed = async ctx => {
   await expect(page.getByRole("heading", { name: "nixosConfigurations.assuranceOnly is missing at the selected revision", exact: true })).toBeVisible();
   await expect(page.getByText("The configuration was removed or renamed. Evidence from earlier revisions is retained.", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Re-scan", exact: true })).toBeDisabled();
+  const lane = page.getByTestId("flake-position-card");
+  await expect(lane).toHaveAttribute("data-fp-state", "unknown");
+  await expect(lane.getByText("nixosConfigurations.assuranceOnly no longer exists in", { exact: false })).toBeVisible();
+  await expect(lane.getByText("not in history", { exact: true })).toBeVisible();
   await ctx.screenshot("configuration-removed-head-retains-history");
   await page.getByRole("tab", { name: "Evidence history", exact: true }).click();
   await page.getByRole("button", { name: "Scan", exact: true }).click();

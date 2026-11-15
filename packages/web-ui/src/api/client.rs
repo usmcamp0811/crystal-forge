@@ -1630,6 +1630,19 @@ pub async fn fetch_system_commits(
     fetch_json(&url).await
 }
 
+/// Fetches the position of a system in the tracked branch of its flake.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] for transport failures, non-success statuses
+/// (404 for an inaccessible system), or an invalid response body.
+pub async fn fetch_system_flake_position(
+    id: &uuid::Uuid,
+) -> Result<crate::api::models::SystemFlakePosition, ApiClientError> {
+    let url = format!("{}/systems/{}/flake-position", base_url(), id);
+    fetch_json(&url).await
+}
+
 pub async fn fetch_system_generations(
     id: &uuid::Uuid,
 ) -> Result<crate::api::models::SystemGenerationsResponse, ApiClientError> {

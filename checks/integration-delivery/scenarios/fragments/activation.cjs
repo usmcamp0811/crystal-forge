@@ -61,16 +61,30 @@ async function deploy(ctx, phase) {
   await ctx.step(`${phase}: select authored commit and verify deployment plan`, async () => {
     await page.goto(ctx.url(`/systems/${targetId}?tab=deploy`));
     await expect(page.getByRole("heading", { name: facts.target, exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "New commit", exact: true }).click();
-    const targets = page.locator("section").filter({
-      has: page.getByRole("heading", { name: "Select target", exact: true }),
-    });
+    // Deploy tab layout from design dev commit bd8d068d (TASK-525.1): the
+    // flake-position lane above the "Deploy target" picker and the plan.
+    const lane = page.getByTestId("flake-position-card");
+    await expect(lane).toBeVisible();
+    await expect(lane).toHaveAttribute("data-fp-state", /^(head|behind|unknown|deploying)$/);
+    await expect(page.locator(".deploy-pending")).toHaveCount(0);
+    const targets = page.getByTestId("deploy-target-picker");
+    await expect(targets.getByRole("heading", { name: "Deploy target", exact: true })).toBeVisible();
+    await targets.getByRole("tab", { name: "Commits", exact: true }).click();
+    await expect(targets.getByRole("tab", { name: "Commits", exact: true })).toHaveAttribute("aria-selected", "true");
     // Click the outer button. Its SHA span opens Flakes and stops propagation.
     const commit = targets.getByRole("button").filter({
       has: page.getByText(intended.message, { exact: true }),
     }).filter({ has: page.getByText(short, { exact: true }) });
     await expect(commit).toHaveCount(1);
     await commit.click();
+    await expect(commit).toHaveClass(/\bsel\b/);
+    // The lane and the picker share one selection. An unknown running
+    // position draws a reference lane without picking.
+    if (["head", "behind"].includes(await lane.getAttribute("data-fp-state"))) {
+      const node = lane.locator("[data-fp-idx]").filter({ has: page.locator(".fp-bot", { hasText: short }) });
+      await expect(node).toHaveClass(/\bfp-(picked|sys)\b/);
+    }
+    await ctx.screenshot(`delivery-${phase}-deploy-target`);
     const plan = page.locator("section").filter({
       has: page.getByRole("heading", { name: "Deployment plan", exact: true }),
     });
@@ -135,6 +149,16 @@ async function started(ctx, phase) {
     `${phase === "first" ? 1 : phase === "second" ? 2 : 3} deploys`);
   await ctx.screenshot(`delivery-${phase}-started-nonterminal`);
   ctx.emit(`delivery.${phase}.startedEventId`, starts[0].id);
+  // The Deploy tab draws the held, nonterminal deployment in the lane and
+  // hides the banner (design dev commit bd8d068d, TASK-525.1).
+  await page.goto(ctx.url(`/systems/${targetId}?tab=deploy`));
+  const lane = page.getByTestId("flake-position-card");
+  await expect(lane).toHaveAttribute("data-fp-state", "deploying");
+  await expect(lane.locator(".fp-headline")).toContainText(
+    `${phase === "rollback" ? "Rolling back" : "Deploying"} ${facts.target}`);
+  await expect(lane.locator(".fp-stage.cur .fp-bot")).toHaveText(phase === "rollback" ? "Reverting" : "Applying");
+  await expect(page.locator(".deploy-pending")).toHaveCount(0);
+  await ctx.screenshot(`delivery-${phase}-deploy-lane-applying`);
 }
 
 /** Verifies observed activation and durable production history, including reload. */

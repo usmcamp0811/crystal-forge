@@ -618,6 +618,10 @@ async fn main() -> anyhow::Result<()> {
             get(systems::get_system_commits),
         )
         .route(
+            "/api/v1/systems/:id/flake-position",
+            get(systems::get_system_flake_position),
+        )
+        .route(
             "/api/v1/systems/:id/generations",
             get(systems::get_system_generations),
         )
