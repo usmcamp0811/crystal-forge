@@ -3,8 +3,8 @@ id: TASK-449
 title: Report and display the real deployment closure-copy stage
 status: To Do
 assignee: []
-created_date: '2026-08-31 02:22'
-updated_date: '2026-08-31 02:23'
+created_date: 2026-08-31 02:22
+updated_date: '2026-11-15T16:11:00Z'
 labels:
   - agent
   - server
@@ -51,3 +51,9 @@ The design now distinguishes closure transfer from activation, but Crystal Forge
 - [ ] #9 Focused protocol agent server state-machine compatibility and failure tests pass through the repository Nix environment
 - [ ] #10 The authoritative web-ui check passes with assertion coverage and screenshots for copying direct-to-applying copy failure cancellation legacy-agent and terminal states
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Design update in dev commit bd8d068d (tracked by parent TASK-525): the Deploy tab now also renders deployment stages in the flake-position lane stage row (FlakePosition.jsx), and the activity feed has copying entries for deploy and rollback (SystemDetail.jsx buildActivityFeed). TASK-525.1 shares one stage list between PendingDeployBanner and the lane, so the copying stage must be added there.
+<!-- SECTION:NOTES:END -->
