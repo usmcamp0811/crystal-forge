@@ -4934,7 +4934,10 @@ fn DeployTab(
             "commit".to_string()
         }
     });
-    let mut selected_commit = use_signal(|| default_commit);
+    // `None` means "no explicit choice": the selection follows the running
+    // commit, which can change when the flake-position read completes.
+    let mut selected_commit: Signal<Option<String>> = use_signal(|| None);
+    let effective_commit = selected_commit().unwrap_or_else(|| default_commit.clone());
     let mut selected_generation: Signal<Option<i32>> = use_signal(|| initial_selected_generation);
     let mut show_diff = use_signal(|| false);
     let mut verify_notice = use_signal(|| None::<String>);
@@ -4958,7 +4961,7 @@ fn DeployTab(
 
     let selected_commit_data = displayed_commits
         .iter()
-        .find(|c| c.hash == *selected_commit.read())
+        .find(|c| c.hash == effective_commit)
         .cloned()
         .or_else(|| displayed_commits.first().cloned());
 
@@ -5060,7 +5063,7 @@ fn DeployTab(
                 }
                 mode.set("commit".to_string());
                 show_diff.set(false);
-                selected_commit.set(commit.sha);
+                selected_commit.set(Some(commit.sha));
             },
             deploy: deployment_progress.clone(),
             on_view_logs: move |_| on_view_logs.call(()),
@@ -5088,7 +5091,7 @@ fn DeployTab(
                 running: running_index,
                 generations: generations.clone(),
                 generation_mode: mode() == "generation",
-                selected_commit: selected_commit(),
+                selected_commit: effective_commit.clone(),
                 selected_generation: selected_generation(),
                 on_mode: move |generation: bool| {
                     mode.set(if generation { "generation" } else { "commit" }.to_string());
@@ -5097,7 +5100,7 @@ fn DeployTab(
                     on_clear_deploy_notice.call(());
                 },
                 on_select_commit: move |sha: String| {
-                    selected_commit.set(sha);
+                    selected_commit.set(Some(sha));
                     verify_notice.set(None);
                     on_clear_deploy_notice.call(());
                 },
