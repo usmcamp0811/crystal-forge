@@ -39,6 +39,7 @@ Do not change files, backlog state, branches, or merge requests for a read-only 
 11. Don't rely on utilities to be installed like python or glab.. just use `nix run nixpkgs#glab` for these type of things
 12. Treat source documentation as part of correctness. A behavior change is incomplete when its affected contracts, invariants, rationale, failure behavior, or other required documentation are stale or missing.
 13. Keep a verified live preview available while implementing browser-visible changes. Follow [docs/agent/live-preview.md](docs/agent/live-preview.md); do not substitute screenshots or a finished MR for early interactive feedback.
+14. Build only on the Nix build farm. See "Nix build farm" under Verification.
 
 ## Repository architecture
 
@@ -411,6 +412,16 @@ Choose the smallest set of commands that proves the acceptance criteria and prot
 The persistent preview is the early UI feedback loop. Do not run a full integration owner or `nix flake check` merely to start or refresh it. Use focused checks during implementation. Required owning integration results and MR screenshots remain final-review requirements; exact-head CI may provide that evidence when the task permits it. A preview screenshot is not evidence that an integration check passed.
 
 Use the exact package manifests and flake attributes applicable to the change. The baseline command matrix is in [docs/agents/verification.md](docs/agents/verification.md).
+
+### Nix build farm
+
+Agents MUST build through Nix derivations so that the configured remote build farm does the work. Development hosts set `max-jobs = 0` and list the farm in `builders` (`/etc/nix/machines`). Check this with `nix config show | grep -E '^(builders|max-jobs) '`.
+
+- Use `nix build` on flake attributes for compilation and tests. Examples: `nix build .#packages.x86_64-linux.web-ui -L`, `nix build .#packages.x86_64-linux.default.cf-server-core-drv -L`, and the integration scenario attributes. The checkPhase of a package runs its unit tests on the farm.
+- Agents MUST NOT compile on the local host. Do not run `cargo build`, `cargo check`, `cargo test`, `cargo run`, `cargo clippy`, or `nix run .#server` with local compilation, and do not override `max-jobs` or `builders`. This rule takes precedence over the local `cargo` commands in `docs/agents/verification.md`.
+- Commands that do not compile, such as `rustfmt --check` and `backlog`, MAY run locally.
+- A farm transport error (for example `Connection reset by peer` or `Socket closed`) is not a build result. Retry the build. Report an error that persists.
+- Report a farm checkPhase failure with the failing test names. Do not move the build to the local host to bypass the failure.
 
 ### Integration test maintenance
 
