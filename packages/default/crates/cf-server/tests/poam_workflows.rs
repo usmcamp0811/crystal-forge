@@ -6,9 +6,9 @@ use crystal_forge::api::models::{
     CveBatchScheduleGrouping, CveBatchUnavailableReason, CveEnvironmentDisposition,
     CveEnvironmentTriageAction, CveFilters, FleetCveBatchDetailRequest, FleetCveBatchTriageRequest,
     FleetCveInventorySection, FleetCveMutationDetailScope, FleetCvePoamRequest,
-    FleetCveTriageRequest, FleetCveTriageRollup, SystemCveEffectiveDispositionSource,
-    SystemCveInventoryParams, SystemCveTriageAction, SystemCveTriageRequest,
-    SystemCveTriageScopeChoice, SystemCveTriageScopeKind,
+    FleetCveTriageRequest, FleetCveTriageRollup, SystemCveBatchTriageRequest,
+    SystemCveEffectiveDispositionSource, SystemCveInventoryParams, SystemCveTriageAction,
+    SystemCveTriageRequest, SystemCveTriageScopeChoice, SystemCveTriageScopeKind,
 };
 use crystal_forge::auth::extractors::AuthenticatedUser;
 use crystal_forge::auth::session::{
@@ -7539,6 +7539,43 @@ async fn cve_export_ignores_list_pagination_and_preserves_long_exact_identity(po
     assert_eq!(csv.lines().count(), 4, "header plus all complete rows");
     assert!(csv.contains(&long_package));
     assert!(csv.contains(&long_version));
+
+    // TASK-521: every design export format carries the same three rows.
+    let client = reqwest::Client::new();
+    let get = |query: &str| {
+        client
+            .get(format!("{base}/api/v1/cves/export?{query}"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+    };
+    let excel = get("format=excel").await.unwrap();
+    assert_eq!(excel.status(), reqwest::StatusCode::OK);
+    assert!(
+        excel.headers()[reqwest::header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .ends_with(".xlsx\"")
+    );
+    assert!(excel.bytes().await.unwrap().starts_with(b"PK"));
+    let oscal: serde_json::Value = get("format=oscal-json")
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let result = &oscal["assessment-results"]["results"][0];
+    assert_eq!(result["observations"].as_array().unwrap().len(), 3);
+    assert_eq!(result["findings"].as_array().unwrap().len(), 3);
+    let xml = get("format=oscal-xml").await.unwrap().text().await.unwrap();
+    assert_eq!(xml.matches("<finding ").count(), 3);
+    assert_eq!(
+        get("format=pdf").await.unwrap().status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        get("environment_id=not-a-uuid").await.unwrap().status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -7587,6 +7624,19 @@ async fn cve_export_rejects_results_above_the_documented_bound(pool: PgPool) {
     let body = response.text().await.unwrap();
     assert!(body.contains("1000-row limit"));
     assert!(body.contains("narrow the filters"));
+    for format in ["excel", "oscal-json", "oscal-xml"] {
+        let response = reqwest::Client::new()
+            .get(format!("{base}/api/v1/cves/export?format={format}"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            "{format} export honors the row bound"
+        );
+    }
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -7956,7 +8006,254 @@ async fn cve_dashboard_reads_scope_before_aggregation_and_count_distinct_hosts(p
         .unwrap();
         assert!(export.contains(package));
         assert!(!export.contains(hidden_package));
+
+        // TASK-521: environment lists are intersected with the caller scope on
+        // every endpoint and in every export format, for Viewer and Operator.
+        let get = |path: String| {
+            http_request(
+                &client,
+                reqwest::Method::GET,
+                format!("{base}/api/v1/{path}"),
+                token,
+                None,
+            )
+            .send()
+        };
+        let both = format!("{development},{production}");
+        let pairs_total = |body: serde_json::Value| body["total"].as_i64().unwrap();
+        let visible_total = pairs_total(
+            get(format!(
+                "cves/inventory/pairs?limit=200&environment_id={development}"
+            ))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap(),
+        );
+        assert!(visible_total > 0);
+        let both_pairs: serde_json::Value = get(format!(
+            "cves/inventory/pairs?limit=200&environment_id={both}"
+        ))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(
+            pairs_total(both_pairs.clone()),
+            visible_total,
+            "hidden environment adds nothing"
+        );
+        assert!(!both_pairs.to_string().contains(hidden_package));
+        let hidden_only: serde_json::Value = get(format!(
+            "cves/inventory/pairs?limit=200&environment_id={production}"
+        ))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(
+            pairs_total(hidden_only),
+            0,
+            "hidden-only list is empty, never all scope"
+        );
+        let groups: serde_json::Value = get(format!(
+            "cves/inventory/groups?group_by=environment&environment_id={both}"
+        ))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(groups["total"], 1);
+        assert_eq!(groups["items"][0]["group_id"], development.to_string());
+        let members: serde_json::Value = get(format!(
+            "cves/inventory/members?group_by=environment&group_id={production}&environment_id={both}"
+        ))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(members["total"], 0, "hidden group membership stays empty");
+        let csv = get(format!("cves/export?environment_id={both}"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(csv.lines().count() as i64 - 1, visible_total);
+        let empty_csv = get(format!("cves/export?environment_id={production}"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(empty_csv.lines().count(), 1, "header only");
+        let oscal = get(format!(
+            "cves/export?format=oscal-json&environment_id={both}"
+        ))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+        assert!(oscal.contains("Development"));
+        assert!(
+            !oscal.contains("Production"),
+            "unauthorized environment name is not disclosed"
+        );
+        assert!(!oscal.contains(hidden_package));
+        let xml = get(format!(
+            "cves/export?format=oscal-xml&environment_id={both}"
+        ))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+        assert_eq!(xml.matches("<finding ").count() as i64, visible_total);
+        let excel = get(format!(
+            "cves/export?format=excel&environment_id={production}"
+        ))
+        .await
+        .unwrap();
+        assert_eq!(excel.status(), reqwest::StatusCode::OK);
+        // Multiple filter groups at once still agree between page and export.
+        let combined = format!(
+            "severity=critical,high,medium,low&fix_status=available,pending&environment_id={both}"
+        );
+        let combined_total = pairs_total(
+            get(format!("cves/inventory/pairs?limit=200&{combined}"))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap(),
+        );
+        let combined_csv = get(format!("cves/export?{combined}"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(combined_csv.lines().count() as i64 - 1, combined_total);
+
+        // TASK-521 (design 18404419): "Selected" export of exact pairs. A
+        // hidden pair is omitted; duplicates collapse; CSRF is required.
+        let selected_body = serde_json::json!({"pairs": [
+            {"cve_id": cve, "canonical_package_name": package},
+            {"cve_id": cve, "canonical_package_name": package},
+            {"cve_id": hidden_cve, "canonical_package_name": hidden_package},
+        ]});
+        let post = |query: &str, csrf: Option<&'static str>, body: &serde_json::Value| {
+            http_request(
+                &client,
+                reqwest::Method::POST,
+                format!("{base}/api/v1/cves/export?{query}"),
+                token,
+                csrf,
+            )
+            .json(body)
+            .send()
+        };
+        let selected_csv = post("format=csv", Some("cve-export-selected"), &selected_body)
+            .await
+            .unwrap();
+        assert_eq!(selected_csv.status(), reqwest::StatusCode::OK);
+        let selected_csv = selected_csv.text().await.unwrap();
+        assert_eq!(
+            selected_csv.lines().count(),
+            2,
+            "header plus the one visible pair"
+        );
+        assert!(selected_csv.contains(cve) && selected_csv.contains(package));
+        assert!(!selected_csv.contains(hidden_package));
+        let selected_oscal: serde_json::Value = post(
+            "format=oscal-json",
+            Some("cve-export-selected"),
+            &selected_body,
+        )
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(
+            selected_oscal["assessment-results"]["results"][0]["findings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            post("format=csv", None, &selected_body)
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            post(
+                "format=csv",
+                Some("cve-export-selected"),
+                &serde_json::json!({"pairs": []})
+            )
+            .await
+            .unwrap()
+            .status(),
+            reqwest::StatusCode::BAD_REQUEST
+        );
+        let oversized: Vec<_> = (0..=MAX_CVE_EXPORT_ROWS)
+            .map(|n| serde_json::json!({"cve_id": format!("CVE-2099-{n:06}"), "canonical_package_name": "p"}))
+            .collect();
+        assert_eq!(
+            post(
+                "format=excel",
+                Some("cve-export-selected"),
+                &serde_json::json!({"pairs": oversized})
+            )
+            .await
+            .unwrap()
+            .status(),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
+
+    // An Admin naming both environments sees both.
+    let admin_both: serde_json::Value = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/api/v1/cves/inventory/groups?group_by=environment&environment_id={development},{production}"),
+        &admin_token,
+        None,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(admin_both["total"], 2);
+    let admin_export = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!(
+            "{base}/api/v1/cves/export?format=oscal-json&environment_id={development},{production}"
+        ),
+        &admin_token,
+        None,
+    )
+    .send()
+    .await
+    .unwrap()
+    .text()
+    .await
+    .unwrap();
+    assert!(admin_export.contains(hidden_package));
+    assert!(admin_export.contains("Development, Production"));
 
     let admin_rows: serde_json::Value = http_request(
         &client,
@@ -12969,7 +13266,22 @@ async fn poam_http_server(pool: PgPool) -> String {
             "/api/v1/cves/packages",
             get(cve_handlers::list_package_names),
         )
-        .route("/api/v1/cves/export", get(cve_handlers::export_cves))
+        .route(
+            "/api/v1/cves/export",
+            get(cve_handlers::export_cves).post(cve_handlers::export_selected_cves),
+        )
+        .route(
+            "/api/v1/cves/inventory/groups",
+            get(cve_handlers::list_inventory_groups),
+        )
+        .route(
+            "/api/v1/cves/inventory/members",
+            get(cve_handlers::list_inventory_members),
+        )
+        .route(
+            "/api/v1/cves/inventory/pairs",
+            get(cve_handlers::list_inventory_pairs),
+        )
         .route("/api/v1/cves/:cve_id", get(cve_handlers::get_cve_detail))
         .route(
             "/api/v1/cves/:cve_id/systems",
@@ -13024,6 +13336,14 @@ async fn poam_http_server(pool: PgPool) -> String {
         .route(
             "/api/v1/cves/batch-triage",
             axum::routing::post(poam_handlers::triage_fleet_cves_batch),
+        )
+        .route(
+            "/api/v1/systems/:id/cve-inventory-page",
+            get(system_handlers::get_system_cve_inventory_page),
+        )
+        .route(
+            "/api/v1/systems/:id/cves/batch-triage",
+            axum::routing::post(poam_handlers::triage_system_cves_batch),
         )
         .route(
             "/api/v1/cves/:cve_id/fleet",
@@ -20898,4 +21218,304 @@ async fn shared_plan_reopen_fails_closed_when_moved_pair_lost_its_last_link(pool
                 .is_none()
         );
     }
+}
+
+async fn host_disposition_state(
+    pool: &PgPool,
+    system_id: Uuid,
+    cve_id: &str,
+    package: &str,
+) -> Option<(String, Option<Uuid>)> {
+    sqlx::query_as(
+        r#"SELECT state,poam_id FROM cve_system_dispositions
+           WHERE system_id=$1 AND canonical_cve_id=$2
+             AND canonical_package_name=$3 AND retired_at IS NULL"#,
+    )
+    .bind(system_id)
+    .bind(cve_id)
+    .bind(package)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn system_batch_writes_only_path_host_overrides_and_skips_managed_pairs(pool: PgPool) {
+    let host = assessment_fixture(&pool).await;
+    let peer = assessment_fixture(&pool).await;
+    let actor = admin_actor(host.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc::now());
+    let environment_id = assign_environment(&pool, "system-batch", &[&host, &peer]).await;
+    let accept = ("CVE-2027-10301", "openssl");
+    let schedule = ("CVE-2027-10302", "curl");
+    let managed = ("CVE-2027-10303", "zlib");
+    for fixture in [&host, &peer] {
+        seal_exact_cve_scan_many(
+            &pool,
+            fixture,
+            clock.now(),
+            &[
+                (accept.0, accept.1, "3.0.0", false),
+                (schedule.0, schedule.1, "8.0.0", false),
+                (managed.0, managed.1, "1.3", false),
+            ],
+        )
+        .await;
+    }
+    // An environment schedule links both hosts; batch must not touch it.
+    poam_service::triage_fleet_cves_batch(
+        &pool,
+        &actor,
+        FleetCveBatchTriageRequest {
+            pairs: vec![batch_pair(managed.0, managed.1)],
+            environment_ids: vec![environment_id],
+            expected_tokens: batch_tokens(
+                &pool,
+                &actor,
+                &[batch_pair(managed.0, managed.1)],
+                &[environment_id],
+            )
+            .await,
+            skip_existing: true,
+            disposition: CveBatchDisposition::SchedulePatch {
+                grouping: CveBatchScheduleGrouping::One,
+                assignee: PoamAssigneeRequest::User {
+                    user_id: actor.user_id,
+                },
+                target_date: clock.today() + TimeDelta::days(30),
+                plan: String::new(),
+                default_milestones: false,
+            },
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+
+    let accepted = poam_service::triage_system_cves_batch(
+        &pool,
+        &actor,
+        host.system_id,
+        SystemCveBatchTriageRequest {
+            pairs: vec![
+                batch_pair(accept.0, accept.1),
+                batch_pair(managed.0, managed.1),
+            ],
+            skip_existing: true,
+            disposition: CveBatchDisposition::AcceptRisk {
+                justification: "Host-only mitigation applies to this batch.".into(),
+                review_date: None,
+            },
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(accepted.applied.len(), 1);
+    assert_eq!(accepted.applied[0].pair, batch_pair(accept.0, accept.1));
+    assert_eq!(accepted.skipped, vec![batch_pair(managed.0, managed.1)]);
+    assert_eq!(
+        host_disposition_state(&pool, host.system_id, accept.0, accept.1)
+            .await
+            .map(|row| row.0)
+            .as_deref(),
+        Some("accepted")
+    );
+    assert!(
+        host_disposition_state(&pool, peer.system_id, accept.0, accept.1)
+            .await
+            .is_none()
+    );
+    assert!(
+        environment_disposition_row(&pool, accept.0, accept.1, environment_id)
+            .await
+            .is_none(),
+        "host batch must not write the environment default"
+    );
+    assert!(
+        host_disposition_state(&pool, host.system_id, managed.0, managed.1)
+            .await
+            .is_none()
+    );
+
+    let scheduled = poam_service::triage_system_cves_batch(
+        &pool,
+        &actor,
+        host.system_id,
+        SystemCveBatchTriageRequest {
+            pairs: vec![batch_pair(schedule.0, schedule.1)],
+            skip_existing: true,
+            disposition: CveBatchDisposition::SchedulePatch {
+                grouping: CveBatchScheduleGrouping::One,
+                assignee: PoamAssigneeRequest::User {
+                    user_id: actor.user_id,
+                },
+                target_date: clock.today() + TimeDelta::days(30),
+                plan: String::new(),
+                default_milestones: false,
+            },
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(scheduled.poam_ids.len(), 1);
+    let (state, poam_id) = host_disposition_state(&pool, host.system_id, schedule.0, schedule.1)
+        .await
+        .expect("host schedule");
+    assert_eq!(
+        (state.as_str(), poam_id),
+        ("scheduled", Some(scheduled.poam_ids[0]))
+    );
+    let linked: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT system_id FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL",
+    )
+    .bind(scheduled.poam_ids[0])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, vec![host.system_id], "only the path host is linked");
+    assert!(
+        host_disposition_state(&pool, peer.system_id, schedule.0, schedule.1)
+            .await
+            .is_none()
+    );
+
+    // A pair that is not a current exact finding on the host fails atomically.
+    let missing = poam_service::triage_system_cves_batch(
+        &pool,
+        &actor,
+        host.system_id,
+        SystemCveBatchTriageRequest {
+            pairs: vec![batch_pair("CVE-2027-10399", "absent")],
+            skip_existing: true,
+            disposition: CveBatchDisposition::AcceptRisk {
+                justification: "Should never be recorded anywhere.".into(),
+                review_date: None,
+            },
+        },
+        &clock,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        missing,
+        PoamError::Conflict("batch_pair_unavailable", _)
+    ));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn system_batch_http_requires_mutation_role_csrf_and_visible_system(pool: PgPool) {
+    let fixture = assessment_fixture(&pool).await;
+    let hidden = assessment_fixture(&pool).await;
+    let environment_id = assign_environment(&pool, "system-batch-http", &[&fixture]).await;
+    assign_environment(&pool, "system-batch-http-hidden", &[&hidden]).await;
+    let pair = batch_pair("CVE-2027-20601", "http-openssl");
+    for host in [&fixture, &hidden] {
+        seal_exact_cve_scan(
+            &pool,
+            host,
+            Utc::now(),
+            Some((&pair.cve_id, &pair.canonical_package_name, "1", false)),
+        )
+        .await;
+    }
+    let (viewer_id, viewer) = role_session(&pool, AuthRole::Viewer).await;
+    let (operator_id, operator) = role_session(&pool, AuthRole::Operator).await;
+    for user_id in [viewer_id, operator_id] {
+        sqlx::query(
+            "INSERT INTO user_environment_memberships(user_id,environment_id) VALUES($1,$2)",
+        )
+        .bind(user_id)
+        .bind(environment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let base = poam_http_server(pool.clone()).await;
+    let client = reqwest::Client::new();
+    let url = |system_id: Uuid| format!("{base}/api/v1/systems/{system_id}/cves/batch-triage");
+    let body = serde_json::json!({
+        "pairs": [pair],
+        "skip_existing": true,
+        "disposition": {"action": "accept_risk", "justification": "HTTP host batch decision", "review_date": null}
+    });
+    let send = |target: String, session: &str, csrf: Option<&str>| {
+        http_request(&client, reqwest::Method::POST, target, session, csrf)
+            .json(&body)
+            .send()
+    };
+    let viewer_response = send(url(fixture.system_id), &viewer, Some("system-batch-viewer"))
+        .await
+        .unwrap();
+    assert_eq!(viewer_response.status(), reqwest::StatusCode::FORBIDDEN);
+    let missing_csrf = send(url(fixture.system_id), &operator, None).await.unwrap();
+    assert_eq!(missing_csrf.status(), reqwest::StatusCode::FORBIDDEN);
+    let hidden_response = send(
+        url(hidden.system_id),
+        &operator,
+        Some("system-batch-hidden"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(hidden_response.status(), reqwest::StatusCode::NOT_FOUND);
+    assert!(
+        host_disposition_state(
+            &pool,
+            hidden.system_id,
+            &pair.cve_id,
+            &pair.canonical_package_name
+        )
+        .await
+        .is_none()
+    );
+    let applied = send(
+        url(fixture.system_id),
+        &operator,
+        Some("system-batch-operator"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(applied.status(), reqwest::StatusCode::OK);
+    let applied: serde_json::Value = applied.json().await.unwrap();
+    assert_eq!(applied["applied"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        host_disposition_state(
+            &pool,
+            fixture.system_id,
+            &pair.cve_id,
+            &pair.canonical_package_name
+        )
+        .await
+        .map(|row| row.0)
+        .as_deref(),
+        Some("accepted")
+    );
+    // The inventory row reports the new host decision without row hydration.
+    let inventory: serde_json::Value = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!(
+            "{base}/api/v1/systems/{}/cve-inventory-page",
+            fixture.system_id
+        ),
+        &operator,
+        None,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let row = inventory["vulnerabilities"]
+        .as_array()
+        .unwrap_or_else(|| panic!("inventory response: {inventory}"))
+        .iter()
+        .find(|row| row["cve_id"] == pair.cve_id)
+        .expect("inventory row");
+    assert_eq!(row["triage_state"], "accepted");
 }

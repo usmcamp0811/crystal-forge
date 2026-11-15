@@ -1,8 +1,9 @@
 //! CVE (Common Vulnerabilities and Exposures) display components.
 
+pub(crate) mod system_batch;
 pub(crate) mod triage;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use dioxus::prelude::*;
 use uuid::Uuid;
@@ -57,6 +58,8 @@ struct PackageCve {
     justification_category: Option<String>,
     justification_reason: Option<String>,
     justification_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Gives the server effective host triage state; `None` means OPEN.
+    triage_state: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -240,7 +243,7 @@ pub fn CvesTab(
     /// Requests the next server-issued page.
     on_load_more: EventHandler<()>,
 ) -> Element {
-    let _ = hostname;
+
     let mut expanded_cve: Signal<Option<String>> = use_signal(|| None);
     let mut default_expansion_applied = use_signal(|| false);
 
@@ -255,6 +258,9 @@ pub fn CvesTab(
     let mut triage_hydration_generation = use_signal(|| 0_u64);
     let mut triage_hydration_tokens: Signal<HashMap<SystemCveInventoryRowIdentity, u64>> =
         use_signal(HashMap::new);
+    // Exact `(cve_id, package)` pairs selected for host batch triage.
+    let mut batch_selection = use_signal(BTreeSet::<(String, String)>::new);
+    let mut batch_open = use_signal(|| false);
     use_effect(use_reactive(&inventory_target_key, move |_| {
         expanded_cve.set(None);
         default_expansion_applied.set(false);
@@ -273,6 +279,10 @@ pub fn CvesTab(
         let next_hydration_generation = (*triage_hydration_generation.peek()).wrapping_add(1);
         triage_hydration_generation.set(next_hydration_generation);
         triage_hydration_tokens.write().clear();
+        // INVARIANT: A selection belongs to one inventory target; another
+        // target must never submit pairs read from the previous one.
+        batch_selection.set(BTreeSet::new());
+        batch_open.set(false);
     }));
 
     // Package-first grouping matching the design reference. The System Detail CVE
@@ -281,6 +291,41 @@ pub fn CvesTab(
     let filtered_groups = group_vulnerabilities_by_package(&vulnerabilities);
     let exact_remediation_allowed =
         inventory_allows_exact_remediation(inventory_authority, allow_mutations);
+    // Batch selection uses the same eligibility as the per-row triage button:
+    // a mutable page and an exact row that the server can triage on this host.
+    let can_batch = exact_remediation_allowed && !read_only;
+    let selectable_rows = filtered_groups
+        .iter()
+        .flat_map(|group| group.cves.iter())
+        .filter(|cve| {
+            can_batch
+                && system_triage_row_state(inventory_authority, cve, system_id, None)
+                    == SystemTriageRowState::Review
+        })
+        .collect::<Vec<_>>();
+    let quick_selections = system_quick_selections(&selectable_rows);
+    let selectable_keys = selectable_rows
+        .iter()
+        .map(|cve| batch_key(cve))
+        .collect::<BTreeSet<_>>();
+    // INVARIANT: Counts and the submitted request use only selected pairs that
+    // are still selectable rows on this loaded page, never stale keys.
+    let batch_rows = selectable_rows
+        .iter()
+        .filter(|cve| batch_selection.read().contains(&batch_key(cve)))
+        .map(|cve| system_batch::SystemBatchRow {
+            cve_id: cve.cve_id.clone(),
+            package: cve.stable_identity.canonical_package_name.clone(),
+            severity: cve.severity.label().to_ascii_lowercase(),
+            triage_state: cve.triage_state.clone(),
+        })
+        .collect::<Vec<_>>();
+    let selected_count = batch_rows.len();
+    let selected_packages = batch_rows
+        .iter()
+        .map(|row| row.package.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
     let first_package = filtered_groups
         .first()
         .map(|group| group.canonical_package_name.clone());
@@ -449,9 +494,46 @@ pub fn CvesTab(
                         if let Some(message) = attempt_notice {
                             div { class: "sd-card-meta", "{message}" }
                         }
+                        if can_batch && !quick_selections.is_empty() {
+                            div { class: "cve-selection-strip", role: "toolbar", aria_label: "Select CVEs for batch triage", "data-testid": "system-cve-select-strip",
+                                span { class: "cve-selection-label", "SELECT" }
+                                for (label, keys) in quick_selections.clone() {
+                                    {
+                                        let on = keys.iter().all(|key| batch_selection.read().contains(key));
+                                        let count = keys.len();
+                                        let kind = label.to_ascii_lowercase();
+                                        rsx! {
+                                            button {
+                                                key: "{label}",
+                                                r#type: "button",
+                                                class: if on { "cve-selection-chip focus-ring on" } else { "cve-selection-chip focus-ring" },
+                                                "data-kind": "{kind}",
+                                                aria_pressed: on,
+                                                title: "Select every {kind} CVE loaded on this host; click again to deselect",
+                                                onclick: move |_| toggle_batch_keys(&mut batch_selection.write(), &keys),
+                                                "{label} "
+                                                span { class: "mono", "{count}" }
+                                            }
+                                        }
+                                    }
+                                }
+                                span { class: "cve-selection-hint", "⌘/Ctrl-click a row or package to select" }
+                            }
+                        }
                         for group in filtered_groups {
                             {
                                 let group_key = group.canonical_package_name.clone();
+                                let package_keys = group
+                                    .cves
+                                    .iter()
+                                    .map(batch_key)
+                                    .filter(|key| selectable_keys.contains(key))
+                                    .collect::<Vec<_>>();
+                                let package_selected = package_keys
+                                    .iter()
+                                    .filter(|key| batch_selection.read().contains(*key))
+                                    .count();
+                                let package_all = !package_keys.is_empty() && package_selected == package_keys.len();
                                 let panel_id = package_disclosure_id(&group.canonical_package_name);
                                 let is_open = *expanded_cve.read() == Some(group_key.clone());
                                 let sev_color = package_group_color(&group);
@@ -468,6 +550,7 @@ pub fn CvesTab(
                                     "transparent"
                                 };
                                 let chevron_d = if is_open { "M19 9l-7 7-7-7" } else { "M9 5l7 7-7 7" };
+                                let head_ring = if package_all { "inset 0 0 0 1px var(--cf-brand-purple)" } else { "none" };
 
                                 rsx! {
                                     div {
@@ -477,8 +560,15 @@ pub fn CvesTab(
 
                                         button {
                                             class: "focus-ring",
-                                            style: "all: unset; display: grid; grid-template-columns: 24px 1fr auto; align-items: center; gap: 14px; padding: 12px 16px; cursor: pointer; width: 100%; box-sizing: border-box; border-left: 3px solid {sev_color}; background: {head_bg};",
-                                            onclick: move |_| {
+                                            style: "all: unset; display: grid; grid-template-columns: 24px 1fr auto; align-items: center; gap: 14px; padding: 12px 16px; cursor: pointer; width: 100%; box-sizing: border-box; border-left: 3px solid {sev_color}; background: {head_bg}; box-shadow: {head_ring};",
+                                            title: if can_batch { "⌘/Ctrl-click to select every CVE in this package" } else { "" },
+                                            onclick: move |event: Event<MouseData>| {
+                                                let modifiers = event.modifiers();
+                                                if can_batch && (modifiers.ctrl() || modifiers.meta() || modifiers.shift()) {
+                                                    event.prevent_default();
+                                                    toggle_batch_keys(&mut batch_selection.write(), &package_keys);
+                                                    return;
+                                                }
                                                 let current = expanded_cve.read().clone();
                                                 if current == Some(expanded_key.clone()) {
                                                     let generation = (*triage_hydration_generation.peek()).wrapping_add(1);
@@ -574,6 +664,9 @@ pub fn CvesTab(
                                             div { style: "min-width: 0;",
                                                 div { style: "display: flex; align-items: center; gap: 10px; flex-wrap: wrap;",
                                                     span { class: "mono", style: "font-size: 14px; font-weight: 700;", "{group.package_name}" }
+                                                    if package_selected > 0 {
+                                                        span { class: "chip chip-info", style: "font-size: 10px;", "{package_selected} selected" }
+                                                    }
                                                     span { class: "mono", style: "font-size: 11px; color: var(--cf-text-muted);", "{group.version}" }
                                                     span { style: "font-size: 12px; color: var(--cf-text-muted);",
                                                         "{group.cves.len()} CVE{cve_suffix}"
@@ -681,9 +774,20 @@ pub fn CvesTab(
                                                                    ) == SystemTriageRowState::Review;
                                                             let (action_icon, action_label) = system_triage_action(cached_detail);
 
+                                                            let row_batch_key = batch_key(cve);
+                                                            let row_selectable = selectable_keys.contains(&row_batch_key);
+                                                            let row_checked = row_selectable && batch_selection.read().contains(&row_batch_key);
                                                             rsx! {
                                                                 tr {
                                                                     key: "{row_key}",
+                                                                    class: if row_checked { "selectable row-checked" } else if row_selectable { "selectable" } else { "" },
+                                                                    aria_selected: if row_selectable { if row_checked { "true" } else { "false" } } else { "" },
+                                                                    onclick: move |event: Event<MouseData>| {
+                                                                        let modifiers = event.modifiers();
+                                                                        if row_selectable && (modifiers.ctrl() || modifiers.meta() || modifiers.shift()) {
+                                                                            toggle_batch_keys(&mut batch_selection.write(), std::slice::from_ref(&row_batch_key));
+                                                                        }
+                                                                    },
                                                                     td { class: "mono", style: "color: var(--cf-text-primary);", "{cve.cve_id}" }
                                                                     td {
                                                                         span { class: "{severity_chip_class(&cve.severity)}", "{cve.severity.label()}" }
@@ -832,6 +936,42 @@ pub fn CvesTab(
                             if continuation_loading { "Loading..." } else { "Load more" }
                         }
                     }
+                }
+            }
+            if can_batch && selected_count > 0 {
+                div { class: "bulk-bar cve-bulk-bar", role: "toolbar", aria_label: "Selected CVEs", "data-testid": "system-cve-bulk-bar",
+                    span { class: "bulk-count", strong { "{selected_count}" } " selected" }
+                    span { class: "bulk-sep" }
+                    span { class: "cve-bulk-packages", "{selected_packages} package" if selected_packages != 1 { "s" } }
+                    button { class: "btn btn-primary xs focus-ring", "data-testid": "system-cve-batch-open", disabled: selected_count > 100,
+                        title: if selected_count > 100 { "Select at most 100 CVEs for batch triage" } else { "Triage the selected CVEs on this host" },
+                        onclick: move |_| batch_open.set(true),
+                        Icon { name: IconName::Shield, size: 12 }
+                        " Triage {selected_count} together"
+                    }
+                    button { class: "btn btn-ghost xs focus-ring", onclick: move |_| batch_selection.set(BTreeSet::new()), "Clear" }
+                    if selected_count > 100 { small { role: "status", "Batch triage is limited to 100 CVEs; deselect some to continue." } }
+                }
+            }
+            if batch_open() && !batch_rows.is_empty() {
+                system_batch::SystemCveBatchTriageDialog {
+                    system_id,
+                    hostname: hostname.clone(),
+                    rows: batch_rows.clone(),
+                    on_close: move |_| batch_open.set(false),
+                    on_success: move |response: poam_api::FleetCveBatchTriageResponse| {
+                        batch_open.set(false);
+                        batch_selection.set(BTreeSet::new());
+                        // Decisions changed server-side; hydrated row details are stale.
+                        triage_details.write().clear();
+                        let skipped = response.skipped.len();
+                        save_status.set(Some(format!(
+                            "Batch triage applied to {} CVE(s){}. Accepted and scheduled states do not prove remediation or verification.",
+                            response.applied.len(),
+                            if skipped > 0 { format!("; {skipped} skipped (already scheduled, already accepted, or managed by a POA&M)") } else { String::new() },
+                        )));
+                        on_saved.call(());
+                    },
                 }
             }
             if let (Some(target), Some(detail)) = (triage_target(), triage_dialog_detail()) {
@@ -1071,6 +1211,47 @@ fn group_vulnerabilities_by_cve(
     groups
 }
 
+/// Returns the exact `(cve_id, package)` selection key of one row.
+fn batch_key(cve: &PackageCve) -> (String, String) {
+    (
+        cve.cve_id.clone(),
+        cve.stable_identity.canonical_package_name.clone(),
+    )
+}
+
+/// Returns the design's SELECT chips over selectable rows, omitting empty ones.
+///
+/// Outstanding means no effective host or environment decision; it uses the
+/// server inventory `triage_state`, so it needs no per-row detail request.
+fn system_quick_selections(rows: &[&PackageCve]) -> Vec<(&'static str, Vec<(String, String)>)> {
+    let pick = |predicate: &dyn Fn(&PackageCve) -> bool| {
+        rows.iter()
+            .filter(|cve| predicate(cve))
+            .map(|cve| batch_key(cve))
+            .collect::<Vec<_>>()
+    };
+    [
+        ("Critical", pick(&|cve| cve.severity == CveSeverity::Critical)),
+        ("High", pick(&|cve| cve.severity == CveSeverity::High)),
+        ("Patchable", pick(&|cve| cve.has_fix)),
+        ("Outstanding", pick(&|cve| cve.triage_state.is_none())),
+    ]
+    .into_iter()
+    .filter(|(_, keys)| !keys.is_empty())
+    .collect()
+}
+
+/// Selects every key, or clears them all when every key is already selected.
+fn toggle_batch_keys(selection: &mut BTreeSet<(String, String)>, keys: &[(String, String)]) {
+    if keys.iter().all(|key| selection.contains(key)) {
+        for key in keys {
+            selection.remove(key);
+        }
+    } else {
+        selection.extend(keys.iter().cloned());
+    }
+}
+
 /// Group vulnerabilities by package name (inverse of `group_vulnerabilities_by_cve`).
 /// Within each package, CVEs are deduplicated by CVE id and the worst severity /
 /// highest CVSS / available-fix flag is retained.
@@ -1149,6 +1330,7 @@ fn group_vulnerabilities_by_package(
                 justification_category: vuln.justification_category.clone(),
                 justification_reason: vuln.justification_reason.clone(),
                 justification_updated_at: vuln.justification_updated_at,
+                triage_state: vuln.triage_state.clone(),
             });
         }
     }
@@ -1543,6 +1725,7 @@ mod tests {
             justification_reason: None,
             justification_updated_at: None,
             remediation,
+            triage_state: None,
         }
     }
 

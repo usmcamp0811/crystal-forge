@@ -20,9 +20,9 @@ use crate::api::models::{
     FleetCveBatchDetailItem, FleetCveBatchDetailRequest, FleetCveBatchDetailResponse,
     FleetCveBatchTriageRequest, FleetCveBatchTriageResponse, FleetCveDetail,
     FleetCveInventorySection, FleetCvePoamRequest, FleetCveTriageRequest, FleetCveTriageResponse,
-    FleetCveTriageRollup, ScheduledPoamMetadata, SystemCveEffectiveDispositionSource,
-    SystemCveInventoryAuthority, SystemCveTriageAction, SystemCveTriageDetail,
-    SystemCveTriageRequest, SystemCveTriageResponse, SystemCveTriageScope,
+    FleetCveTriageRollup, ScheduledPoamMetadata, SystemCveBatchTriageRequest,
+    SystemCveEffectiveDispositionSource, SystemCveInventoryAuthority, SystemCveTriageAction,
+    SystemCveTriageDetail, SystemCveTriageRequest, SystemCveTriageResponse, SystemCveTriageScope,
     SystemCveTriageScopeChoice, SystemCveTriageScopeKind,
 };
 use crate::compliance::canonical::semantic_digest;
@@ -7441,6 +7441,181 @@ fn batch_schedule_key(
     }
 }
 
+/// Creates the POA&Ms for a scheduled batch and links each target's exact
+/// subjects to its group's POA&M.
+///
+/// Returns the POA&M for every schedule group and the created IDs in creation
+/// order. An `AcceptRisk` disposition creates nothing. `source` names the
+/// calling mutation in each POA&M's creation activity.
+///
+/// # Errors
+///
+/// Returns a validation error for an oversized generated title or plan, or a
+/// database error. The caller owns the transaction and its writer locks.
+async fn create_batch_schedule_poams_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    clock: &dyn PoamClock,
+    targets: &[BatchTriageTarget],
+    disposition: &CveBatchDisposition,
+    source: &str,
+) -> Result<(BTreeMap<BatchScheduleKey, Uuid>, Vec<Uuid>), PoamError> {
+    let mut poam_ids_created: Vec<Uuid> = Vec::new();
+    // INVARIANT: Group plans can share distinct CVE identities under 0296,
+    // but each disposition and link still belongs to its exact pair/host.
+    let mut target_poam_id: BTreeMap<BatchScheduleKey, Uuid> = BTreeMap::new();
+    if let CveBatchDisposition::SchedulePatch {
+        grouping,
+        assignee,
+        target_date,
+        plan,
+        default_milestones,
+    } = disposition
+    {
+        let resolved_assignee = resolve_assignee_tx(&mut *tx, assignee).await?;
+        let cve_id_list = targets
+            .iter()
+            .map(|target| target.cve_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let severities: BTreeMap<String, String> = sqlx::query_as::<_, (String, String)>(
+            r#"SELECT id,lower(severity_from_cvss(cvss_v3_score)) FROM cves WHERE id=ANY($1)"#,
+        )
+        .bind(&cve_id_list)
+        .fetch_all(&mut **tx)
+        .await?
+        .into_iter()
+        .collect();
+        let mut groups: BTreeMap<BatchScheduleKey, Vec<&BatchTriageTarget>> = BTreeMap::new();
+        for target in targets {
+            groups
+                .entry(batch_schedule_key(*grouping, target))
+                .or_default()
+                .push(target);
+        }
+        for (key, members) in &groups {
+            let first = members[0];
+            let title = match key {
+                BatchScheduleKey::One => "Patch selected CVEs".to_string(),
+                BatchScheduleKey::Package(package) if members.len() == 1 => {
+                    batch_pair_title(&first.cve_id, package)
+                }
+                BatchScheduleKey::Package(package) => format!("Patch {package} CVEs"),
+                BatchScheduleKey::Environment(_) => {
+                    format!("Patch CVEs in {}", first.subjects[0].environment_name)
+                }
+            };
+            // The plan's risk is the highest advisory risk among its exact
+            // members; a low-risk pair must not downgrade a high-risk group.
+            let risk = if members
+                .iter()
+                .any(|target| batch_pair_risk(&target.cve_id, &severities) == PoamRisk::High)
+            {
+                PoamRisk::High
+            } else if members
+                .iter()
+                .any(|target| batch_pair_risk(&target.cve_id, &severities) == PoamRisk::Medium)
+            {
+                PoamRisk::Medium
+            } else {
+                PoamRisk::Low
+            };
+            let group_plan = if plan.trim().is_empty() {
+                match key {
+                    BatchScheduleKey::Package(package) => format!("Upgrade {package} to a patched release and verify with an exact follow-up scan."),
+                    _ => "Upgrade affected packages to patched releases and verify with exact follow-up scans.".to_string(),
+                }
+            } else {
+                plan.trim().to_string()
+            };
+            validate_text_length(&title, MAX_SHORT_TEXT_BYTES, "text_too_long", "title")?;
+            validate_text_length(&group_plan, MAX_PLAN_BYTES, "text_too_long", "plan")?;
+            let poam_id: Uuid = sqlx::query_scalar(
+                r#"INSERT INTO poams(title,plan,owner,owner_kind,owner_user_id,
+                      owner_group_name,target_date,risk,created_by)
+                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id"#,
+            )
+            .bind(&title)
+            .bind(&group_plan)
+            .bind(&resolved_assignee.owner)
+            .bind(resolved_assignee.kind)
+            .bind(resolved_assignee.user_id)
+            .bind(resolved_assignee.group_name.as_deref())
+            .bind(target_date)
+            .bind(risk.as_str())
+            .bind(actor.user_id)
+            .fetch_one(&mut **tx)
+            .await?;
+            poam_ids_created.push(poam_id);
+            target_poam_id.insert(key.clone(), poam_id);
+            if *default_milestones {
+                for (ordinal, (offset, milestone_title)) in [14_i64, 28, 35, 49, 56]
+                    .into_iter()
+                    .zip([
+                        "Update NixOS module",
+                        "Deploy to staging",
+                        "Validate new configuration",
+                        "Deploy to production",
+                        "Verify CVE remediation passes",
+                    ])
+                    .enumerate()
+                {
+                    let milestone_date = if ordinal == 4 {
+                        *target_date
+                    } else {
+                        (clock.today() + Duration::days(offset)).min(*target_date)
+                    };
+                    sqlx::query(
+                        r#"INSERT INTO poam_milestones(poam_id,ordinal,title,target_date,
+                              created_by,updated_by) VALUES($1,$2,$3,$4,$5,$5)"#,
+                    )
+                    .bind(poam_id)
+                    .bind(ordinal as i32)
+                    .bind(milestone_title)
+                    .bind(milestone_date)
+                    .bind(actor.user_id)
+                    .execute(&mut **tx)
+                    .await?;
+                }
+            }
+            insert_activity_and_audit(
+                &mut *tx,
+                poam_id,
+                actor.user_id,
+                &actor.identifier,
+                "created",
+                &json!({
+                    "poam_id":poam_id,"revision":1,"source":source,
+                    "grouping":format!("{grouping:?}"),
+                    "pairs":members.iter().map(|member| format!("{}:{}",member.cve_id,member.package_name)).collect::<Vec<_>>(),
+                    "subject_count":members.iter().map(|target| target.subjects.len()).sum::<usize>()
+                }),
+                actor.request_origin.as_deref(),
+            )
+            .await?;
+        }
+        for target in targets {
+            let poam_id = target_poam_id[&batch_schedule_key(*grouping, target)];
+            let baselines = target
+                .subjects
+                .iter()
+                .map(FleetCveSubject::baseline)
+                .collect::<Vec<_>>();
+            materialize_exact_subjects_tx(
+                &mut *tx,
+                poam_id,
+                actor.user_id,
+                &baselines,
+                &target.cve_id,
+                &target.package_name,
+            )
+            .await?;
+        }
+    }
+    Ok((target_poam_id, poam_ids_created))
+}
+
 /// Applies one bounded, atomic batch CVE triage mutation across many exact
 /// pairs and a chosen set of environments.
 ///
@@ -7827,159 +8002,15 @@ async fn triage_fleet_cves_batch_once(
     }
 
     let now = clock.now();
-    let mut poam_ids_created: Vec<Uuid> = Vec::new();
-    // INVARIANT: Group plans can share distinct CVE identities under 0296,
-    // but each disposition and link still belongs to its exact pair/host.
-    let mut target_poam_id: BTreeMap<BatchScheduleKey, Uuid> = BTreeMap::new();
-    if let CveBatchDisposition::SchedulePatch {
-        grouping,
-        assignee,
-        target_date,
-        plan,
-        default_milestones,
-    } = &request.disposition
-    {
-        let resolved_assignee = resolve_assignee_tx(&mut tx, assignee).await?;
-        let cve_id_list = targets
-            .iter()
-            .map(|target| target.cve_id.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let severities: BTreeMap<String, String> = sqlx::query_as::<_, (String, String)>(
-            r#"SELECT id,lower(severity_from_cvss(cvss_v3_score)) FROM cves WHERE id=ANY($1)"#,
-        )
-        .bind(&cve_id_list)
-        .fetch_all(&mut *tx)
-        .await?
-        .into_iter()
-        .collect();
-        let mut groups: BTreeMap<BatchScheduleKey, Vec<&BatchTriageTarget>> = BTreeMap::new();
-        for target in &targets {
-            groups
-                .entry(batch_schedule_key(*grouping, target))
-                .or_default()
-                .push(target);
-        }
-        for (key, members) in &groups {
-            let first = members[0];
-            let title = match key {
-                BatchScheduleKey::One => "Patch selected CVEs".to_string(),
-                BatchScheduleKey::Package(package) if members.len() == 1 => {
-                    batch_pair_title(&first.cve_id, package)
-                }
-                BatchScheduleKey::Package(package) => format!("Patch {package} CVEs"),
-                BatchScheduleKey::Environment(_) => {
-                    format!("Patch CVEs in {}", first.subjects[0].environment_name)
-                }
-            };
-            // The plan's risk is the highest advisory risk among its exact
-            // members; a low-risk pair must not downgrade a high-risk group.
-            let risk = if members
-                .iter()
-                .any(|target| batch_pair_risk(&target.cve_id, &severities) == PoamRisk::High)
-            {
-                PoamRisk::High
-            } else if members
-                .iter()
-                .any(|target| batch_pair_risk(&target.cve_id, &severities) == PoamRisk::Medium)
-            {
-                PoamRisk::Medium
-            } else {
-                PoamRisk::Low
-            };
-            let group_plan = if plan.trim().is_empty() {
-                match key {
-                    BatchScheduleKey::Package(package) => format!("Upgrade {package} to a patched release and verify with an exact follow-up scan."),
-                    _ => "Upgrade affected packages to patched releases and verify with exact follow-up scans.".to_string(),
-                }
-            } else {
-                plan.trim().to_string()
-            };
-            validate_text_length(&title, MAX_SHORT_TEXT_BYTES, "text_too_long", "title")?;
-            validate_text_length(&group_plan, MAX_PLAN_BYTES, "text_too_long", "plan")?;
-            let poam_id: Uuid = sqlx::query_scalar(
-                r#"INSERT INTO poams(title,plan,owner,owner_kind,owner_user_id,
-                      owner_group_name,target_date,risk,created_by)
-                   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id"#,
-            )
-            .bind(&title)
-            .bind(&group_plan)
-            .bind(&resolved_assignee.owner)
-            .bind(resolved_assignee.kind)
-            .bind(resolved_assignee.user_id)
-            .bind(resolved_assignee.group_name.as_deref())
-            .bind(target_date)
-            .bind(risk.as_str())
-            .bind(actor.user_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            poam_ids_created.push(poam_id);
-            target_poam_id.insert(key.clone(), poam_id);
-            if *default_milestones {
-                for (ordinal, (offset, milestone_title)) in [14_i64, 28, 35, 49, 56]
-                    .into_iter()
-                    .zip([
-                        "Update NixOS module",
-                        "Deploy to staging",
-                        "Validate new configuration",
-                        "Deploy to production",
-                        "Verify CVE remediation passes",
-                    ])
-                    .enumerate()
-                {
-                    let milestone_date = if ordinal == 4 {
-                        *target_date
-                    } else {
-                        (clock.today() + Duration::days(offset)).min(*target_date)
-                    };
-                    sqlx::query(
-                        r#"INSERT INTO poam_milestones(poam_id,ordinal,title,target_date,
-                              created_by,updated_by) VALUES($1,$2,$3,$4,$5,$5)"#,
-                    )
-                    .bind(poam_id)
-                    .bind(ordinal as i32)
-                    .bind(milestone_title)
-                    .bind(milestone_date)
-                    .bind(actor.user_id)
-                    .execute(&mut *tx)
-                    .await?;
-                }
-            }
-            insert_activity_and_audit(
-                &mut tx,
-                poam_id,
-                actor.user_id,
-                &actor.identifier,
-                "created",
-                &json!({
-                    "poam_id":poam_id,"revision":1,"source":"fleet_cve_batch_triage",
-                    "grouping":format!("{grouping:?}"),
-                    "pairs":members.iter().map(|member| format!("{}:{}",member.cve_id,member.package_name)).collect::<Vec<_>>(),
-                    "subject_count":members.iter().map(|target| target.subjects.len()).sum::<usize>()
-                }),
-                actor.request_origin.as_deref(),
-            )
-            .await?;
-        }
-        for target in &targets {
-            let poam_id = target_poam_id[&batch_schedule_key(*grouping, target)];
-            let baselines = target
-                .subjects
-                .iter()
-                .map(FleetCveSubject::baseline)
-                .collect::<Vec<_>>();
-            materialize_exact_subjects_tx(
-                &mut tx,
-                poam_id,
-                actor.user_id,
-                &baselines,
-                &target.cve_id,
-                &target.package_name,
-            )
-            .await?;
-        }
-    }
+    let (target_poam_id, poam_ids_created) = create_batch_schedule_poams_tx(
+        &mut tx,
+        &actor,
+        clock,
+        &targets,
+        &request.disposition,
+        "fleet_cve_batch_triage",
+    )
+    .await?;
 
     for target in &targets {
         let existing = pair_dispositions
@@ -8090,6 +8121,344 @@ async fn triage_fleet_cves_batch_once(
     Ok(FleetCveBatchTriageResponse {
         applied,
         skipped,
+        poam_ids: poam_ids_created,
+    })
+}
+
+/// Applies one atomic host-override decision to many CVE/package pairs on one
+/// system, from System Detail batch triage.
+///
+/// Retries serialization failures, matching single-CVE triage. See
+/// [`SystemCveBatchTriageRequest`] for the scope and skip rules. The response
+/// reuses [`FleetCveBatchTriageResponse`]; each applied pair lists the
+/// system's environment, which is evidence context only. No environment
+/// default is written.
+///
+/// # Errors
+///
+/// Returns a validation error for malformed or out-of-bound input or when no
+/// pair is writable, not found when the system is absent or hidden, a
+/// forbidden error when the actor cannot mutate, a conflict error when a pair
+/// is not a current exact occurrence on the system or its evidence or
+/// environment changed while locks were acquired, or a database error.
+pub async fn triage_system_cves_batch(
+    pool: &PgPool,
+    actor: &PoamActor,
+    system_id: Uuid,
+    request: SystemCveBatchTriageRequest,
+    clock: &dyn PoamClock,
+) -> Result<FleetCveBatchTriageResponse, PoamError> {
+    for retry in 0..3 {
+        match triage_system_cves_batch_once(pool, actor, system_id, request.clone(), clock).await {
+            Err(PoamError::Database(error)) if retry < 2 && is_serialization_failure(&error) => {
+                continue;
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+
+async fn triage_system_cves_batch_once(
+    pool: &PgPool,
+    actor: &PoamActor,
+    system_id: Uuid,
+    request: SystemCveBatchTriageRequest,
+    clock: &dyn PoamClock,
+) -> Result<FleetCveBatchTriageResponse, PoamError> {
+    require_mutator(actor)?;
+    if request.pairs.is_empty() || request.pairs.len() > MAX_FLEET_CVE_BATCH_IDENTITIES {
+        return Err(PoamError::Validation(
+            "invalid_batch_pairs",
+            format!(
+                "Batch triage requires between 1 and {MAX_FLEET_CVE_BATCH_IDENTITIES} exact CVE/package identities"
+            ),
+        ));
+    }
+    let mut pairs = BTreeSet::new();
+    for pair in &request.pairs {
+        pairs.insert(canonicalize_batch_pair(pair)?);
+    }
+    match &request.disposition {
+        CveBatchDisposition::AcceptRisk { justification, .. } => {
+            if !(10..=2_000).contains(&justification.trim().len()) {
+                return Err(PoamError::Validation(
+                    "invalid_acceptance_justification",
+                    "Acceptance justification must be between 10 and 2000 bytes".into(),
+                ));
+            }
+        }
+        CveBatchDisposition::SchedulePatch { assignee, plan, .. } => {
+            if !plan.trim().is_empty() {
+                validate_text_length(plan.trim(), MAX_PLAN_BYTES, "text_too_long", "plan")?;
+            }
+            if matches!(assignee, PoamAssigneeRequest::Unassigned) {
+                return Err(PoamError::Validation(
+                    "invalid_poam_assignee",
+                    "Scheduled remediation requires a typed user or group assignee".into(),
+                ));
+            }
+        }
+    }
+
+    let mut tx = pool.begin().await?;
+    // SECURITY: A hidden or absent system returns not found before any lock
+    // or evidence read can reveal whether it exists.
+    let environment_id: Uuid =
+        sqlx::query_scalar("SELECT environment_id FROM systems WHERE id=$1 AND is_active")
+            .bind(system_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten()
+            .ok_or(PoamError::NotFound)?;
+    if !actor_can_access_systems_tx(&mut tx, actor, &[system_id]).await? {
+        return Err(PoamError::NotFound);
+    }
+    let cve_ids = pairs
+        .iter()
+        .map(|(cve_id, _)| cve_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    // CONCURRENCY: Canonical writer order, generalized from single host
+    // triage to many CVEs: all CVE keys in one sorted statement, then the
+    // system sentinel, policy finding keys, exact finding keys, and the
+    // system row. Every writer locks a CVE key first, so holding all of this
+    // batch's CVE keys before the system sentinel cannot deadlock.
+    lock_batch_cve_keys_tx(&mut tx, &cve_ids).await?;
+    let mut before = BTreeMap::new();
+    for (cve_id, package_name) in &pairs {
+        let subject = fleet_cve_subjects_tx(&mut tx, actor, cve_id, package_name, Some(&[environment_id]))
+            .await?
+            .into_iter()
+            .find(|subject| subject.system_id == system_id)
+            .ok_or_else(|| {
+                PoamError::Conflict(
+                    "batch_pair_unavailable",
+                    "A selected CVE/package pair is not a current exact finding on this system; refresh and retry".into(),
+                )
+            })?;
+        before.insert((cve_id.clone(), package_name.clone()), subject);
+    }
+    crate::services::composite_enforcement::lock_poam_system_key_tx(&mut tx, system_id).await?;
+    lock_policy_finding_keys_for_systems_tx(&mut tx, &[system_id]).await?;
+    let requested_cve_ids = pairs
+        .iter()
+        .map(|(cve_id, _)| cve_id.clone())
+        .collect::<Vec<_>>();
+    let requested_packages = pairs
+        .iter()
+        .map(|(_, package)| package.clone())
+        .collect::<Vec<_>>();
+    lock_batch_fleet_cve_finding_keys_tx(
+        &mut tx,
+        &[system_id],
+        &vec![system_id; pairs.len()],
+        &requested_cve_ids,
+        &requested_packages,
+    )
+    .await?;
+    let current_environment_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT environment_id FROM systems WHERE id=$1 AND is_active FOR UPDATE",
+    )
+    .bind(system_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .flatten();
+    if current_environment_id != Some(environment_id) {
+        return Err(PoamError::Conflict(
+            "cve_evidence_changed",
+            "The selected system's environment changed; refresh and retry".into(),
+        ));
+    }
+    let actor = current_mutating_actor_tx(&mut tx, actor).await?;
+    // SECURITY: The actor may have lost environment membership since the
+    // request started. Recheck visibility after the identity reload.
+    if !actor_can_access_systems_tx(&mut tx, &actor, &[system_id]).await? {
+        return Err(PoamError::Forbidden);
+    }
+
+    // CONCURRENCY: Re-derive every exact occurrence after all locks are held.
+    // Any change fails the complete batch; no partially stale write commits.
+    let mut targets = Vec::new();
+    let mut existing_accepted = BTreeSet::new();
+    let mut skipped_pairs = BTreeSet::new();
+    for ((cve_id, package_name), before_subject) in &before {
+        let subject = fleet_cve_subjects_tx(
+            &mut tx,
+            &actor,
+            cve_id,
+            package_name,
+            Some(&[environment_id]),
+        )
+        .await?
+        .into_iter()
+        .find(|subject| subject.system_id == system_id);
+        if subject.as_ref() != Some(before_subject) {
+            return Err(PoamError::Conflict(
+                "cve_evidence_changed",
+                "A selected exact occurrence changed; refresh and retry".into(),
+            ));
+        }
+        let current_host =
+            system_cve_disposition_tx(&mut tx, system_id, cve_id, package_name).await?;
+        let active_link: bool = sqlx::query_scalar(
+            r#"SELECT EXISTS(SELECT 1 FROM poam_cve_finding_links
+                 WHERE system_id=$1 AND canonical_cve_id=$2
+                   AND canonical_package_name=$3 AND retired_at IS NULL)"#,
+        )
+        .bind(system_id)
+        .bind(cve_id)
+        .bind(package_name)
+        .fetch_one(&mut *tx)
+        .await?;
+        let unchanged_accepted = matches!(
+            (&request.disposition, &current_host),
+            (
+                CveBatchDisposition::AcceptRisk { justification, review_date },
+                Some(CveEnvironmentDisposition::Accepted {
+                    justification: current_justification,
+                    review_date: current_review_date,
+                    ..
+                })
+            ) if justification.trim() == current_justification
+                && review_date == current_review_date
+        );
+        // INVARIANT: An active link means a POA&M (host or inherited
+        // environment schedule) manages this exact subject. Only single-CVE
+        // triage may retire that link, so batch never writes such a pair.
+        let eligible = !active_link
+            && match &current_host {
+                None => true,
+                Some(CveEnvironmentDisposition::Accepted { .. }) => {
+                    !request.skip_existing && !unchanged_accepted
+                }
+                Some(CveEnvironmentDisposition::Scheduled { .. }) => false,
+            };
+        if !eligible {
+            skipped_pairs.insert((cve_id.clone(), package_name.clone()));
+            continue;
+        }
+        if current_host.is_some() {
+            existing_accepted.insert((cve_id.clone(), package_name.clone()));
+        }
+        targets.push(BatchTriageTarget {
+            cve_id: cve_id.clone(),
+            package_name: package_name.clone(),
+            environment_id,
+            subjects: vec![before_subject.clone()],
+        });
+    }
+    if targets.is_empty() {
+        return Err(PoamError::Validation(
+            "batch_no_applicable_targets",
+            "No selected CVE/package identity is writable on this system".into(),
+        ));
+    }
+
+    let now = clock.now();
+    let (target_poam_id, poam_ids_created) = create_batch_schedule_poams_tx(
+        &mut tx,
+        &actor,
+        clock,
+        &targets,
+        &request.disposition,
+        "system_cve_batch_triage",
+    )
+    .await?;
+    for target in &targets {
+        if existing_accepted.contains(&(target.cve_id.clone(), target.package_name.clone())) {
+            sqlx::query(
+                r#"UPDATE cve_system_dispositions
+                   SET retired_at=$4,retired_by=$5,retirement_reason='host_batch_triage_changed'
+                   WHERE system_id=$1 AND canonical_cve_id=$2
+                     AND canonical_package_name=$3 AND retired_at IS NULL"#,
+            )
+            .bind(system_id)
+            .bind(&target.cve_id)
+            .bind(&target.package_name)
+            .bind(now)
+            .bind(actor.user_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        match &request.disposition {
+            CveBatchDisposition::AcceptRisk {
+                justification,
+                review_date,
+            } => {
+                sqlx::query(
+                    r#"INSERT INTO cve_system_dispositions(
+                         canonical_cve_id,canonical_package_name,system_id,state,
+                         justification,review_date,accepted_by,accepted_at)
+                       VALUES($1,$2,$3,'accepted',$4,$5,$6,$7)"#,
+                )
+                .bind(&target.cve_id)
+                .bind(&target.package_name)
+                .bind(system_id)
+                .bind(justification.trim())
+                .bind(review_date)
+                .bind(actor.user_id)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            }
+            CveBatchDisposition::SchedulePatch { grouping, .. } => {
+                sqlx::query(
+                    r#"INSERT INTO cve_system_dispositions(
+                         canonical_cve_id,canonical_package_name,system_id,state,
+                         poam_id,scheduled_by,scheduled_at)
+                       VALUES($1,$2,$3,'scheduled',$4,$5,$6)"#,
+                )
+                .bind(&target.cve_id)
+                .bind(&target.package_name)
+                .bind(system_id)
+                .bind(target_poam_id[&batch_schedule_key(*grouping, target)])
+                .bind(actor.user_id)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+    }
+    sqlx::query(
+        r#"INSERT INTO admin_audit_events(
+             actor_user_id,actor_identifier,action,target,request_origin,metadata)
+           VALUES($1,$2,'system_host_cve_batch_triaged',$3,$4,$5)"#,
+    )
+    .bind(actor.user_id)
+    .bind(&actor.identifier)
+    .bind(format!("system:{system_id}:cves:batch:{}", targets.len()))
+    .bind(actor.request_origin.as_deref())
+    .bind(json!({
+        "system_id":system_id,"environment_id":environment_id,"scope":"host",
+        "requested_pair_count":pairs.len(),
+        "applied_pairs":targets.iter().map(|target| format!("{}:{}",target.cve_id,target.package_name)).collect::<Vec<_>>(),
+        "skipped_pairs":skipped_pairs.iter().map(|(cve_id,package)| format!("{cve_id}:{package}")).collect::<Vec<_>>(),
+        "poam_ids":poam_ids_created
+    }))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    schedule_scheduled_environment_cve_reconciliation_for_system(pool, system_id);
+    Ok(FleetCveBatchTriageResponse {
+        applied: targets
+            .into_iter()
+            .map(|target| CveBatchAppliedPair {
+                pair: CveBatchPairIdentity {
+                    cve_id: target.cve_id,
+                    canonical_package_name: target.package_name,
+                },
+                environment_ids: vec![environment_id],
+            })
+            .collect(),
+        skipped: skipped_pairs
+            .into_iter()
+            .map(|(cve_id, package_name)| CveBatchPairIdentity {
+                cve_id,
+                canonical_package_name: package_name,
+            })
+            .collect(),
         poam_ids: poam_ids_created,
     })
 }

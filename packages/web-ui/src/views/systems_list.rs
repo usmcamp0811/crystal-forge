@@ -498,6 +498,7 @@ pub fn SystemsListView() -> Element {
         value: value.to_owned(),
         label,
         count,
+        dot: None,
     };
     let mode_options: Vec<FilterOption> = [
         ManagementMode::Managed,

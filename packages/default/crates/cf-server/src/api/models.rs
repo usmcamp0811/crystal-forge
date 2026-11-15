@@ -704,6 +704,14 @@ pub struct SystemCveInventoryVulnerability {
     /// Provides exact remediation context only for an exact row on this page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation: Option<crate::models::poam::CvePoamRelationship>,
+    /// Gives the host-precedence effective triage state, `accepted` or
+    /// `scheduled`, for an exact row of a mutable page. `None` means OPEN, or
+    /// that the page is read-only and no triage state applies. A scheduled
+    /// environment default counts only when it is coherent for current exact
+    /// subjects (`cve_coherent_environment_disposition_state`). This is a
+    /// selection aid; the per-row triage detail remains authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triage_state: Option<String>,
 }
 
 /// Identifies the evidence authority used for a system CVE inventory read.
@@ -1124,7 +1132,47 @@ pub struct SaveSystemCveJustificationRequest {
 // Advanced CVE Dashboard DTOs (TASK-322)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Filter parameters for CVE list queries.
+/// Splits a comma-separated filter value into its non-empty, trimmed values.
+///
+/// The CVE filter parameters `severity`, `fix_status`, `triage_status`, and
+/// `environment_id` accept one value or a comma-separated list. Values in one
+/// list are OR-combined. Returns `None` when the parameter is absent or holds
+/// no non-empty value, so an empty list never means "match nothing".
+pub fn comma_filter_values(value: Option<&str>) -> Option<Vec<String>> {
+    let values: Vec<String> = value?
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect();
+    (!values.is_empty()).then_some(values)
+}
+
+/// Deserializes a comma-separated `environment_id` query value into UUIDs.
+///
+/// # Errors
+///
+/// Rejects the request when any listed value is not a UUID. A malformed ID
+/// MUST NOT be ignored, because ignoring it would widen the requested scope.
+fn deserialize_environment_ids<'de, D>(deserializer: D) -> Result<Option<Vec<Uuid>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    comma_filter_values(raw.as_deref())
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| Uuid::parse_str(value).map_err(serde::de::Error::custom))
+                .collect()
+        })
+        .transpose()
+}
+
+/// Filter parameters for CVE list and export queries.
+///
+/// `severity`, `fix_status`, and `triage_status` accept comma-separated
+/// lists (see [`comma_filter_values`]). Different filters are AND-combined.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CveFilters {
     pub severity: Option<String>,      // "critical", "high", "medium", "low"
@@ -1134,22 +1182,30 @@ pub struct CveFilters {
     pub search: Option<String>,        // Search across CVE ID, package, title
     pub sort: Option<String>,          // "severity", "cvss", "age", "affected"
     pub limit: Option<i64>,            // Max results (default 500, max 1000)
+    /// Restricts rows to the union of these environments, intersected with
+    /// the caller's read scope. Absence means every visible environment.
+    #[serde(default, deserialize_with = "deserialize_environment_ids")]
+    pub environment_id: Option<Vec<Uuid>>,
 }
 
 /// Selects a paged, read-only CVE inventory projection. Filters apply to
 /// CVE/package identities before group counts and membership pagination.
+/// `severity`, `fix_status`, `triage_status`, and `environment_id` accept
+/// comma-separated lists (see [`comma_filter_values`]).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CveInventoryProjectionParams {
     /// Groups by `environment` or `host`; not used by the pairs endpoint.
     #[serde(default)]
     pub group_by: String,
-    /// Narrows the result to one authorized environment; absence means all visible environments.
-    pub environment_id: Option<Uuid>,
-    /// Filters by normalized severity.
+    /// Narrows the result to the union of these authorized environments;
+    /// absence means all visible environments.
+    #[serde(default, deserialize_with = "deserialize_environment_ids")]
+    pub environment_id: Option<Vec<Uuid>>,
+    /// Filters by one or more normalized severities.
     pub severity: Option<String>,
-    /// Filters by available, pending, or exploited fix status.
+    /// Filters by one or more of available, pending, or exploited.
     pub fix_status: Option<String>,
-    /// Filters by the scoped pair's triage status.
+    /// Filters by one or more scoped pair triage statuses.
     pub triage_status: Option<String>,
     /// Matches a package substring.
     pub package: Option<String>,
@@ -1711,6 +1767,33 @@ pub struct FleetCveBatchTriageRequest {
     #[serde(default = "default_true_value")]
     pub skip_existing: bool,
     /// Selects the shared disposition applied to every applicable subject.
+    pub disposition: CveBatchDisposition,
+}
+
+/// Requests one atomic host-override decision for many CVE/package pairs on
+/// the path system (System Detail batch triage).
+///
+/// # Invariants
+///
+/// - The request cannot name a system, environment, or host list. The server
+///   writes only host overrides (`cve_system_dispositions`) for the path system.
+///   The system's environment default and its peer hosts are not changed.
+/// - Every named pair must be a current exact occurrence on the path system;
+///   otherwise the complete batch fails with a conflict.
+/// - A pair with an active host `Scheduled` decision or an active POA&M
+///   finding link on this host is skipped, independent of `skip_existing`.
+///   Changing it requires single-CVE System Detail triage, which owns the
+///   POA&M link retirement rules.
+/// - The complete mutation commits in one database transaction.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SystemCveBatchTriageRequest {
+    /// Gives the bounded set of exact CVE/package identities (1 to 100).
+    pub pairs: Vec<CveBatchPairIdentity>,
+    /// Leaves an existing host `Accepted` decision unchanged when true (default).
+    #[serde(default = "default_true_value")]
+    pub skip_existing: bool,
+    /// Selects the shared disposition. `PerEnvironment` schedule grouping is
+    /// equivalent to `One` because one host has one environment.
     pub disposition: CveBatchDisposition,
 }
 

@@ -576,6 +576,11 @@ fn cve_filter_query_parts(filters: &CveFilters) -> Vec<String> {
         parts.push(format!("limit={limit}"));
     }
 
+    if !filters.environment_ids.is_empty() {
+        let ids: Vec<String> = filters.environment_ids.iter().map(ToString::to_string).collect();
+        parts.push(format!("environment_id={}", ids.join(",")));
+    }
+
     parts
 }
 
@@ -586,9 +591,6 @@ fn cve_inventory_url(query: &CveInventoryQuery, members: bool) -> String {
         format!("offset={}", query.offset),
         format!("limit={}", query.limit),
     ];
-    if let Some(id) = query.environment_id {
-        parts.push(format!("environment_id={id}"));
-    }
     if let Some(id) = query.group_id {
         parts.push(format!("group_id={id}"));
     }
@@ -636,9 +638,6 @@ pub async fn fetch_cve_inventory_pairs(
         format!("offset={}", query.offset),
         format!("limit={}", query.limit),
     ];
-    if let Some(id) = query.environment_id {
-        parts.push(format!("environment_id={id}"));
-    }
     parts.extend(cve_filter_query_parts(&CveFilters {
         limit: None,
         ..query.filters.clone()
@@ -682,12 +681,6 @@ pub async fn fetch_cves_grouped(
 /// Fetch fleet-wide CVE statistics.
 pub async fn fetch_cve_fleet_stats() -> Result<CveFleetStats, ApiClientError> {
     let url = format!("{}/cves/stats", base_url());
-    fetch_json(&url).await
-}
-
-/// Fetch package names for autocomplete.
-pub async fn fetch_cve_package_names() -> Result<Vec<String>, ApiClientError> {
-    let url = format!("{}/cves/packages", base_url());
     fetch_json(&url).await
 }
 
@@ -760,25 +753,156 @@ pub async fn trigger_cve_derivation_rescan(
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
-/// Export CVEs as CSV (triggers browser download).
-pub async fn export_cves_csv(filters: &CveFilters) -> Result<(), ApiClientError> {
-    let parts = cve_filter_query_parts(filters);
+/// Builds the export URL for `filters` in `format` (`csv`, `excel`,
+/// `oscal-json`, or `oscal-xml`). List pagination does not apply to export.
+pub fn cve_export_url(filters: &CveFilters, format: &str) -> String {
+    let mut parts = cve_filter_query_parts(&CveFilters {
+        limit: None,
+        ..filters.clone()
+    });
+    parts.push(format!("format={}", encode_query_value(format)));
+    format!("{}/cves/export?{}", base_url(), parts.join("&"))
+}
 
-    let mut url = format!("{}/cves/export", base_url());
-    if !parts.is_empty() {
-        url.push('?');
-        url.push_str(&parts.join("&"));
+/// Returns the double-submit CSRF token from the `__Host-cf-csrf` cookie.
+fn csrf_cookie_token() -> Option<String> {
+    let document = web_sys::window()?.document()?;
+    let cookies = js_sys::Reflect::get(&document, &wasm_bindgen::JsValue::from_str("cookie"))
+        .ok()?
+        .as_string()?;
+    cookies
+        .split(';')
+        .find_map(|cookie| cookie.trim().strip_prefix("__Host-cf-csrf="))
+        .map(str::to_owned)
+}
+
+/// Rows that a CVE export request covers.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CveExportTarget {
+    /// The server-filtered result (`GET /cves/export`).
+    Filters(CveFilters),
+    /// Exactly these `(cve_id, canonical_package_name)` pairs
+    /// (`POST /cves/export`). A POST body holds a selection of any size.
+    Pairs(Vec<(String, String)>),
+}
+
+/// Downloads a CVE export of `target` and saves it as `filename`.
+///
+/// The request runs with the session cookie; a selected-pair export also sends
+/// the CSRF token, as every browser POST does. The browser saves the file only
+/// after a successful response, so a rejected export (for example `422` when
+/// the result exceeds the server row limit) leaves the page in place.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError::Status`] with the server message for a non-2xx
+/// response, or [`ApiClientError::Network`] when the request or the browser
+/// download fails.
+pub async fn download_cve_export(
+    target: &CveExportTarget,
+    format: &str,
+    filename: &str,
+) -> Result<(), ApiClientError> {
+    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen_futures::JsFuture;
+
+    let network = |e: JsValue| ApiClientError::Network(format!("{e:?}"));
+    let window = web_sys::window().ok_or_else(|| ApiClientError::Network("no window".into()))?;
+    let opts = web_sys::RequestInit::new();
+    let _ = js_sys::Reflect::set(
+        opts.as_ref(),
+        &JsValue::from_str("credentials"),
+        &JsValue::from_str("include"),
+    );
+    let url = match target {
+        CveExportTarget::Filters(filters) => {
+            opts.set_method("GET");
+            cve_export_url(filters, format)
+        }
+        CveExportTarget::Pairs(pairs) => {
+            let pairs: Vec<_> = pairs
+                .iter()
+                .map(|(cve_id, package)| {
+                    serde_json::json!({"cve_id": cve_id, "canonical_package_name": package})
+                })
+                .collect();
+            opts.set_method("POST");
+            opts.set_body(&JsValue::from_str(
+                &serde_json::json!({ "pairs": pairs }).to_string(),
+            ));
+            format!(
+                "{}/cves/export?format={}",
+                base_url(),
+                encode_query_value(format)
+            )
+        }
+    };
+    let request = web_sys::Request::new_with_str_and_init(&url, &opts).map_err(network)?;
+    if matches!(target, CveExportTarget::Pairs(_)) {
+        request
+            .headers()
+            .set("Content-Type", "application/json")
+            .map_err(network)?;
+        if let Some(token) = csrf_cookie_token() {
+            request
+                .headers()
+                .set("X-CSRF-Token", &token)
+                .map_err(network)?;
+        }
     }
-
-    // Trigger browser download by setting window.location
-    let window = web_sys::window().expect("no window");
-    window
-        .location()
-        .set_href(&url)
-        .map_err(|_| ApiClientError::Network("Failed to trigger download".to_string()))?;
-
+    let response: web_sys::Response = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(network)?
+        .dyn_into()
+        .map_err(|_| ApiClientError::Network("response is not a Response".into()))?;
+    if !response.ok() {
+        let body = JsFuture::from(response.text().map_err(network)?)
+            .await
+            .map_err(network)?
+            .as_string()
+            .unwrap_or_default();
+        return Err(ApiClientError::Status {
+            code: response.status(),
+            body: decode_api_error_message(&body),
+        });
+    }
+    let blob: web_sys::Blob = JsFuture::from(response.blob().map_err(network)?)
+        .await
+        .map_err(network)?
+        .dyn_into()
+        .map_err(|_| ApiClientError::Network("response body is not a Blob".into()))?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(network)?;
+    let document = window
+        .document()
+        .ok_or_else(|| ApiClientError::Network("no document".into()))?;
+    let anchor: web_sys::HtmlAnchorElement = document
+        .create_element("a")
+        .map_err(network)?
+        .dyn_into()
+        .map_err(|_| ApiClientError::Network("anchor creation failed".into()))?;
+    anchor.set_href(&url);
+    anchor.set_download(filename);
+    let _ = anchor.set_attribute("style", "display:none");
+    // COMPATIBILITY: Firefox ignores `click()` on an anchor that is not in the
+    // document, so attach it for the click and remove it afterwards.
+    let body = document
+        .body()
+        .ok_or_else(|| ApiClientError::Network("no document body".into()))?;
+    body.append_child(&anchor).map_err(network)?;
+    anchor.click();
+    let _ = body.remove_child(&anchor);
+    // The browser reads the blob URL asynchronously after `click()`. Revoking
+    // it synchronously can cancel the download, so release it after a delay
+    // that is far longer than the time a browser needs to start a download.
+    wasm_bindgen_futures::spawn_local(async move {
+        gloo_timers::future::TimeoutFuture::new(OBJECT_URL_REVOKE_DELAY_MS).await;
+        let _ = web_sys::Url::revoke_object_url(&url);
+    });
     Ok(())
 }
+
+/// Delay before an export object URL is revoked (60 s).
+const OBJECT_URL_REVOKE_DELAY_MS: u32 = 60_000;
 
 /// Fetch a paginated list of systems.
 pub async fn fetch_systems(

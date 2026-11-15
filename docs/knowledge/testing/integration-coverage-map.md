@@ -1033,11 +1033,14 @@ framework, baseline, mock backend data or placeholder image is introduced here.
 - State/actor: Admin, exact affected Current. Reference
   `6e4ea520:SystemDetail.jsx::CvesTab`, lines 1716–1733, 1763–1770 and batch
   modal block at 1852 specifies quick picks, package multi-selection and batch
-  triage. Actual `components/cve/mod.rs::CvesTab` implements package disclosure
-  and single triage only. Fleet `views/cves.rs::CveBatchTriageDialog` exists;
-  its existence does not supply the System controls or passing batch integration.
+  triage. TASK-521 implements the SELECT chips (Critical, High, Patchable,
+  Outstanding), Ctrl/Cmd-click row and package selection, the bulk bar, and
+  `components/cve/system_batch.rs::SystemCveBatchTriageDialog` (host scope only,
+  owner decision 2026-11-13) over `POST /systems/:id/cves/batch-triage`. Service
+  and HTTP DB tests cover host-only writes, skips, CSRF, role, and hidden-system
+  denial. No browser integration result exists yet.
 - Category: interaction, missing section. Impact: high functional coverage gap.
-  Disposition: `unresolvedProductBlocker` for the absent System interaction;
+  Disposition: implementation present; browser integration evidence missing;
   fleet batch/unselected-set integration remains unverified, not a proven defect.
 - Evidence: C `browser/cve/cve-current-vulnerable.png` dark desktop, plus
   `browser/triage-create/result.json` proves only single-host creation/reopen.
@@ -1905,7 +1908,7 @@ This table is a complete family-level discovery index for S-router, not a per-en
 | `GET,POST /caches`; `GET,PUT,DELETE /caches/:id`; `GET,PUT /caches/:id/environments`; `GET /caches/:id/metrics`; `POST /caches/test-credentials`, `/caches/:id/test-credentials`, `/caches/niks3/discover`, `/caches/:id/niks3/discover`, alias `/api/caches/niks3/discover` | `caches.rs` and `caches/*.rs`; Admin mutation/probe gates, sanitized reads and in-memory secret merge. Probe's supplied CSRF state must match; no assumption of generic mutation semantics. | `access.configuration`, `delivery.publication` |
 | `GET /cache-push-jobs`, `/cache-push-jobs/:id`; `POST /cache-push-jobs/:id/{retry,cancel}`, `/cache-push-jobs/{bulk-retry,bulk-cancel}` | `caches.rs`; queue controls and authorization, per-destination publication state. | `delivery.publication` |
 | `GET /cves`, `/cves/{grouped,inventory/groups,inventory/members,inventory/pairs,stats,packages,export,summary,vulnerabilities,top-systems,scan-freshness}`; `GET /cves/:cve_id{,/systems,/fleet,/justifications}`; `POST /cves/{rescan-fleet,rescan/:derivation_id,batch-detail,batch-triage}`, `/cves/:cve_id/triage`; `POST,DELETE /cves/:cve_id/justification` | `cves.rs`, `dashboard.rs`, `poam.rs`; fleet authorization is separate from system-target authorization; triage actor scope and CSRF. | `assurance.scanning`, `assurance.remediation`, `assurance.interchange` |
-| `GET /systems/:id/{cves,cve-inventory,cve-inventory-page,cve-inventory-sources,cve-scan-eligibility}`; `PUT /systems/:id/cves/:cve_id/justification`; `GET,POST /systems/:id/cves/:cve_id/triage`; `POST /systems/:id/cve-scan`, `/flakes/:id/configs/:config_name/cve-scan`; `GET /cve-scans/:id` | `systems.rs`, `flakes.rs`, `poam.rs`; authorize system/target before source disclosure, scoped mutation and Current evidence authority. | `assurance.scanning`, `assurance.remediation` |
+| `GET /systems/:id/{cves,cve-inventory,cve-inventory-page,cve-inventory-sources,cve-scan-eligibility}`; `PUT /systems/:id/cves/:cve_id/justification`; `GET,POST /systems/:id/cves/:cve_id/triage`; `POST /systems/:id/cves/batch-triage`; `POST /systems/:id/cve-scan`, `/flakes/:id/configs/:config_name/cve-scan`; `GET /cve-scans/:id` | `systems.rs`, `flakes.rs`, `poam.rs`; authorize system/target before source disclosure, scoped mutation and Current evidence authority. | `assurance.scanning`, `assurance.remediation` |
 | `GET /scanning/{stats,queue,scans,scans/:scan_id,systems,systems/:system_id/scans,activity,schedule,deployed}`; `PATCH /scanning/scans`; `PUT /scanning/schedule`; `POST /builders/:id/cve-scans/{claim,heartbeat,complete,fail}` | `scanning.rs` Admin console; `builders.rs` signed lease-bound scanner operations with payload limits. | `assurance.scanning` |
 | `GET /hardening/{summary,top-services,systems}`; `GET /systems/:id/{hardening,hardening-inventory,hardening/justifications,hardening-scan-eligibility}`; `PUT /systems/:id/hardening/:service_name/justification`; `POST /systems/:id/hardening-scan`; `GET /hardening-scans/:id` | `hardening.rs`; Admin fleet summaries, scoped system/target reads and justified writes. | `assurance.scanning` |
 | `GET,POST /deployment-policies`; `GET,PUT,DELETE /deployment-policies/:id`; `GET /deployment-policies/:id/deletion-eligibility`; `POST /deployment-policies/bulk-delete`; `POST /deployments/commit/:commit_id/approve`; `GET /deployments/commit/:commit_id/{approvals,rollout}/:policy_id` | `deployment_policies.rs`, `deployments.rs`; Auth read, Operator edit/create, Admin deletion, configured approval role. | `assurance.policy`; rollout execution `delivery.activation` |

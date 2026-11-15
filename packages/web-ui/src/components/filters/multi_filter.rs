@@ -12,6 +12,9 @@ pub struct FilterOption {
     pub label: String,
     /// Optional resource count shown beside the option.
     pub count: Option<usize>,
+    /// Optional CSS color of a dot shown before the label (design
+    /// `MgmtParts.jsx` `MultiFilter` option `dot`).
+    pub dot: Option<String>,
 }
 
 /// Returns the button text for a selection: `all_label` when nothing is
@@ -125,8 +128,12 @@ pub fn MultiFilter(
                                 label { key: "{option.value}", class: "mf-opt",
                                     input {
                                         r#type: "checkbox",
+                                        value: "{option.value}",
                                         checked,
                                         onchange: move |_| on_change.call(next.clone()),
+                                    }
+                                    if let Some(dot) = &option.dot {
+                                        span { class: "chip-dot", style: "background: {dot};" }
                                     }
                                     span { class: "mf-opt-label", "{option.label}" }
                                     if let Some(count) = option.count {
@@ -153,6 +160,7 @@ mod tests {
                 value: v.into(),
                 label: v.to_uppercase(),
                 count: None,
+                dot: None,
             })
             .collect()
     }

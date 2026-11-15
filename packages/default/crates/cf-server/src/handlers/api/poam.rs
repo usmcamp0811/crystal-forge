@@ -708,6 +708,39 @@ pub async fn triage_fleet_cves_batch(
     }
 }
 
+/// Applies one atomic host-override decision to many CVE pairs on one system.
+///
+/// The body names only CVE/package pairs; the system comes from the path. The
+/// handler enforces CSRF before the service validates authorization and
+/// current exact evidence.
+pub async fn triage_system_cves_batch(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<crate::api::models::SystemCveBatchTriageRequest>, JsonRejection>,
+) -> Response {
+    let system_id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(response) = csrf(&headers) {
+        return response;
+    }
+    let body = match json_body(body, "Malformed system CVE batch triage request") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match poam::triage_system_cves_batch(&pool, &actor, system_id, body, &SystemClock).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
 /// Returns host and environment triage state for one System Detail CVE row.
 ///
 /// The service derives the selected hostname, current environment, exact

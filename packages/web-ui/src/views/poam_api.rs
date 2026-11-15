@@ -451,6 +451,20 @@ pub struct FleetCveBatchTriageRequest {
     pub disposition: CveBatchDisposition,
 }
 
+/// Requests one atomic host-override decision for exact pairs on one system.
+///
+/// The system comes from the request path. The server writes only that host's
+/// overrides and never the environment default.
+#[derive(Debug, Clone, Serialize)]
+pub struct SystemCveBatchTriageRequest {
+    /// Lists all exact selected pairs on the system.
+    pub pairs: Vec<CveBatchPairIdentity>,
+    /// Leaves existing accepted host decisions unchanged when true.
+    pub skip_existing: bool,
+    /// Selects the shared action.
+    pub disposition: CveBatchDisposition,
+}
+
 /// Reports one exact pair actually changed by the transaction.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CveBatchAppliedPair {
@@ -2303,6 +2317,24 @@ pub async fn triage_fleet_cve_batch(
     request(
         "POST",
         &format!("{}/cves/batch-triage", base_url()),
+        Some(body),
+    )
+    .await
+}
+
+/// Commits one atomic batch of host-override decisions on one system.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] on changed evidence, authorization, validation,
+/// transport, or decode failure. No per-item browser retries occur.
+pub async fn triage_system_cve_batch(
+    system_id: Uuid,
+    body: &SystemCveBatchTriageRequest,
+) -> Result<FleetCveBatchTriageResponse, PoamApiError> {
+    request(
+        "POST",
+        &format!("{}/systems/{system_id}/cves/batch-triage", base_url()),
         Some(body),
     )
     .await
