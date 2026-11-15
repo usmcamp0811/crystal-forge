@@ -4987,10 +4987,11 @@ fn DeployTab(
     };
 
     // Pre-compute values for the plan panel (outside rsx! to avoid borrow issues)
-    let from_commit = system
-        .flake
-        .as_ref()
-        .and_then(|f| f.latest_commit.clone())
+    // "From" is the commit the host runs (design `bd8d068d`), not the newest
+    // commit of the flake.
+    let from_commit = running_index
+        .and_then(|index| lane_commits.get(index))
+        .map(|commit| commit.sha.clone())
         .unwrap_or_else(|| "unknown".to_string());
     let from_short = from_commit.chars().take(7).collect::<String>();
 
