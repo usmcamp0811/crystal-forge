@@ -1,9 +1,10 @@
 ---
 id: TASK-525.1
 title: Deploy tab flake-position lane, target picker, and flake-position API
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-15T16:11:00Z'
+updated_date: '2026-11-15T16:11:00Z'
 labels:
   - web-ui
   - server
@@ -130,3 +131,9 @@ None blocking. TASK-449 and TASK-415 extend this UI later.
 - [ ] #15 Integration: the Delivery delivery-lifecycle activation fragment asserts the Deploy tab card and picker in the behind, deploying, and activated states. The Assurance configuration-assurance fragment asserts the External/Reference overview card, including the removed configuration. Both pass at the review revision, with dark and light screenshots attached to the MR.
 - [ ] #16 The docs/knowledge deployment-progress spec, the systems API concept (new endpoint contract), and the integration coverage map are updated. nix build .#okf-knowledge -L passes.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-opus-5-5 on vm-agent in /home/mcamp/code/crystal-forge/TASK-525-deploy-tab-flake-position
+<!-- SECTION:NOTES:END -->
