@@ -30,12 +30,13 @@ use crate::api::client::{
     ApiClientError, fetch_compliance_system_evidence, fetch_flake_timeline_for_tray,
     fetch_system_assignments, fetch_system_compliance_bundles,
     fetch_system_cve_inventory_candidates, fetch_system_cve_inventory_for_target,
-    fetch_system_cve_scan_eligibility, fetch_system_evaluated_options, fetch_system_flake_position,
+    fetch_system_cve_scan_eligibility, fetch_system_evaluated_options,
     fetch_system_evaluation_module_sources, fetch_system_evaluation_summary,
-    fetch_system_hardening_inventory_for_target, fetch_system_hardening_justifications,
-    fetch_system_hardening_scan_eligibility, get_system_deployment_progress,
-    queue_system_config_inspection, request_system_generation_rollback, request_system_rollback,
-    request_system_sync, save_system_hardening_justification, trigger_system_hardening_scan,
+    fetch_system_flake_position, fetch_system_hardening_inventory_for_target,
+    fetch_system_hardening_justifications, fetch_system_hardening_scan_eligibility,
+    get_system_deployment_progress, queue_system_config_inspection,
+    request_system_generation_rollback, request_system_rollback, request_system_sync,
+    save_system_hardening_justification, trigger_system_hardening_scan,
     verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
@@ -53,8 +54,7 @@ use crate::api::models::{
     SystemComplianceBundle, SystemCveCurrentAuthorityState, SystemCveEvidenceRepresentation,
     SystemCveInventoryAuthority, SystemCveInventoryCandidate, SystemCveInventoryPageResponse,
     SystemCveInventorySelection, SystemCveRunningTarget, SystemDeploymentProgress, SystemDetail,
-    SystemFlakePosition,
-    SystemGeneration, SystemHardeningInventoryAttemptResponse,
+    SystemFlakePosition, SystemGeneration, SystemHardeningInventoryAttemptResponse,
     SystemHardeningInventorySourceResponse, SystemHistoryEntry, SystemRollbackGenerationRequest,
     SystemRollbackRequest, TrackedFlakeIdentity, TypedOptionDiff, VerifyGenerationClosureRequest,
 };
@@ -4979,7 +4979,9 @@ fn DeployTab(
             .as_ref()
             .and_then(|generation| generation.commit_hash.clone())
     } else {
-        selected_commit_data.as_ref().map(|commit| commit.hash.clone())
+        selected_commit_data
+            .as_ref()
+            .map(|commit| commit.hash.clone())
     };
 
     // Pre-compute values for the plan panel (outside rsx! to avoid borrow issues)

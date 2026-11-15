@@ -46,9 +46,10 @@ pub(super) fn ManagementDetail(
         let _ = refresh();
         async move { client::fetch_configuration_assurance(&system_id).await }
     });
-    let flake_position = use_resource(move || async move {
-        client::fetch_system_flake_position(&system_id).await.ok()
-    });
+    let flake_position =
+        use_resource(
+            move || async move { client::fetch_system_flake_position(&system_id).await.ok() },
+        );
     let mut schedule = use_resource(client::fetch_scanning_schedule);
     let scans = use_resource(move || {
         let _ = refresh();
