@@ -162,7 +162,12 @@ async function run(ctx, phase) {
       await page.locator(".mf-menu .mf-opt").filter({ hasText: severity }).locator("input").check();
     }
     await expect(page).toHaveURL(/severity=critical(%2C|,)high(%2C|,)medium(%2C|,)low/);
-    await page.locator(".mf-backdrop").click();
+    // The backdrop covers the viewport and the open menu is drawn above it, so
+    // its centre can land on a menu option. Click the far corner, which no menu
+    // covers, the way a user dismisses a menu by clicking elsewhere.
+    const { width, height } = page.viewportSize();
+    await page.locator(".mf-backdrop").click({ position: { x: width - 8, y: height - 8 } });
+    await expect(page.locator(".mf-menu")).toHaveCount(0);
     await exportButton.click();
     expect(await scopeCount("Filtered")).toBe(count);
     expect(await scopeCount("All")).toBe(count);

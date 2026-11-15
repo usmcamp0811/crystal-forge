@@ -876,6 +876,14 @@ const VIEWPORTS = {
   mobile: { width: 375, height: 812 },
 };
 
+// A menu backdrop covers the viewport and its open menu is drawn above it, so
+// the backdrop centre can land on a menu option. Click the far corner, which
+// no menu covers, the way a user dismisses a menu by clicking elsewhere.
+async function clickBackdropCorner(page, selector) {
+  const { width, height } = page.viewportSize();
+  await page.locator(selector).click({ position: { x: width - 8, y: height - 8 } });
+}
+
 // CVEs view controls from design 18404419. Each MultiFilter is a dropdown
 // of checkboxes whose `value` is the API filter value. `cveFilter` sets the
 // exact checked set (empty clears the filter) and closes the menu.
@@ -886,7 +894,7 @@ async function cveFilter(page, label, values) {
     const want = values.includes(await box.getAttribute("value"));
     if ((await box.isChecked()) !== want) await box.click();
   }
-  await page.locator(".mf-backdrop").click();
+  await clickBackdropCorner(page, ".mf-backdrop");
 }
 
 // Group and Sort are labelled selects in the filter bar.
@@ -14917,13 +14925,13 @@ const steps = [
         await assertHidden(menu, "Activating the trigger again must close the export menu");
         await trigger.click();
         await assertVisible(menu, "Export menu must open before the backdrop check");
-        await backdrop.click();
+        await clickBackdropCorner(page, ".rr-export-backdrop");
         await assertHidden(menu, "A backdrop click must close the export menu");
         await assertCount(backdrop, 0, "Backdrop click must remove the backdrop");
         // Unobstructed: the next real filter click works with no forced click.
         await page.getByRole("button", { name: "Severity filter", exact: true }).click();
         await assertVisible(page.locator(".mf-menu"), "Severity filter must open once the export menu has closed");
-        await page.locator(".mf-backdrop").click();
+        await clickBackdropCorner(page, ".mf-backdrop");
       }
       const csvDownloadPromise = page.waitForEvent("download");
       await page.locator(".cve-export > button").click();
@@ -14995,7 +15003,7 @@ const steps = [
       await page.locator(".cve-export > button").click();
       await assertVisible(page.locator('.cve-exp-scope[data-scope="Filtered"]').getByText(/Env: /), "Environment-scoped export must name its environment scope");
       await assertEnabled(page.getByRole("menuitem", { name: /CSV/ }), "Environment-scoped CSV export must be available");
-      await page.locator(".rr-export-backdrop").click();
+      await clickBackdropCorner(page, ".rr-export-backdrop");
       await cveFilter(page, "Environment", []);
       // Flat mode still opens the same exact fleet drawer and retains inventory-only semantics.
       await cveViewOption(page, "Group", "flat");
