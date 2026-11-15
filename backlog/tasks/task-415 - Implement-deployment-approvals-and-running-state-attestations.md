@@ -5,8 +5,8 @@ title: >-
   attention UX
 status: To Do
 assignee: []
-created_date: '2026-08-01 10:07'
-updated_date: '2026-09-07 01:27'
+created_date: 2026-08-01 10:07
+updated_date: '2026-11-15T16:11:00Z'
 labels:
   - design
   - backend
@@ -2847,4 +2847,6 @@ SECTION:DESCRIPTION:END
 
 <!-- SECTION:NOTES:BEGIN -->
 Backlog grooming (2026-09-06): Found In Progress with no active lock and no worktree. A remote branch origin/TASK-415-deployment-approvals-attestations exists but was never opened as an MR. Returned to To Do; the orphaned branch was left untouched in case its content is still wanted for the next attempt.
+
+Design update in dev commit bd8d068d (tracked by parent TASK-525): the separate Deploy-tab alert card is removed. A pending approval now appears as an sd-appr-row (count, policy, requester, Review) in the plan panel above the compact gate when the selected commit is the approval commit, as an 'approval n/m' tag on the matching DeployTargetPicker row and lane node, and the attestation decision appears as an fp-attest chip with a Decide button in the flake-position card (FlakePosition.jsx). TASK-525.1 builds those surfaces without placeholders.
 <!-- SECTION:NOTES:END -->
