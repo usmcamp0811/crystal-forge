@@ -4882,9 +4882,11 @@ fn DeployTab(
 
     // INVARIANT: The lane, the picker, and the plan panel use one commit list,
     // so a commit selected in one of them exists in the others.
+    // A successful read is authoritative, including `no_history`; the
+    // `/commits` fallback applies only when the read itself failed.
     let lane = match flake_position.as_ref() {
-        Some(position) if !position.commits.is_empty() => LaneModel::managed(position),
-        _ => lane_from_commit_history(&commits, &flake_name),
+        Some(position) => LaneModel::managed(position),
+        None => lane_from_commit_history(&commits, &flake_name),
     };
     let lane_commits = lane.commits.clone();
     let running_index = lane.at;
