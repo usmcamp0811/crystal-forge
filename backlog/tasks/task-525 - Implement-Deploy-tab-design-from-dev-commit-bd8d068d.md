@@ -8,7 +8,10 @@ labels:
   - web-ui
   - deployments
   - design-parity
-dependencies: []
+dependencies:
+  - TASK-525.1
+  - TASK-449
+  - TASK-415
 references:
   - commit:bd8d068dc287d222baeea9c7336363a03da55371
 documentation:
