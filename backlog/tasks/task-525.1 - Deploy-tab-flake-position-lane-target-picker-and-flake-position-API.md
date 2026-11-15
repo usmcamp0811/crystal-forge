@@ -4,7 +4,7 @@ title: Deploy tab flake-position lane, target picker, and flake-position API
 status: In Progress
 assignee: []
 created_date: '2026-11-15T16:11:00Z'
-updated_date: '2026-11-15T16:11:00Z'
+updated_date: '2026-11-15T22:31:00Z'
 labels:
   - web-ui
   - server
@@ -136,4 +136,11 @@ None blocking. TASK-449 and TASK-415 extend this UI later.
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: claude-opus-5-5 on vm-agent in /home/mcamp/code/crystal-forge/TASK-525-deploy-tab-flake-position
+
+Progress 2026-11-15 (branch TASK-525-deploy-tab-flake-position, pushed via altssh.gitlab.com:443 because port 22 times out):
+- Implemented: GET /api/v1/systems/:id/flake-position (queries/flake_position.rs), FlakePositionCard + DeployTargetPicker components, compact gate in the plan panel, banner hidden on the Deploy tab, External/Reference overview card, CSS port, docs (systems-api, deployment-progress spec, coverage map), Delivery/Assurance browser fragment assertions.
+- AC #1 deviation: unknown reasons are no_history, not_observed, untracked, off_branch, beyond_window. configuration_removed is derived in the UI from configuration-assurance availability=removed, because the server already owns that signal there. The response also has last_tracked_position (newest commit the host has run) for the 'last tracked' marker.
+- AC #9 note: the U connector uses CSS percentages from equal grid tracks instead of runtime DOM measurement; the same-commit case uses the same U, not the design SVG loop. Copying stage remains with TASK-449.
+- Verified: farm .#packages.x86_64-linux.web-ui EXIT 0 (includes 16 new/affected unit tests). Farm cf-server/cf-server-core checkPhase: new flake_position unit tests pass; build fails on 15 unrelated parser-timeout tests (TASK-526). Endpoint verified against the task-owned preview DB: 403 unauthenticated, 404 missing, behind/head/untracked/no_history states, peers. Browser (Playwright, farm-built embedded-UI server): lane/picker/plan selection sync, gate present, banner absent, no page errors. Fixed: default selection now follows the running commit after load.
+- Not yet run: isolated-DB tests tests/flake_position.rs (#[ignore], needs a disposable DATABASE_URL), integration-delivery and integration-assurance owners, MR screenshots. Ruled out: local cargo builds (farm-only per AGENTS.md).
 <!-- SECTION:NOTES:END -->
