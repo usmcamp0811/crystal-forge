@@ -31,6 +31,38 @@ const UNKNOWN_LANE_COMMITS: usize = 6;
 /// horizontal scrolling at the default card width.
 const LANE_COLLAPSE_DISTANCE: usize = 9;
 
+/// Fixed height of the commit row in deploy mode, in pixels.
+///
+/// INVARIANT: The row holds the 48px pin area, the 20px rail, the SHA label,
+/// and an optional peers pill. A fixed height puts every commit dot at a known
+/// offset from the stage row, so the connector needs no DOM measurement. Keep
+/// it in sync with `.fp-deploying .fp-node .fp-top` and `.fp-rail` in app.css.
+const DEPLOY_LANE_ROW_PX: i32 = 104;
+
+/// Gap between the commit row and the stage row in deploy mode, in pixels.
+const DEPLOY_ROW_GAP_PX: i32 = 14;
+
+/// Vertical center of a commit dot inside the commit row: the 48px pin area
+/// plus half of the 20px rail.
+const DOT_CENTER_PX: i32 = 58;
+
+/// Vertical center of the stage dots inside the stage row: half of the 20px
+/// stage rail.
+const STAGE_CENTER_PX: i32 = 10;
+
+/// Offset of a commit dot center from the top of the stage row (negative:
+/// above it).
+const DOT_FROM_STAGE_ROW_PX: i32 = DOT_CENTER_PX - (DEPLOY_LANE_ROW_PX + DEPLOY_ROW_GAP_PX);
+
+/// SVG path for a same-commit redeploy, in a 600-unit-wide viewBox.
+///
+/// The branch spans three equal columns, so the shared commit sits at x=300
+/// and the neighboring column centers at x=100 and x=500. The path leaves the
+/// left side of the dot, drops to the stage row (y=70), and returns to the
+/// right side of the dot, as in the design's `fp-uloop`.
+const SAME_COMMIT_LOOP_PATH: &str = "M 288 0 C 254 0 100 12 100 35 L 100 58 Q 100 70 112 70 \
+     L 488 70 Q 500 70 500 58 L 500 35 C 500 12 346 0 312 0";
+
 /// Why the card cannot place the system on its tracked branch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaneUnknown {
@@ -584,7 +616,7 @@ pub fn FlakePositionCard(
             .collect::<Vec<_>>()
             .join(" ");
         format!(
-            "display:grid;grid-template-columns:{template};grid-template-rows:auto auto;row-gap:14px;align-items:start;"
+            "display:grid;grid-template-columns:{template};grid-template-rows:{DEPLOY_LANE_ROW_PX}px auto;row-gap:{DEPLOY_ROW_GAP_PX}px;align-items:start;"
         )
     });
 
@@ -897,12 +929,27 @@ pub fn FlakePositionCard(
                                 if view.rollback { " rb" } else { "" },
                             );
                             let has_connector = target_col.is_some() && source_col.is_some();
+                            // The U starts 2px below the larger (16px) target dot.
+                            let u_top = DOT_FROM_STAGE_ROW_PX + 8 + 2;
+                            let u_height = STAGE_CENTER_PX - u_top;
+                            let loop_height = STAGE_CENTER_PX - DOT_FROM_STAGE_ROW_PX + 2;
                             rsx! {
                                 div {
                                     class: "{branch_class}",
                                     style: "grid-row:2;grid-column:{b0 + 1} / {b1 + 2};",
-                                    if has_connector {
-                                        span { class: "fp-u", style: "left:{edge};right:{edge};top:-34px;height:44px;" }
+                                    if has_connector && same {
+                                        // A redeploy of the running commit loops
+                                        // out of that commit's dot and back.
+                                        svg {
+                                            class: "fp-uloop",
+                                            style: "top:{DOT_FROM_STAGE_ROW_PX}px;width:100%;height:{loop_height}px;",
+                                            "viewBox": "0 0 600 {loop_height}",
+                                            "preserveAspectRatio": "none",
+                                            "aria-hidden": "true",
+                                            path { d: SAME_COMMIT_LOOP_PATH, "vector-effect": "non-scaling-stroke" }
+                                        }
+                                    } else if has_connector {
+                                        span { class: "fp-u", style: "left:{edge};right:{edge};top:{u_top}px;height:{u_height}px;" }
                                     }
                                     div {
                                         class: "fp-branch-row",
@@ -1112,6 +1159,15 @@ mod tests {
         let removed = LaneModel::evidence(&position, Some(&sha), true);
         assert_eq!(removed.at, None);
         assert_eq!(removed.unknown, Some(LaneUnknown::ConfigurationRemoved));
+    }
+
+    #[test]
+    fn same_commit_loop_reaches_the_stage_row() {
+        // The loop starts at the dot center and its lowest point (y=70 in the
+        // path) must sit on the stage rail center.
+        assert_eq!(DOT_FROM_STAGE_ROW_PX, -60);
+        assert_eq!(STAGE_CENTER_PX - DOT_FROM_STAGE_ROW_PX, 70);
+        assert!(SAME_COMMIT_LOOP_PATH.contains("Q 100 70 112 70"));
     }
 
     #[test]
