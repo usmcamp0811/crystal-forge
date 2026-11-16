@@ -77,6 +77,10 @@ progress record in deploy mode instead:
   `was here` until activation.
 - A stage row under the lane connects the running commit to the target.
 
+`GET /systems/:id/deployment-status` returns a succeeded deployment for 30
+seconds after completion and a failed deployment for 2 minutes. The lane and the
+banner have an X that hides the finished deployment until the page reloads.
+
 The banner and the lane read one stage list (`DEPLOY_STAGES` in
 `pending_deploy_banner.rs`) and one subtext function. The other System Detail
 tabs keep the banner. The `copying` stage is not part of the list until

@@ -334,3 +334,43 @@ async fn deployment_progress_labels_the_requested_or_newest_commit(pool: PgPool)
         "the requested commit wins"
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires an explicitly verified disposable DATABASE_URL"]
+async fn finished_deployment_visibility_window(pool: PgPool) {
+    use crystal_forge::queries::system_events::get_system_deployment_progress_row;
+    let fleet = fleet(&pool, true).await;
+    let subject = system(&pool, &fleet, "lane-window", fleet.env_a, Some(2)).await;
+    let finish = |status: &'static str, age_secs: i32| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("DELETE FROM pending_system_deployments WHERE system_id=$1")
+                .bind(subject)
+                .execute(&pool)
+                .await
+                .expect("clear");
+            sqlx::query(
+                "INSERT INTO pending_system_deployments(system_id,target_store_path,status,source,issued_at,expires_at,completed_at) \
+                 VALUES($1,'/nix/store/lane-window-2',$2,'manual',now() - interval '10 minutes',now() + interval '2 hours', \
+                        now() - make_interval(secs => $3))",
+            )
+            .bind(subject)
+            .bind(status)
+            .bind(age_secs)
+            .execute(&pool)
+            .await
+            .expect("insert");
+            get_system_deployment_progress_row(&pool, subject)
+                .await
+                .expect("read")
+                .is_some()
+        }
+    };
+    assert!(finish("succeeded", 10).await, "fresh success is shown");
+    assert!(
+        !finish("succeeded", 60).await,
+        "success older than 30 s is hidden"
+    );
+    assert!(finish("failed", 60).await, "failure stays for 2 minutes");
+    assert!(!finish("failed", 300).await, "old failure is hidden");
+}

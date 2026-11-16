@@ -588,7 +588,10 @@ pub async fn get_system_deployment_progress_row(
         WHERE psd.system_id = $1
           AND (
             (psd.status = 'pending' AND psd.expires_at > NOW())
-            OR (psd.status IN ('succeeded', 'failed') AND psd.completed_at > NOW() - INTERVAL '2 minutes')
+            -- A success is shown briefly (30 s, long enough for the operator to see
+            -- Activated). A failure stays 2 min so that the message can be read.
+            OR (psd.status = 'succeeded' AND psd.completed_at > NOW() - INTERVAL '30 seconds')
+            OR (psd.status = 'failed' AND psd.completed_at > NOW() - INTERVAL '2 minutes')
           )
         ORDER BY
           CASE WHEN psd.status = 'pending' THEN 0 ELSE 1 END,

@@ -1544,6 +1544,9 @@ pub fn SystemDetailView(
     });
 
     let mut deployment_progress_poll_tick = use_signal(|| 0_u64);
+    // Deployment the operator dismissed with the X. The server keeps returning a
+    // finished record for a short window, so a dismissal must be remembered here.
+    let mut dismissed_deployment: Signal<Option<Uuid>> = use_signal(|| None);
     let id_for_deployment_progress = id.clone();
     let deployment_progress_tick_for_resource = deployment_progress_poll_tick.clone();
     let deployment_progress_resource = use_resource(move || {
@@ -1865,7 +1868,9 @@ pub fn SystemDetailView(
     let deployment_progress = deployment_progress_resource
         .read_unchecked()
         .clone()
-        .flatten();
+        .flatten()
+        .filter(|progress| *dismissed_deployment.read() != Some(progress.id));
+    let current_deployment_id = deployment_progress.as_ref().map(|progress| progress.id);
     let history_commit_history = map_history_entries_to_commit_history(&history_entries);
     let commits_response = commits_resource.read_unchecked().clone().flatten();
     let flake_position = flake_position_resource.read_unchecked().clone().flatten();
@@ -2393,7 +2398,7 @@ pub fn SystemDetailView(
                         system.effective_heartbeat_interval_secs as f64
                             - now.signed_duration_since(dt).num_seconds() as f64
                     }),
-                    on_dismiss: move |_| deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1),
+                    on_dismiss: move |_| dismissed_deployment.set(current_deployment_id),
                     on_view_logs: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::Logs, true),
                 }
             }
@@ -2499,7 +2504,7 @@ pub fn SystemDetailView(
                             }),
                             on_view_logs: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::Logs, true),
                             on_view_history: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::History, true),
-                            on_dismiss_deploy: move |_| deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1),
+                            on_dismiss_deploy: move |_| dismissed_deployment.set(current_deployment_id),
                             generations: generations_result.generations.clone(),
                             current_generation: generations_result.current_generation,
                             initial_generation: navigation_state.read().deploy_generation,
