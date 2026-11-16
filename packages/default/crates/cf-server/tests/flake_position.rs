@@ -157,6 +157,15 @@ async fn behind_position_peers_and_build_state(pool: PgPool) {
     .execute(&pool)
     .await
     .expect("queued build");
+    // Commit 3: a success followed by a queued retry still reads as ready.
+    sqlx::query(
+        "INSERT INTO build_jobs(derivation_id,status) \
+         SELECT id, s FROM derivations, unnest(ARRAY['success','queued']) s \
+         WHERE derivation_name='lane-subject' AND derivation_path LIKE '%-3.drv'",
+    )
+    .execute(&pool)
+    .await
+    .expect("success then retry");
 
     let admin_view = fetch_system_flake_position(&pool, subject, None)
         .await
@@ -183,6 +192,10 @@ async fn behind_position_peers_and_build_state(pool: PgPool) {
     assert_eq!(
         admin_view.commits[1].build_state,
         FlakePositionBuildState::NotBuilt
+    );
+    assert_eq!(
+        admin_view.commits[3].build_state,
+        FlakePositionBuildState::Ready
     );
     assert_eq!(admin_view.commits[2].peers, vec!["lane-peer-a".to_string()]);
     assert_eq!(admin_view.commits[0].peers, vec!["lane-peer-b".to_string()]);

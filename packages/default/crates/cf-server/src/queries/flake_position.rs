@@ -293,12 +293,12 @@ pub async fn fetch_system_flake_position(
         FROM ordered o
         LEFT JOIN peers ON peers.sha = o.git_commit_hash
         LEFT JOIN LATERAL (
-          -- A finished success wins over an older failure, because a retry
-          -- that succeeded makes the closure available.
+          -- A finished success wins: the closure exists even when a retry or
+          -- requeue of the same derivation is queued or running afterwards.
           SELECT CASE
+            WHEN COUNT(*) FILTER (WHERE bj.status = 'success') > 0 THEN 'ready'
             WHEN COUNT(*) FILTER (WHERE bj.status IN ('queued', 'building', 'cancelling')) > 0
               THEN 'building'
-            WHEN COUNT(*) FILTER (WHERE bj.status = 'success') > 0 THEN 'ready'
             WHEN COUNT(*) FILTER (WHERE bj.status = 'failed') > 0 THEN 'failed'
             ELSE 'not_built'
           END AS build_state

@@ -4308,13 +4308,14 @@ pub struct FlakePositionCommit {
 /// Build state of one system configuration at one commit.
 ///
 /// The server derives the state from `build_jobs` of the `nixos` derivation
-/// whose name is the system configuration name. A queued or running job gives
-/// `building`. Otherwise a successful job gives `ready`, and a failed job gives
-/// `failed`. A commit without a build job gives `not_built`.
+/// whose name is the system configuration name. A successful job gives
+/// `ready`, even when a later retry is queued. Otherwise a queued or running
+/// job gives `building`, and a failed job gives `failed`. A commit without a
+/// build job gives `not_built`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlakePositionBuildState {
-    /// A build job is queued or running.
+    /// A build job is queued or running and none has succeeded.
     Building,
     /// A build job finished successfully.
     Ready,

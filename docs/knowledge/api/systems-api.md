@@ -240,9 +240,9 @@ commits after the running commit and never exceeds 500 commits. A running
 commit deeper than 500 commits returns `beyond_window`.
 
 `build_state` describes the `nixos` derivation whose name is the system
-configuration name: `building` for a queued or running build job, otherwise
-`ready` for a successful job, `failed` for failed jobs only, and `not_built`
-when no build job exists.
+configuration name: `ready` when any build job succeeded (even if a retry is
+queued later), otherwise `building` for a queued or running job, `failed` for
+failed jobs only, and `not_built` when no build job exists.
 
 `peers` lists other active systems on the same flake whose
 `view_system_deployment_status.current_commit_hash` equals the commit. For a
