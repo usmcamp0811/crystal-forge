@@ -9332,3 +9332,6 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
 .fp-branch.same .fp-branch-row{z-index:1}
 .fp-chip-spin{width:10px;height:10px;border-width:1.5px;vertical-align:-1px}
 .tp-empty{padding:16px;color:var(--cf-text-muted);font-size:13px}
+.sd-diff-head{font-size:12px;color:var(--cf-text-muted)}
+.sd-diff-note{padding:10px 12px;font-size:12px;color:var(--cf-text-muted);border:1px dashed var(--cf-divider);border-radius:8px}
+.sd-diff > div{padding:0;background:transparent;border-radius:0;overflow:visible}

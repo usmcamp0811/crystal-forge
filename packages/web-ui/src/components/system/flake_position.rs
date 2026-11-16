@@ -154,23 +154,24 @@ pub enum LaneNode {
 
 /// Returns the lane nodes from oldest to HEAD.
 ///
-/// The window always shows HEAD, the `at` commit, the `target` commit, and two
-/// older commits after the farthest of them. When the farthest of `at` and
-/// `target` is more than [`LANE_COLLAPSE_DISTANCE`] from HEAD, only the three
-/// newest commits and the neighbors of `at` and `target` are drawn, and the
+/// The window always shows HEAD, the `at` commit, every `targets` commit (the
+/// deploy target and the picked commit), and two older commits after the
+/// farthest of them. When the farthest of `at` and
+/// `targets` is more than [`LANE_COLLAPSE_DISTANCE`] from HEAD, only the three
+/// newest commits and the neighbors of `at` and `targets` are drawn, and the
 /// other commits collapse into [`LaneNode::Gap`] nodes.
-pub fn lane_window(len: usize, at: usize, target: Option<usize>) -> Vec<LaneNode> {
+pub fn lane_window(len: usize, at: usize, targets: &[usize]) -> Vec<LaneNode> {
     if len == 0 {
         return Vec::new();
     }
-    let far = at.max(target.unwrap_or(0));
+    let far = targets.iter().copied().fold(at, usize::max);
     let hi = (far + 2).min(len - 1);
     let keep = |index: usize| -> bool {
         if far <= LANE_COLLAPSE_DISTANCE {
             return true;
         }
         let near = |anchor: usize| index + 2 >= anchor && index <= anchor + 2;
-        index <= 2 || near(at) || target.is_some_and(|t| index + 1 >= t && index <= t + 1)
+        index <= 2 || near(at) || targets.iter().any(|t| index + 1 >= *t && index <= t + 1)
     };
     let mut nodes = Vec::new();
     for index in (0..=hi).rev() {
@@ -542,25 +543,29 @@ pub fn FlakePositionCard(
     // ── Known position, or a deployment from an untracked configuration. ──
     let orphan = lane.at.is_none();
     let at = lane.at.unwrap_or(0);
-    let picking = on_pick.is_some() && deploy_view.is_none();
+    // Picking stays available while a deployment is in progress. A real
+    // deployment can sit in a stage for a long time, and the operator still
+    // selects the next target in the picker; the lane must show that choice.
+    // (The prototype disables picking in deploy mode because its simulated
+    // deployments finish in seconds.)
+    let picking = on_pick.is_some();
+    let deploy_target = deploy_view.as_ref().and_then(|view| view.target);
     let pick_idx = if picking {
         pick.as_deref()
             .and_then(|sha| commit_index(&lane.commits, sha))
             .filter(|index| *index != at || orphan)
+            // The deploy target already carries its own pin.
+            .filter(|index| Some(*index) != deploy_target)
     } else {
         None
     };
-    let deploy_target = deploy_view.as_ref().and_then(|view| view.target);
     let window_anchor = if orphan {
         deploy_target.unwrap_or(0)
     } else {
         at
     };
-    let mut window = lane_window(
-        lane.commits.len(),
-        window_anchor,
-        deploy_target.or(pick_idx),
-    );
+    let anchors: Vec<usize> = deploy_target.into_iter().chain(pick_idx).collect();
+    let mut window = lane_window(lane.commits.len(), window_anchor, &anchors);
     if orphan {
         // The untracked source is drawn as an extra node immediately older
         // than the deploy target, so the branch connects the two.
@@ -765,7 +770,12 @@ pub fn FlakePositionCard(
         } else {
             ""
         },
-        if picking { " fp-picking" } else { "" }
+        // Deploy mode keeps its fixed 48px pin area (see DEPLOY_LANE_ROW_PX).
+        if picking && deploy_view.is_none() {
+            " fp-picking"
+        } else {
+            ""
+        }
     );
     let window_len = window.len();
     let stage_nodes: Vec<(String, bool, bool)> = deploy_view
@@ -1054,7 +1064,7 @@ mod tests {
     #[test]
     fn short_lane_draws_every_commit_from_oldest_to_head() {
         assert_eq!(
-            lane_window(20, 3, None),
+            lane_window(20, 3, &[]),
             vec![
                 LaneNode::Commit(5),
                 LaneNode::Commit(4),
@@ -1069,16 +1079,16 @@ mod tests {
     #[test]
     fn lane_stops_at_the_oldest_commit() {
         assert_eq!(
-            lane_window(2, 1, None),
+            lane_window(2, 1, &[]),
             vec![LaneNode::Commit(1), LaneNode::Commit(0)]
         );
-        assert!(lane_window(0, 0, None).is_empty());
+        assert!(lane_window(0, 0, &[]).is_empty());
     }
 
     #[test]
     fn far_lane_collapses_into_gap_pills() {
         assert_eq!(
-            lane_window(40, 20, None),
+            lane_window(40, 20, &[]),
             vec![
                 LaneNode::Commit(22),
                 LaneNode::Commit(21),
@@ -1097,8 +1107,21 @@ mod tests {
     }
 
     #[test]
+    fn lane_keeps_deploy_target_and_picked_commit_visible() {
+        // A deployment to HEAD is in progress while the operator picks an
+        // older commit (index 30) in the picker.
+        let window = lane_window(60, 25, &[0, 30]);
+        for index in [0, 25, 29, 30, 31] {
+            assert!(
+                window.contains(&LaneNode::Commit(index)),
+                "commit {index} drawn"
+            );
+        }
+    }
+
+    #[test]
     fn far_lane_keeps_target_neighbors() {
-        let window = lane_window(40, 20, Some(10));
+        let window = lane_window(40, 20, &[10]);
         assert!(window.contains(&LaneNode::Commit(9)));
         assert!(window.contains(&LaneNode::Commit(10)));
         assert!(window.contains(&LaneNode::Commit(11)));

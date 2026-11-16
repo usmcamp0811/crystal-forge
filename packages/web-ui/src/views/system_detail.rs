@@ -27,8 +27,8 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 
 use crate::api::client::{
-    ApiClientError, fetch_compliance_system_evidence, fetch_flake_timeline_for_tray,
-    fetch_system_assignments, fetch_system_compliance_bundles,
+    ApiClientError, fetch_commit_diff, fetch_compliance_system_evidence,
+    fetch_flake_timeline_for_tray, fetch_system_assignments, fetch_system_compliance_bundles,
     fetch_system_cve_inventory_candidates, fetch_system_cve_inventory_for_target,
     fetch_system_cve_scan_eligibility, fetch_system_evaluated_options,
     fetch_system_evaluation_module_sources, fetch_system_evaluation_summary,
@@ -4974,6 +4974,25 @@ fn DeployTab(
             default_generation.and_then(|g| generations.iter().find(|x| x.generation == g).cloned())
         });
 
+    // "Show diff" reads the same per-commit diff as the Flakes view
+    // (`GET /flakes/:id/commits/:sha/diff`): the selected commit against its
+    // parent. The server has no per-system diff, so this is not a diff of the
+    // running configuration against the target. The read runs only while the
+    // diff is open.
+    let diff_flake_id = system.flake.as_ref().map(|flake| flake.id);
+    let diff_request = (show_diff() && mode() == "commit")
+        .then(|| diff_flake_id.zip(selected_commit_data.as_ref().map(|c| c.hash.clone())))
+        .flatten();
+    let commit_diff = use_resource(use_reactive((&diff_request,), |(request,)| async move {
+        let (flake_id, sha) = request?;
+        Some(
+            fetch_commit_diff(flake_id, &sha)
+                .await
+                .map(|response| response.diff)
+                .map_err(|error| error.to_string()),
+        )
+    }));
+
     // The lane highlights the commit behind the current selection: the
     // selected commit, or the commit of the selected generation.
     let lane_pick = if mode() == "generation" {
@@ -5333,9 +5352,7 @@ fn DeployTab(
                         }
                     } else if let Some(commit) = selected_commit_data {
                         let to_short = commit.hash.chars().take(7).collect::<String>();
-                        let diff_text = commit.diff_summary.clone().unwrap_or_else(|| {
-                            "--- a/nixos/modules/services/nginx.nix\n+++ b/nixos/modules/services/nginx.nix\n@@ -14,7 +14,7 @@\n  services.nginx = {\n    enable = true;\n-   recommendedTlsSettings = false;\n+   recommendedTlsSettings = true;".to_string()
-                        });
+                        let diff_state = commit_diff.read().clone().flatten();
                         let deploy_label = if allow_mutations {
                             format!("Deploy {}", to_short)
                         } else {
@@ -5402,9 +5419,27 @@ fn DeployTab(
                             }
 
                             if show_diff() {
-                                pre {
-                                    class: "sd-diff",
-                                    "{diff_text}"
+                                div { class: "sd-diff-head", "data-testid": "deploy-plan-diff",
+                                    "Changes in "
+                                    span { class: "mono", "{to_short}" }
+                                    " against its parent commit"
+                                }
+                                match diff_state {
+                                    None => rsx! {
+                                        div { class: "sd-diff-note", role: "status", "Loading diff…" }
+                                    },
+                                    Some(Err(error)) => rsx! {
+                                        div { class: "sd-callout sd-callout-danger",
+                                            Icon { name: IconName::Warn, size: 13 }
+                                            div { "Diff unavailable: {error}" }
+                                        }
+                                    },
+                                    Some(Ok(diff)) if diff.trim().is_empty() => rsx! {
+                                        div { class: "sd-diff-note", "This commit has no file changes." }
+                                    },
+                                    Some(Ok(diff)) => rsx! {
+                                        div { class: "sd-diff", DiffViewer { diff } }
+                                    },
                                 }
                             }
 
