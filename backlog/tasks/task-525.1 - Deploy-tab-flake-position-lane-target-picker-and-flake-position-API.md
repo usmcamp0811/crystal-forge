@@ -4,7 +4,7 @@ title: Deploy tab flake-position lane, target picker, and flake-position API
 status: In Progress
 assignee: []
 created_date: '2026-11-15T16:11:00Z'
-updated_date: '2026-11-16T04:02:00Z'
+updated_date: '2026-11-16T05:26:00Z'
 labels:
   - web-ui
   - server
@@ -151,4 +151,6 @@ MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/343 (Draft, 
 Owner-reported bug fixed (f998583e, b1f55f4b): a same-commit redeploy drew the U between the neighboring commits, so it read as a deploy from the older neighbor; it now draws the design loop out of and back into the running dot. The deploy-mode commit row has a fixed 104px height so dot offsets are known without DOM measurement; this supersedes the earlier same-commit deviation note. Also fixed inverted stage direction for forward deploys (Queued now starts at the running commit). Farm web-ui 872 passed; preview verified: loop top and center match the running dot (y 629, x 789), forward deploy reads Queued to Activated from the host toward the target.
 
 Owner review round 2 (2026-11-16): (1) lane shows picked targets during an active deployment and keeps target + pick in the window (fad10069); (2) plan Show diff reads GET /flakes/:id/commits/:sha/diff (Flakes view source) with loading/error/empty states, mock removed (fad10069); (3) running position = newest branch commit whose nixos output equals the running store path, matching view_system_deployment_status, resolver only as fallback (2dc11c39); (4) owner asked to fix TASK-453 AC #10 here: record_report_events_tx completes a still-pending deployment whose target equals the unchanged reported store path (90a7eee9). Verification: farm web-ui 873 passed; farm sandbox PostgreSQL run of tests/flake_position.rs (3) and tests/already_current_deployment.rs (2): 5 passed (build overrides in ~/.cache/cf525/db-tests.nix); preview: atlas-01 with shared HEAD closure placed on HEAD, picker selection drawn during deploy, diff panel shows real server 404 for demo commits. Still not run: integration owners.
+
+Owner review round 3 (2026-11-16): progress label for shared-output deployments now uses requested_commit_id, else the newest commit with that output by branch position (6048710e, 13856446); untracked-host reference lane is pickable on the Deploy tab instead of opening the flake drawer (6f95467a). Farm: web-ui 873 passed; sandbox PostgreSQL DB tests 6 passed (flake_position 4, already_current_deployment 2). Preview: untracked host gaia-web-03 lane click selects target in lane, picker and plan; no drawer; no page errors.
 <!-- SECTION:NOTES:END -->
