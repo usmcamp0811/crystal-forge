@@ -445,10 +445,17 @@ pub fn FlakePositionCard(
             &configuration_name,
             lane.last_tracked.is_some(),
         );
-        let shown = lane
-            .commits
-            .len()
-            .min(UNKNOWN_LANE_COMMITS.max(lane.last_tracked.map_or(0, |index| index + 1)));
+        // On the Deploy tab the reference lane is pickable too: a host on an
+        // untracked configuration is exactly the case where the operator
+        // chooses a known commit to deploy.
+        let unknown_pick = on_pick
+            .and(pick.as_deref())
+            .and_then(|sha| commit_index(&lane.commits, sha));
+        let shown = lane.commits.len().min(
+            UNKNOWN_LANE_COMMITS
+                .max(lane.last_tracked.map_or(0, |index| index + 1))
+                .max(unknown_pick.map_or(0, |index| index + 1)),
+        );
         let faded: Vec<(usize, FlakePositionCommit)> = lane
             .commits
             .iter()
@@ -475,13 +482,28 @@ pub fn FlakePositionCard(
                             for (i, (index, commit)) in faded.into_iter().enumerate() {
                                 {
                                     let last = lane.last_tracked == Some(index);
+                                    let is_pick = unknown_pick == Some(index);
                                     let commit_for_open = commit.clone();
-                                    let title = format!("{} · {}", short_sha(&commit.sha), commit.message);
+                                    let title = if on_pick.is_some() {
+                                        format!("Select {} as deploy target", short_sha(&commit.sha))
+                                    } else {
+                                        format!("{} · {}", short_sha(&commit.sha), commit.message)
+                                    };
+                                    let node_class = format!(
+                                        "fp-node{}{}{}",
+                                        if last { " fp-lastknown" } else { "" },
+                                        if is_pick { " fp-picked" } else { "" },
+                                        if on_pick.is_some() { " fp-pickable" } else { "" },
+                                    );
                                     rsx! {
                                         div {
                                             key: "{commit.sha}",
-                                            class: if last { "fp-node fp-lastknown" } else { "fp-node" },
+                                            class: "{node_class}",
+                                            "data-fp-idx": "{index}",
                                             div { class: "fp-top fp-top-sha mono",
+                                                if is_pick {
+                                                    span { class: "fp-pin fp-pin-target", Icon { name: IconName::Deploy, size: 11 } " selected" }
+                                                }
                                                 if index == 0 { span { class: "fp-head-tag", "HEAD" } }
                                                 "{short_sha(&commit.sha)}"
                                                 if last { span { class: "fp-lk", "last tracked" } }
@@ -491,7 +513,10 @@ pub fn FlakePositionCard(
                                                 button {
                                                     class: "fp-dot focus-ring",
                                                     title: "{title}",
-                                                    onclick: move |_| on_open_commit.call(commit_for_open.clone()),
+                                                    onclick: move |_| match on_pick {
+                                                        Some(handler) => handler.call(commit_for_open.clone()),
+                                                        None => on_open_commit.call(commit_for_open.clone()),
+                                                    },
                                                 }
                                                 span { class: if i + 1 == count { "fp-seg fp-none" } else { "fp-seg" } }
                                             }
@@ -507,6 +532,11 @@ pub fn FlakePositionCard(
                                 }
                             }
                         }
+                    }
+                }
+                if on_pick.is_some() && count > 0 {
+                    div { class: "fp-focus",
+                        span { class: "fp-pick-hint", "Click a commit to select it as the deploy target" }
                     }
                 }
                 div { class: "fp-store-row",
