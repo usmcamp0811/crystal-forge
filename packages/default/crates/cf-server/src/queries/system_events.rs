@@ -560,15 +560,27 @@ pub async fn get_system_deployment_progress_row(
             psd.completed_at,
             psd.failed_at,
             psd.failure_message,
-            c.git_commit_hash AS target_commit,
+            COALESCE(requested.git_commit_hash, by_output.git_commit_hash) AS target_commit,
             NULLIF(psd.metadata->>'target_generation', '')::bigint AS target_generation
         FROM pending_system_deployments psd
         LEFT JOIN systems s ON s.id = psd.system_id
-        LEFT JOIN derivations d
-          ON (d.store_path = psd.target_store_path OR d.expected_store_path = psd.target_store_path)
-          AND d.derivation_type = 'nixos'
-          AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
-        LEFT JOIN commits c ON c.id = d.commit_id
+        -- INVARIANT: One store path can be the output of many commits when
+        -- newer commits do not change the configuration. The commit that the
+        -- request named wins; otherwise the newest commit with that output.
+        -- An unordered join here labeled the deployment with an arbitrary
+        -- commit.
+        LEFT JOIN commits requested ON requested.id = psd.requested_commit_id
+        LEFT JOIN LATERAL (
+          SELECT c.git_commit_hash
+          FROM derivations d
+          JOIN commits c ON c.id = d.commit_id
+          WHERE (d.store_path = psd.target_store_path OR d.expected_store_path = psd.target_store_path)
+            AND d.derivation_type = 'nixos'
+            AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
+            AND c.flake_id = s.flake_id
+          ORDER BY c.commit_timestamp DESC, c.id DESC
+          LIMIT 1
+        ) by_output ON TRUE
         WHERE psd.system_id = $1
           AND (
             (psd.status = 'pending' AND psd.expires_at > NOW())

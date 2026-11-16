@@ -267,3 +267,57 @@ async fn shared_output_places_the_host_at_the_newest_matching_commit(pool: PgPoo
     assert_eq!(view.running_commit.as_deref(), Some(sha(0).as_str()));
     assert_eq!(view.unknown_reason, None);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires an explicitly verified disposable DATABASE_URL"]
+async fn deployment_progress_labels_the_requested_or_newest_commit(pool: PgPool) {
+    use crystal_forge::queries::system_events::get_system_deployment_progress_row;
+    // Commits 0 (HEAD) and 2 share one output; the host runs commit 2.
+    let fleet = fleet(&pool, true).await;
+    let subject = system(&pool, &fleet, "lane-label", fleet.env_a, Some(2)).await;
+    sqlx::query(
+        "UPDATE derivations SET store_path='/nix/store/lane-label-2' \
+         WHERE derivation_name='lane-label' AND derivation_path LIKE '%-0.drv'",
+    )
+    .execute(&pool)
+    .await
+    .expect("shared output");
+    let insert = |requested: Option<i32>| {
+        sqlx::query(
+            "INSERT INTO pending_system_deployments(system_id,target_store_path,status,source,expires_at,requested_commit_id) \
+             VALUES($1,'/nix/store/lane-label-2','pending','manual',now() + interval '2 hours',$2)",
+        )
+        .bind(subject)
+        .bind(requested)
+    };
+
+    insert(None).execute(&pool).await.expect("unrequested");
+    let row = get_system_deployment_progress_row(&pool, subject)
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(
+        row.target_commit.as_deref(),
+        Some(sha(0).as_str()),
+        "newest commit with the output"
+    );
+
+    sqlx::query("UPDATE pending_system_deployments SET status='superseded', completed_at=now() WHERE system_id=$1")
+        .bind(subject)
+        .execute(&pool)
+        .await
+        .expect("supersede");
+    insert(Some(fleet.commits[2]))
+        .execute(&pool)
+        .await
+        .expect("requested");
+    let row = get_system_deployment_progress_row(&pool, subject)
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(
+        row.target_commit.as_deref(),
+        Some(sha(2).as_str()),
+        "the requested commit wins"
+    );
+}
