@@ -574,11 +574,15 @@ pub async fn get_system_deployment_progress_row(
           SELECT c.git_commit_hash
           FROM derivations d
           JOIN commits c ON c.id = d.commit_id
+          -- Branch order decides "newest" when a snapshot exists; commit
+          -- timestamps can disagree with branch order.
+          LEFT JOIN flake_branch_commit_snapshot b
+            ON b.flake_id = c.flake_id AND b.commit_id = c.id
           WHERE (d.store_path = psd.target_store_path OR d.expected_store_path = psd.target_store_path)
             AND d.derivation_type = 'nixos'
             AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
             AND c.flake_id = s.flake_id
-          ORDER BY c.commit_timestamp DESC, c.id DESC
+          ORDER BY b.position ASC NULLS LAST, c.commit_timestamp DESC, c.id DESC
           LIMIT 1
         ) by_output ON TRUE
         WHERE psd.system_id = $1
