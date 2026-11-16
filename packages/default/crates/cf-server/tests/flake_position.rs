@@ -239,3 +239,31 @@ async fn timestamp_fallback_and_unknown_reasons(pool: PgPool) {
         "a missing system has no position"
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires an explicitly verified disposable DATABASE_URL"]
+async fn shared_output_places_the_host_at_the_newest_matching_commit(pool: PgPool) {
+    // Commits 0 (HEAD) and 2 build the same closure for this host, as happens
+    // when newer commits do not touch its configuration.
+    let fleet = fleet(&pool, true).await;
+    let subject = system(&pool, &fleet, "lane-shared", fleet.env_a, Some(2)).await;
+    sqlx::query(
+        "UPDATE derivations SET store_path='/nix/store/lane-shared-2' \
+         WHERE derivation_name='lane-shared' AND derivation_path LIKE '%-0.drv'",
+    )
+    .execute(&pool)
+    .await
+    .expect("shared output");
+
+    let view = fetch_system_flake_position(&pool, subject, None)
+        .await
+        .expect("read")
+        .expect("system exists");
+    assert_eq!(
+        view.running_position,
+        Some(0),
+        "same output as HEAD means on HEAD"
+    );
+    assert_eq!(view.running_commit.as_deref(), Some(sha(0).as_str()));
+    assert_eq!(view.unknown_reason, None);
+}

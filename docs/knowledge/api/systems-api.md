@@ -230,7 +230,7 @@ Response fields:
 | `flake_id`, `flake_name`, `branch` | Registered flake and tracked branch. `branch` defaults to `main`. Null when the system has no active flake. |
 | `ordering` | `branch_snapshot` when `flakes.snapshot_ready_at` is set; otherwise `commit_timestamp` (newest first). |
 | `commits[]` | Non-archived branch commits from HEAD. Each has `position` (dense index, 0 = HEAD), `sha`, `message`, `author`, `committed_at`, `build_state`, and `peers`. |
-| `running_commit` | Full SHA from the observational current-revision resolver, the same resolver as `/systems/:id/commits`. |
+| `running_commit` | Newest returned branch commit whose `nixos` output for this configuration equals the latest observed store path. This is the commit that `view_system_deployment_status` reports. One store path can map to many commits when newer commits do not change the configuration. When no output matches, the value comes from the observational current-revision resolver used by `/systems/:id/commits`. |
 | `running_position` | Index of `running_commit` in `commits`. Null when `unknown_reason` is set. |
 | `unknown_reason` | `no_history`, `not_observed`, `untracked`, `off_branch`, or `beyond_window`. |
 | `last_tracked_position` | Newest returned commit whose `nixos` output for this configuration appears in the system's `system_states` history. |

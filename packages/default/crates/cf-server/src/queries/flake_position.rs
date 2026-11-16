@@ -193,19 +193,65 @@ pub async fn fetch_system_flake_position(
         }));
     };
 
-    let running_commit = resolve_observational_current_revision(pool, system_id).await?;
-    let running_position =
-        match running_commit.as_deref() {
-            Some(sha) => sqlx::query_scalar::<_, i64>(&format!(
-                "WITH {ORDERED_COMMITS_CTE} SELECT position FROM ordered WHERE git_commit_hash = $3"
-            ))
-            .bind(flake_id)
-            .bind(system.snapshot_ready)
-            .bind(sha)
-            .fetch_optional(pool)
-            .await?,
-            None => None,
-        };
+    // INVARIANT: The lane places the host at the newest branch commit whose
+    // `nixos` output for this configuration equals the running store path.
+    // Commits that do not change the configuration produce the same output, so
+    // one store path can map to many commits. The newest one answers "how far
+    // behind is this host", and it is the commit that
+    // `view_system_deployment_status.current_commit_hash` (Systems list,
+    // Overview, peers) reports. The observational resolver can name an older
+    // commit with the same output (for example, the commit of the last CF
+    // deployment), so it is the fallback only when no branch output matches.
+    let closure_match = sqlx::query_as::<_, (i64, String)>(&format!(
+        r#"
+        WITH {ORDERED_COMMITS_CTE},
+        observed AS (
+          SELECT NULLIF(BTRIM(state.store_path), '') AS store_path
+          FROM view_agent_current_system_states state
+          WHERE state.hostname = $3
+          ORDER BY state.timestamp DESC, state.id DESC
+          LIMIT 1
+        )
+        SELECT o.position, o.git_commit_hash
+        FROM ordered o, observed
+        WHERE observed.store_path IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM derivations d
+            WHERE d.commit_id = o.id
+              AND d.derivation_type = 'nixos'
+              AND d.derivation_name = $4
+              AND COALESCE(d.store_path, d.expected_store_path) = observed.store_path
+          )
+        ORDER BY o.position
+        LIMIT 1
+        "#
+    ))
+    .bind(flake_id)
+    .bind(system.snapshot_ready)
+    .bind(&system.hostname)
+    .bind(&system.configuration_name)
+    .fetch_optional(pool)
+    .await?;
+    let (running_commit, running_position) = match closure_match {
+        Some((position, sha)) => (Some(sha), Some(position)),
+        None => {
+            let sha = resolve_observational_current_revision(pool, system_id).await?;
+            let position = match sha.as_deref() {
+                Some(sha) => {
+                    sqlx::query_scalar::<_, i64>(&format!(
+                        "WITH {ORDERED_COMMITS_CTE} SELECT position FROM ordered WHERE git_commit_hash = $3"
+                    ))
+                    .bind(flake_id)
+                    .bind(system.snapshot_ready)
+                    .bind(sha)
+                    .fetch_optional(pool)
+                    .await?
+                }
+                None => None,
+            };
+            (sha, position)
+        }
+    };
 
     // SECURITY: Peer hostnames are filtered by the same environment membership
     // rule as the dashboard timeline. A non-admin caller does not learn the
