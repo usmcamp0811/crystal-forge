@@ -50,6 +50,19 @@ Evidence checked:
 - The paths in the retained guide (`packages/default/src/...`) predate the move to `packages/default/crates/cf-server/` and `packages/default/crates/cf-agent/`. The paths are stale. The migration directory is `packages/default/crates/cf-server/migrations/`.
 - The real Recent activity feed, the 4-second polling rule, the production type-to-confirm guard, and the fixture and check steps were not compared with the code.
 
+## Already-current targets (TASK-453 AC #10, fixed in TASK-525.1)
+
+A deployment can target the store path that the host already runs. For
+example, auto_latest can choose a newer commit that builds an identical
+closure. The agent skips such a target ("Already on target") and reports no
+progress. `record_report_events_tx` in
+`packages/default/crates/cf-server/src/queries/system_events.rs` therefore
+completes a still-`pending` row on the next unchanged agent report when the
+reported store path equals the row's target and the row was issued at or
+before the report. It records `cf_deployment_succeeded` with
+`metadata.already_current = true`. Expired rows are not revived. Before this
+change such a row stayed `picked_up` until its 2-hour expiry.
+
 ## Deploy tab placement (TASK-525.1)
 
 Dev commit `bd8d068d` changed where a managed system shows deployment progress

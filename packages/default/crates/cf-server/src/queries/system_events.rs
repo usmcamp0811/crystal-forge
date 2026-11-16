@@ -903,6 +903,51 @@ pub async fn record_report_events_tx(
         });
     }
 
+    // An already-current target completes on the next report (TASK-453 AC #10).
+    // The agent skips a target equal to /run/current-system and reports no
+    // progress, and the branch above completes deployments only when the store
+    // path changes. Without this branch, a deployment issued for the path the
+    // host already runs (for example, auto_latest choosing a newer commit with
+    // an identical closure) stays `picked_up` until it expires.
+    //
+    // SECURITY: The evidence is the same signed agent report that completes a
+    // changed-path deployment. Only a still-`pending` row with exactly the
+    // reported store path, issued at or before the report, is completed;
+    // expired rows are not revived.
+    if !generation_or_store_changed {
+        if let Some(pending) = find_matching_reported_deployment_tx(
+            tx,
+            previous.system_id,
+            payload.store_path.as_deref(),
+            occurred_at,
+        )
+        .await?
+        .filter(|pending| pending.status == "pending")
+        {
+            mark_pending_deployment_succeeded_tx(tx, pending.id).await?;
+            events.push(PendingSystemEvent {
+                event_type: SystemEventType::CfDeploymentSucceeded,
+                dedupe_key: format!("cf_deployment_succeeded:{}", pending.id),
+                previous_generation,
+                new_generation,
+                previous_store_path: previous_store_path.clone(),
+                new_store_path: new_store_path.clone(),
+                previous_boot_id: previous.boot_id.clone(),
+                new_boot_id: payload.boot_id.clone(),
+                deployment_id: Some(pending.id),
+                desired_target_id: Some(pending.id),
+                source: "pending_desired_target",
+                actor: Some("crystal-forge"),
+                metadata: json!({
+                    "change_reason": payload.change_reason.as_str(),
+                    "target_store_path": pending.target_store_path,
+                    "pending_source": pending.source,
+                    "already_current": true,
+                }),
+            });
+        }
+    }
+
     for event in &events {
         insert_system_event_tx(tx, previous.system_id, correlation_id, occurred_at, event).await?;
     }
