@@ -4,7 +4,7 @@ title: Deploy tab flake-position lane, target picker, and flake-position API
 status: In Progress
 assignee: []
 created_date: '2026-11-15T16:11:00Z'
-updated_date: '2026-11-15T22:31:00Z'
+updated_date: '2026-11-16T01:00:00Z'
 labels:
   - web-ui
   - server
@@ -143,4 +143,6 @@ Progress 2026-11-15 (branch TASK-525-deploy-tab-flake-position, pushed via altss
 - AC #9 note: the U connector uses CSS percentages from equal grid tracks instead of runtime DOM measurement; the same-commit case uses the same U, not the design SVG loop. Copying stage remains with TASK-449.
 - Verified: farm .#packages.x86_64-linux.web-ui EXIT 0 (includes 16 new/affected unit tests). Farm cf-server/cf-server-core checkPhase: new flake_position unit tests pass; build fails on 15 unrelated parser-timeout tests (TASK-526). Endpoint verified against the task-owned preview DB: 403 unauthenticated, 404 missing, behind/head/untracked/no_history states, peers. Browser (Playwright, farm-built embedded-UI server): lane/picker/plan selection sync, gate present, banner absent, no page errors. Fixed: default selection now follows the running commit after load.
 - Not yet run: isolated-DB tests tests/flake_position.rs (#[ignore], needs a disposable DATABASE_URL), integration-delivery and integration-assurance owners, MR screenshots. Ruled out: local cargo builds (farm-only per AGENTS.md).
+
+MR prep 2026-11-15 at afae8d19: farm .#packages.x86_64-linux.web-ui passed (870 tests); farm cf-server-drv with doCheck=false built for the preview; full checkPhase blocked only by TASK-526. Browser preview found and fixed three defects (default selection, no_history fallback, plan From row). Integration owners delivery-lifecycle and evidence-remediation-lifecycle: not run (two attempts died on host 'Stale file handle' and a farm signal 6 before any test). Task stays In Progress until owners pass.
 <!-- SECTION:NOTES:END -->
