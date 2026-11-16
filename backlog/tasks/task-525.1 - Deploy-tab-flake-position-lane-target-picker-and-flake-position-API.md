@@ -4,7 +4,7 @@ title: Deploy tab flake-position lane, target picker, and flake-position API
 status: In Progress
 assignee: []
 created_date: '2026-11-15T16:11:00Z'
-updated_date: '2026-11-16T01:01:00Z'
+updated_date: '2026-11-16T02:31:00Z'
 labels:
   - web-ui
   - server
@@ -147,4 +147,6 @@ Progress 2026-11-15 (branch TASK-525-deploy-tab-flake-position, pushed via altss
 MR prep 2026-11-15 at afae8d19: farm .#packages.x86_64-linux.web-ui passed (870 tests); farm cf-server-drv with doCheck=false built for the preview; full checkPhase blocked only by TASK-526. Browser preview found and fixed three defects (default selection, no_history fallback, plan From row). Integration owners delivery-lifecycle and evidence-remediation-lifecycle: not run (two attempts died on host 'Stale file handle' and a farm signal 6 before any test). Task stays In Progress until owners pass.
 
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/343 (Draft, target dev). Created with git push options because glab has no API token on this host.
+
+Owner-reported bug fixed (f998583e, b1f55f4b): a same-commit redeploy drew the U between the neighboring commits, so it read as a deploy from the older neighbor; it now draws the design loop out of and back into the running dot. The deploy-mode commit row has a fixed 104px height so dot offsets are known without DOM measurement; this supersedes the earlier same-commit deviation note. Also fixed inverted stage direction for forward deploys (Queued now starts at the running commit). Farm web-ui 872 passed; preview verified: loop top and center match the running dot (y 629, x 789), forward deploy reads Queued to Activated from the host toward the target.
 <!-- SECTION:NOTES:END -->
