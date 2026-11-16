@@ -4,7 +4,7 @@ title: Deploy tab flake-position lane, target picker, and flake-position API
 status: In Progress
 assignee: []
 created_date: '2026-11-15T16:11:00Z'
-updated_date: '2026-11-16T01:00:00Z'
+updated_date: '2026-11-16T01:01:00Z'
 labels:
   - web-ui
   - server
@@ -145,4 +145,6 @@ Progress 2026-11-15 (branch TASK-525-deploy-tab-flake-position, pushed via altss
 - Not yet run: isolated-DB tests tests/flake_position.rs (#[ignore], needs a disposable DATABASE_URL), integration-delivery and integration-assurance owners, MR screenshots. Ruled out: local cargo builds (farm-only per AGENTS.md).
 
 MR prep 2026-11-15 at afae8d19: farm .#packages.x86_64-linux.web-ui passed (870 tests); farm cf-server-drv with doCheck=false built for the preview; full checkPhase blocked only by TASK-526. Browser preview found and fixed three defects (default selection, no_history fallback, plan From row). Integration owners delivery-lifecycle and evidence-remediation-lifecycle: not run (two attempts died on host 'Stale file handle' and a farm signal 6 before any test). Task stays In Progress until owners pass.
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/343 (Draft, target dev). Created with git push options because glab has no API token on this host.
 <!-- SECTION:NOTES:END -->
