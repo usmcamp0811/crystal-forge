@@ -54,14 +54,30 @@ const STAGE_CENTER_PX: i32 = 10;
 /// above it).
 const DOT_FROM_STAGE_ROW_PX: i32 = DOT_CENTER_PX - (DEPLOY_LANE_ROW_PX + DEPLOY_ROW_GAP_PX);
 
-/// SVG path for a same-commit redeploy, in a 600-unit-wide viewBox.
+/// Returns the SVG path for a same-commit redeploy, in a 600-unit-wide viewBox.
 ///
-/// The branch spans three equal columns, so the shared commit sits at x=300
-/// and the neighboring column centers at x=100 and x=500. The path leaves the
-/// left side of the dot, drops to the stage row (y=70), and returns to the
-/// right side of the dot, as in the design's `fp-uloop`.
-const SAME_COMMIT_LOOP_PATH: &str = "M 288 0 C 254 0 100 12 100 35 L 100 58 Q 100 70 112 70 \
-     L 488 70 Q 500 70 500 58 L 500 35 C 500 12 346 0 312 0";
+/// The branch spans `cols` equal columns and the shared commit sits in column
+/// `dot_col` (0-based). The loop leaves the left side of that dot, drops to
+/// the stage row (y=70), and returns to the right side of the dot, as in the
+/// design's `fp-uloop`. Each side reaches one column width from the dot, but
+/// never past the branch edge, so a commit in the first or last column (for
+/// example HEAD) still gets a loop centered on its dot.
+pub fn same_commit_loop_path(dot_col: usize, cols: usize) -> String {
+    let cols = cols.max(1) as f64;
+    let width = 600.0 / cols;
+    let cx = (dot_col as f64 + 0.5) * width;
+    let half = width.min(cx - 10.0).min(590.0 - cx).max(24.0);
+    let (l, r) = (cx - half, cx + half);
+    format!(
+        "M {a} 0 C {b} 0 {l} 12 {l} 35 L {l} 58 Q {l} 70 {l2} 70 L {r2} 70 Q {r} 70 {r} 58 L {r} 35 C {r} 12 {c} 0 {d} 0",
+        a = cx - 12.0,
+        b = cx - 46.0,
+        c = cx + 46.0,
+        d = cx + 12.0,
+        l2 = l + 12.0,
+        r2 = r - 12.0,
+    )
+}
 
 /// Why the card cannot place the system on its tracked branch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -995,7 +1011,7 @@ pub fn FlakePositionCard(
                                             "viewBox": "0 0 600 {loop_height}",
                                             "preserveAspectRatio": "none",
                                             "aria-hidden": "true",
-                                            path { d: SAME_COMMIT_LOOP_PATH, "vector-effect": "non-scaling-stroke" }
+                                            path { d: same_commit_loop_path(source_col.unwrap_or(b0).saturating_sub(b0), b1 - b0 + 1), "vector-effect": "non-scaling-stroke" }
                                         }
                                     } else if has_connector {
                                         span { class: "fp-u", style: "left:{edge};right:{edge};top:{u_top}px;height:{u_height}px;" }
@@ -1238,7 +1254,11 @@ mod tests {
         // path) must sit on the stage rail center.
         assert_eq!(DOT_FROM_STAGE_ROW_PX, -60);
         assert_eq!(STAGE_CENTER_PX - DOT_FROM_STAGE_ROW_PX, 70);
-        assert!(SAME_COMMIT_LOOP_PATH.contains("Q 100 70 112 70"));
+        assert!(same_commit_loop_path(1, 3).contains("Q 100 70 112 70"));
+        // HEAD in the last of two columns: the loop stays centered on the dot.
+        let edge = same_commit_loop_path(1, 2);
+        assert!(edge.starts_with("M 438 0"), "{edge}");
+        assert!(edge.contains("Q 590 70 590 58"), "{edge}");
     }
 
     #[test]
