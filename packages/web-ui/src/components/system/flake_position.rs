@@ -233,6 +233,12 @@ pub fn deploy_distance_label(at: usize, target: usize) -> Option<String> {
     Some(format!("{distance} commit{plural} {direction}"))
 }
 
+/// Returns whether deployment stages read left to right, from the source
+/// column toward the target column.
+pub fn stages_flow_right(source_col: usize, target_col: usize) -> bool {
+    target_col >= source_col
+}
+
 /// Formats a timestamp as a short age such as `5m ago`, `3h ago`, or `2d ago`.
 pub fn short_ago(now: DateTime<Utc>, at: DateTime<Utc>) -> String {
     let elapsed = now.signed_duration_since(at);
@@ -593,7 +599,10 @@ pub fn FlakePositionCard(
             } else {
                 c1
             };
-            Some((b0, b1, same, target <= source))
+            // Columns run from oldest (left) to HEAD (right). Stages flow from
+            // the running commit toward the target, so a target to the right
+            // reads left to right (design: `fwd = tCol >= fCol`).
+            Some((b0, b1, same, stages_flow_right(source, target)))
         }
         (Some(_), _, _) => Some((0, window.len().saturating_sub(1), false, true)),
         _ => None,
@@ -1159,6 +1168,15 @@ mod tests {
         let removed = LaneModel::evidence(&position, Some(&sha), true);
         assert_eq!(removed.at, None);
         assert_eq!(removed.unknown, Some(LaneUnknown::ConfigurationRemoved));
+    }
+
+    #[test]
+    fn stages_start_at_the_running_commit() {
+        // Deploying newer (target column to the right) reads left to right.
+        assert!(stages_flow_right(2, 5));
+        // A rollback to an older commit (target to the left) reads right to left.
+        assert!(!stages_flow_right(5, 2));
+        assert!(stages_flow_right(3, 3));
     }
 
     #[test]
