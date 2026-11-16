@@ -364,6 +364,10 @@ exports.removed = async ctx => {
   await expect(lane).toHaveAttribute("data-fp-state", "unknown");
   await expect(lane.getByText("nixosConfigurations.assuranceOnly no longer exists in", { exact: false })).toBeVisible();
   await expect(lane.getByText("not in history", { exact: true })).toBeVisible();
+  // The lane marks the last revision that held the configuration, not HEAD.
+  const lastValid = receipts["management.artifact"].commit.slice(0, 7);
+  await expect(lane.locator(".fp-lastknown .fp-top-sha")).toContainText(lastValid);
+  await expect(lane.locator(".fp-lastknown .fp-lk")).toHaveText("last tracked");
   await ctx.screenshot("configuration-removed-head-retains-history");
   await page.getByRole("tab", { name: "Evidence history", exact: true }).click();
   await page.getByRole("button", { name: "Scan", exact: true }).click();

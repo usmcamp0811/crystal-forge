@@ -22,7 +22,8 @@ use crate::components::{Icon, IconName};
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 
-/// Number of commits drawn in the faded lane of an unknown position.
+/// Index the unknown-position lane anchors on when the host has no last-tracked
+/// commit. The lane shows the commits through two past this index.
 const UNKNOWN_LANE_COMMITS: usize = 6;
 
 /// Distance from HEAD after which the lane collapses commits into gap pills.
@@ -135,16 +136,29 @@ impl LaneModel {
     ///
     /// These systems have no agent observation. The lane places them at the
     /// revision whose evidence the server selected (`evidence_sha`).
+    ///
+    /// When the configuration was removed, the evidence revision is the last
+    /// revision that held it. The lane keeps that revision as the
+    /// `last_tracked` marker instead of dropping it, so the card can show where
+    /// the configuration last existed.
     pub fn evidence(
         position: &SystemFlakePosition,
         evidence_sha: Option<&str>,
         configuration_removed: bool,
     ) -> Self {
         let mut model = Self::managed(position);
-        model.at = evidence_sha.and_then(|sha| commit_index(&model.commits, sha));
-        model.last_tracked = None;
+        let evidence_index = evidence_sha.and_then(|sha| commit_index(&model.commits, sha));
+        model.at = if configuration_removed {
+            None
+        } else {
+            evidence_index
+        };
+        model.last_tracked = if configuration_removed {
+            evidence_index
+        } else {
+            None
+        };
         model.unknown = if configuration_removed {
-            model.at = None;
             Some(LaneUnknown::ConfigurationRemoved)
         } else if model.commits.is_empty() {
             Some(LaneUnknown::Server(FlakePositionUnknownReason::NoHistory))
@@ -215,6 +229,30 @@ pub fn commit_index(commits: &[FlakePositionCommit], sha: &str) -> Option<usize>
     commits
         .iter()
         .position(|commit| commit.sha.starts_with(sha) || sha.starts_with(&commit.sha))
+}
+
+/// Returns whether the lane can draw `progress` as a deployment.
+///
+/// The lane draws a deployment only when it places both ends: the source (the
+/// running commit, or an untracked configuration) and the target commit inside
+/// the returned branch window. A target with no commit (for example a
+/// generation that maps to no tracked commit) or outside the window has no
+/// node to pin, so the lane would show stages with no connector.
+///
+/// Callers MUST show another progress presentation (the progress banner) when
+/// this returns `false`. Otherwise the deployment, its failure message, and its
+/// Logs action are invisible.
+pub fn can_draw_deployment(lane: &LaneModel, progress: &SystemDeploymentProgress) -> bool {
+    let untracked = matches!(
+        lane.unknown,
+        Some(LaneUnknown::Server(FlakePositionUnknownReason::Untracked))
+    );
+    let source_known = lane.at.is_some() || untracked;
+    let target_placed = progress
+        .target_commit
+        .as_deref()
+        .is_some_and(|sha| commit_index(&lane.commits, sha).is_some());
+    source_known && target_placed
 }
 
 /// Describes `index` relative to the host at `at`, as the design focus row does.
@@ -376,7 +414,7 @@ pub fn FlakePositionCard(
         lane.unknown,
         Some(LaneUnknown::Server(FlakePositionUnknownReason::Untracked))
     );
-    let deploy = deploy.filter(|_| lane.at.is_some() || untracked);
+    let deploy = deploy.filter(|progress| can_draw_deployment(&lane, progress));
 
     let deploy_view = deploy.as_ref().map(|progress| {
         let rollback = progress.kind == "rollback";
@@ -467,22 +505,18 @@ pub fn FlakePositionCard(
         let unknown_pick = on_pick
             .and(pick.as_deref())
             .and_then(|sha| commit_index(&lane.commits, sha));
-        let shown = lane.commits.len().min(
-            UNKNOWN_LANE_COMMITS
-                .max(lane.last_tracked.map_or(0, |index| index + 1))
-                .max(unknown_pick.map_or(0, |index| index + 1)),
-        );
-        let faded: Vec<(usize, FlakePositionCommit)> = lane
-            .commits
-            .iter()
-            .take(shown)
-            .cloned()
-            .enumerate()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        let count = faded.len();
+        // The reference lane uses the same bounded window as the normal lane:
+        // the newest commits, the last-tracked commit, and the picked commit
+        // stay visible, and the commits between them collapse into gap pills.
+        // A last-tracked or picked commit far from HEAD therefore adds a few
+        // nodes, not one node per commit.
+        let anchor = lane
+            .last_tracked
+            .unwrap_or(UNKNOWN_LANE_COMMITS - 1)
+            .min(lane.commits.len().saturating_sub(1));
+        let picks: Vec<usize> = unknown_pick.into_iter().collect();
+        let nodes = lane_window(lane.commits.len(), anchor, &picks);
+        let count = nodes.len();
         return rsx! {
             section { class: "card sd-card fp-card", "data-testid": "flake-position-card", "data-fp-state": "unknown",
                 div { class: "fp-toprow",
@@ -495,52 +529,69 @@ pub fn FlakePositionCard(
                 if count > 0 {
                     div { class: "fp-lane-wrap",
                         div { class: "fp-lane fp-lane-faded",
-                            for (i, (index, commit)) in faded.into_iter().enumerate() {
+                            for (i, node) in nodes.iter().copied().enumerate() {
                                 {
-                                    let last = lane.last_tracked == Some(index);
-                                    let is_pick = unknown_pick == Some(index);
-                                    let commit_for_open = commit.clone();
-                                    let title = if on_pick.is_some() {
-                                        format!("Select {} as deploy target", short_sha(&commit.sha))
-                                    } else {
-                                        format!("{} · {}", short_sha(&commit.sha), commit.message)
-                                    };
-                                    let node_class = format!(
-                                        "fp-node{}{}{}",
-                                        if last { " fp-lastknown" } else { "" },
-                                        if is_pick { " fp-picked" } else { "" },
-                                        if on_pick.is_some() { " fp-pickable" } else { "" },
-                                    );
-                                    rsx! {
-                                        div {
-                                            key: "{commit.sha}",
-                                            class: "{node_class}",
-                                            "data-fp-idx": "{index}",
-                                            div { class: "fp-top fp-top-sha mono",
-                                                if is_pick {
-                                                    span { class: "fp-pin fp-pin-target", Icon { name: IconName::Deploy, size: 11 } " selected" }
+                                    match node {
+                                        LaneNode::Gap { newest, count: hidden } => rsx! {
+                                            div { key: "gap-{newest}", class: "fp-node fp-gap",
+                                                div { class: "fp-top" }
+                                                div { class: "fp-rail",
+                                                    span { class: "fp-seg" }
+                                                    span { class: "fp-gap-pill", "+{hidden}" }
+                                                    span { class: "fp-seg" }
                                                 }
-                                                if index == 0 { span { class: "fp-head-tag", "HEAD" } }
-                                                "{short_sha(&commit.sha)}"
-                                                if last { span { class: "fp-lk", "last tracked" } }
+                                                div { class: "fp-bot", "commits" }
                                             }
-                                            div { class: "fp-rail",
-                                                span { class: if i == 0 { "fp-seg fp-none" } else { "fp-seg" } }
-                                                button {
-                                                    class: "fp-dot focus-ring",
-                                                    title: "{title}",
-                                                    onclick: move |_| match on_pick {
-                                                        Some(handler) => handler.call(commit_for_open.clone()),
-                                                        None => on_open_commit.call(commit_for_open.clone()),
-                                                    },
-                                                }
-                                                span { class: if i + 1 == count { "fp-seg fp-none" } else { "fp-seg" } }
-                                            }
-                                            if last && untracked {
-                                                div { class: "fp-orphan",
-                                                    span { class: "fp-orphan-line" }
-                                                    span { class: "fp-orphan-dot", "?" }
-                                                    span { class: "fp-pin fp-pin-unknown", Icon { name: IconName::Server, size: 11 } " {host}" }
+                                        },
+                                        LaneNode::Orphan => rsx! {},
+                                        LaneNode::Commit(index) => {
+                                            let commit = lane.commits[index].clone();
+                                            let last = lane.last_tracked == Some(index);
+                                            let is_pick = unknown_pick == Some(index);
+                                            let commit_for_open = commit.clone();
+                                            let title = if on_pick.is_some() {
+                                                format!("Select {} as deploy target", short_sha(&commit.sha))
+                                            } else {
+                                                format!("{} · {}", short_sha(&commit.sha), commit.message)
+                                            };
+                                            let node_class = format!(
+                                                "fp-node{}{}{}",
+                                                if last { " fp-lastknown" } else { "" },
+                                                if is_pick { " fp-picked" } else { "" },
+                                                if on_pick.is_some() { " fp-pickable" } else { "" },
+                                            );
+                                            rsx! {
+                                                div {
+                                                    key: "{commit.sha}",
+                                                    class: "{node_class}",
+                                                    "data-fp-idx": "{index}",
+                                                    div { class: "fp-top fp-top-sha mono",
+                                                        if is_pick {
+                                                            span { class: "fp-pin fp-pin-target", Icon { name: IconName::Deploy, size: 11 } " selected" }
+                                                        }
+                                                        if index == 0 { span { class: "fp-head-tag", "HEAD" } }
+                                                        "{short_sha(&commit.sha)}"
+                                                        if last { span { class: "fp-lk", "last tracked" } }
+                                                    }
+                                                    div { class: "fp-rail",
+                                                        span { class: if i == 0 { "fp-seg fp-none" } else { "fp-seg" } }
+                                                        button {
+                                                            class: "fp-dot focus-ring",
+                                                            title: "{title}",
+                                                            onclick: move |_| match on_pick {
+                                                                Some(handler) => handler.call(commit_for_open.clone()),
+                                                                None => on_open_commit.call(commit_for_open.clone()),
+                                                            },
+                                                        }
+                                                        span { class: if i + 1 == count { "fp-seg fp-none" } else { "fp-seg" } }
+                                                    }
+                                                    if last && untracked {
+                                                        div { class: "fp-orphan",
+                                                            span { class: "fp-orphan-line" }
+                                                            span { class: "fp-orphan-dot", "?" }
+                                                            span { class: "fp-pin fp-pin-unknown", Icon { name: IconName::Server, size: 11 } " {host}" }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -1215,6 +1266,111 @@ mod tests {
         let list = commits(4);
         assert_eq!(commit_index(&list, &list[2].sha), Some(2));
         assert_eq!(commit_index(&list, ""), None);
+    }
+
+    fn position_with(commits_len: usize) -> SystemFlakePosition {
+        SystemFlakePosition {
+            flake_id: Some(1),
+            flake_name: Some("fleet".to_string()),
+            branch: Some("main".to_string()),
+            ordering: crate::api::models::FlakePositionOrdering::BranchSnapshot,
+            commits: commits(commits_len),
+            running_commit: None,
+            running_position: None,
+            unknown_reason: Some(FlakePositionUnknownReason::NotObserved),
+            last_tracked_position: None,
+        }
+    }
+
+    fn deploy_to(commit: Option<&str>) -> SystemDeploymentProgress {
+        SystemDeploymentProgress {
+            id: uuid::Uuid::from_u128(1),
+            stage: "queued".to_string(),
+            kind: "deploy".to_string(),
+            target_store_path: "/nix/store/x".to_string(),
+            target_commit: commit.map(str::to_string),
+            target_generation: None,
+            source: "manual".to_string(),
+            issued_at: Utc::now(),
+            delivered_at: None,
+            applying_at: None,
+            completed_at: None,
+            failed_at: None,
+            failure_message: None,
+        }
+    }
+
+    #[test]
+    fn removed_configuration_keeps_its_last_revision_far_from_head() {
+        let position = position_with(60);
+        let last_valid = position.commits[20].sha.clone();
+        let model = LaneModel::evidence(&position, Some(&last_valid), true);
+        assert_eq!(model.at, None);
+        assert_eq!(model.unknown, Some(LaneUnknown::ConfigurationRemoved));
+        assert_eq!(model.last_tracked, Some(20));
+        // The unknown-state lane must draw that commit, bounded by gap pills.
+        let nodes = lane_window(model.commits.len(), 20, &[]);
+        assert!(nodes.contains(&LaneNode::Commit(20)));
+        assert!(
+            nodes
+                .iter()
+                .any(|node| matches!(node, LaneNode::Gap { .. })),
+            "the 20 newer commits collapse into gap pills"
+        );
+        assert!(
+            nodes.len() < 15,
+            "bounded, not one node per commit: {}",
+            nodes.len()
+        );
+    }
+
+    #[test]
+    fn unknown_lane_stays_bounded_for_a_far_pick() {
+        // A picked commit at index 400 of 500 adds nodes only around itself.
+        let nodes = lane_window(500, 5, &[400]);
+        assert!(nodes.contains(&LaneNode::Commit(400)));
+        assert!(nodes.len() < 25, "{} nodes", nodes.len());
+    }
+
+    #[test]
+    fn lane_draws_a_deployment_only_when_it_places_both_ends() {
+        let mut position = position_with(10);
+        position.running_position = Some(3);
+        position.unknown_reason = None;
+        let known = LaneModel::managed(&position);
+        let on_branch = position.commits[1].sha.clone();
+        assert!(can_draw_deployment(&known, &deploy_to(Some(&on_branch))));
+        // No commit (for example a generation that maps to no tracked commit).
+        assert!(!can_draw_deployment(&known, &deploy_to(None)));
+        // A commit outside the returned branch window.
+        assert!(!can_draw_deployment(
+            &known,
+            &deploy_to(Some(&"f".repeat(40)))
+        ));
+
+        // Unknown source states other than `untracked` cannot be drawn.
+        for reason in [
+            FlakePositionUnknownReason::OffBranch,
+            FlakePositionUnknownReason::BeyondWindow,
+            FlakePositionUnknownReason::NotObserved,
+            FlakePositionUnknownReason::NoHistory,
+        ] {
+            let mut unknown = position.clone();
+            unknown.running_position = None;
+            unknown.unknown_reason = Some(reason);
+            let lane = LaneModel::managed(&unknown);
+            assert!(
+                !can_draw_deployment(&lane, &deploy_to(Some(&on_branch))),
+                "{reason:?}"
+            );
+        }
+
+        // An untracked configuration is a drawable source.
+        let mut untracked = position.clone();
+        untracked.running_position = None;
+        untracked.unknown_reason = Some(FlakePositionUnknownReason::Untracked);
+        let lane = LaneModel::managed(&untracked);
+        assert!(can_draw_deployment(&lane, &deploy_to(Some(&on_branch))));
     }
 
     #[test]

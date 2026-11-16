@@ -71,13 +71,23 @@ async function deploy(ctx, phase) {
     await expect(targets.getByRole("heading", { name: "Deploy target", exact: true })).toBeVisible();
     await targets.getByRole("tab", { name: "Commits", exact: true }).click();
     await expect(targets.getByRole("tab", { name: "Commits", exact: true })).toHaveAttribute("aria-selected", "true");
-    // Click the outer button. Its SHA span opens Flakes and stops propagation.
-    const commit = targets.getByRole("button").filter({
-      has: page.getByText(intended.message, { exact: true }),
-    }).filter({ has: page.getByText(short, { exact: true }) });
-    await expect(commit).toHaveCount(1);
-    await commit.click();
-    await expect(commit).toHaveClass(/\bsel\b/);
+    // The row holds two separate buttons: select the target (name = commit
+    // message) and open the commit in Flakes (name = "Open <sha> in Flakes").
+    const row = targets.locator(".tp-row").filter({
+      has: page.getByRole("button", { name: `Open ${short} in Flakes`, exact: true }),
+    });
+    await expect(row).toHaveCount(1);
+    const commit = row.getByRole("button", { name: intended.message, exact: true });
+    const openSha = row.getByRole("button", { name: `Open ${short} in Flakes`, exact: true });
+    // Keyboard: each action takes its own focus.
+    await commit.focus();
+    await expect(commit).toBeFocused();
+    await openSha.focus();
+    await expect(openSha).toBeFocused();
+    await commit.focus();
+    await page.keyboard.press("Enter");
+    await expect(row).toHaveClass(/\bsel\b/);
+    await expect(commit).toHaveAttribute("aria-pressed", "true");
     // The lane and the picker share one selection. An unknown running
     // position draws a reference lane without picking.
     if (["head", "behind"].includes(await lane.getAttribute("data-fp-state"))) {
@@ -260,6 +270,13 @@ async function inspect(ctx, phase) {
   // whole timeline, including cards below the initial viewport after rollback.
   await page.locator(`[data-event-id="${receipt(ctx, "delivery.first.startedEventId")}"]`).scrollIntoViewIfNeeded();
   await ctx.screenshot(`delivery-${phase}-history-oldest-cards`);
+  // After activation the Deploy tab lane places the host on the deployed
+  // commit. A finished deployment card is shown for 30 s at most, so accept a
+  // landed or normal lane; both pin the host at the intended commit.
+  await page.goto(ctx.url(`/systems/${targetId}?tab=deploy`));
+  const landed = page.getByTestId("flake-position-card");
+  await expect(landed).toHaveAttribute("data-fp-state", /^(head|behind|deploying)$/);
+  await expect(landed.locator(".fp-sys .fp-bot")).toHaveText(intended.commit.slice(0, 7));
   ctx.emit(`delivery.${phase}.browserVerified`, true);
 }
 

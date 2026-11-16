@@ -1,7 +1,7 @@
 //! Isolated PostgreSQL test for TASK-453 AC #10 (fixed in TASK-525.1): a
 //! deployment whose target is the store path the host already runs completes
 //! on the next unchanged agent report instead of staying `picked_up`.
-//! Run only against a verified disposable cluster with CREATEDB privileges.
+//! Runs in the isolated CI database path (`packages/devScripts/tests/database-regressions.sh`).
 
 use crystal_forge::models::system_states::SystemState;
 use crystal_forge::queries::system_events::{
@@ -71,7 +71,6 @@ async fn status(pool: &PgPool, id: Uuid) -> String {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "requires an explicitly verified disposable DATABASE_URL"]
 async fn already_current_target_completes_on_unchanged_report(pool: PgPool) {
     let system = host(&pool).await;
     let current = pending(&pool, system, PATH).await;
@@ -102,7 +101,6 @@ async fn already_current_target_completes_on_unchanged_report(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "requires an explicitly verified disposable DATABASE_URL"]
 async fn different_target_stays_pending_on_unchanged_report(pool: PgPool) {
     let system = host(&pool).await;
     let other = pending(&pool, system, "/nix/store/other-target-nixos-system").await;

@@ -73,7 +73,9 @@ use crate::components::poam::{
 };
 use crate::components::system::config_explorer::ConfigExplorer;
 use crate::components::system::deploy_target_picker::DeployTargetPicker;
-use crate::components::system::flake_position::{FlakePositionCard, LaneModel, LaneUnknown};
+use crate::components::system::flake_position::{
+    FlakePositionCard, LaneModel, LaneUnknown, can_draw_deployment,
+};
 use crate::components::system::{
     AutoLatestDeployEvent, AutoLatestDeployPrompt, AutoLatestDeployState, EditSystemModal,
     PendingDeployBanner, deployment_request_for_target, deployment_state_label, environment_style,
@@ -968,6 +970,38 @@ impl Tab {
     }
 }
 
+/// State of the per-system flake-position read.
+///
+/// The Deploy tab shows server branch data only for `Ready`. `Loading` and
+/// `Unavailable` show an explicit notice: derived fallback data must not look
+/// like authoritative branch position, peers, or build state.
+#[derive(Clone, Debug, PartialEq)]
+enum FlakePositionRead {
+    Loading,
+    Ready(SystemFlakePosition),
+    Unavailable,
+}
+
+/// Returns whether the deployment-status read shows an active or recently
+/// finished deployment.
+///
+/// `read` is the resource value: `None` while the first request is pending,
+/// `Some(None)` when the server reports no deployment, and `Some(Some(_))`
+/// when it returns a record. History and flake-position polling run only for
+/// `Some(Some(_))`, so an idle page does not poll.
+fn deployment_is_active(read: Option<&Option<SystemDeploymentProgress>>) -> bool {
+    matches!(read, Some(Some(_)))
+}
+
+/// Returns a value that changes when a deployment starts, changes stage, or
+/// ends. Resources that must re-read at those moments depend on it.
+fn deployment_state_key(read: Option<&Option<SystemDeploymentProgress>>) -> Option<(Uuid, String)> {
+    match read {
+        Some(Some(progress)) => Some((progress.id, progress.stage.clone())),
+        _ => None,
+    }
+}
+
 fn navigate_system_detail_tab(
     mut active_tab: Signal<Tab>,
     mut navigation_state: Signal<SystemDetailNavigation>,
@@ -1588,7 +1622,7 @@ pub fn SystemDetailView(
                 #[cfg(target_arch = "wasm32")]
                 {
                     crate::hooks::visibility::visible_tick(4000).await;
-                    if dep_resource.read_unchecked().is_some() {
+                    if deployment_is_active(dep_resource.read_unchecked().as_ref()) {
                         tick.set(tick() + 1);
                     }
                 }
@@ -1673,7 +1707,9 @@ pub fn SystemDetailView(
     // host pin moves to the target after activation.
     let id_for_flake_position = id.clone();
     let flake_position_resource = use_resource(move || {
-        let _ = history_poll_tick();
+        // Re-read when a deployment starts, changes stage, or ends, so the host
+        // pin moves after activation. An idle page does not poll this endpoint.
+        let _deployment_key = deployment_state_key(deployment_progress_resource.read().as_ref());
         let id = id_for_flake_position.clone();
         async move {
             let system_id = Uuid::parse_str(&id).ok()?;
@@ -1873,7 +1909,11 @@ pub fn SystemDetailView(
     let current_deployment_id = deployment_progress.as_ref().map(|progress| progress.id);
     let history_commit_history = map_history_entries_to_commit_history(&history_entries);
     let commits_response = commits_resource.read_unchecked().clone().flatten();
-    let flake_position = flake_position_resource.read_unchecked().clone().flatten();
+    let flake_position = match flake_position_resource.read_unchecked().clone() {
+        None => FlakePositionRead::Loading,
+        Some(None) => FlakePositionRead::Unavailable,
+        Some(Some(position)) => FlakePositionRead::Ready(position),
+    };
     let observational_current_commit = commits_response
         .as_ref()
         .and_then(|response| response.current_commit.clone());
@@ -4860,7 +4900,7 @@ fn lane_from_commit_history(commits: &[SystemCommitHistory], flake_name: &str) -
 fn DeployTab(
     system: SystemDetail,
     commits: Vec<SystemCommitHistory>,
-    flake_position: Option<SystemFlakePosition>,
+    flake_position: FlakePositionRead,
     deployment_progress: Option<SystemDeploymentProgress>,
     heartbeat_next_in_secs: Option<f64>,
     generations: Vec<SystemGeneration>,
@@ -4887,14 +4927,27 @@ fn DeployTab(
 
     // INVARIANT: The lane, the picker, and the plan panel use one commit list,
     // so a commit selected in one of them exists in the others.
-    // A successful read is authoritative, including `no_history`; the
-    // `/commits` fallback applies only when the read itself failed.
-    let lane = match flake_position.as_ref() {
-        Some(position) => LaneModel::managed(position),
-        None => lane_from_commit_history(&commits, &flake_name),
+    //
+    // Only a successful read is authoritative for branch position, peers, and
+    // build state (including a `no_history` answer). While the read is loading
+    // or after it failed, the picker still lists the `/commits` history so the
+    // operator can pick a target, but the card says that branch data is not
+    // available and the picker shows no running-commit, ahead, or build claims.
+    let position_ready = matches!(flake_position, FlakePositionRead::Ready(_));
+    let lane = match &flake_position {
+        FlakePositionRead::Ready(position) => LaneModel::managed(position),
+        _ => lane_from_commit_history(&commits, &flake_name),
     };
     let lane_commits = lane.commits.clone();
     let running_index = lane.at;
+    let picker_running = if position_ready { running_index } else { None };
+    // The progress banner is the fallback whenever the lane cannot draw the
+    // deployment: unknown position, an unplaceable target, or an unavailable
+    // read. Without it the deployment and its failure message would vanish.
+    let lane_draws_deployment = position_ready
+        && deployment_progress
+            .as_ref()
+            .is_some_and(|progress| can_draw_deployment(&lane, progress));
     let displayed_commits: Vec<SystemCommitHistory> = lane_commits
         .iter()
         .enumerate()
@@ -5062,6 +5115,20 @@ fn DeployTab(
         div {
             style: "display:flex;flex-direction:column;gap:14px;",
 
+        if !lane_draws_deployment {
+            if let Some(progress) = deployment_progress.clone() {
+                PendingDeployBanner {
+                    progress,
+                    hostname: system.hostname.clone(),
+                    heartbeat_interval_secs: system.effective_heartbeat_interval_secs as i64,
+                    heartbeat_next_in_secs,
+                    on_dismiss: move |_| on_dismiss_deploy.call(()),
+                    on_view_logs: move |_| on_view_logs.call(()),
+                }
+            }
+        }
+
+        if position_ready {
         FlakePositionCard {
             lane: lane.clone(),
             hostname: system.hostname.clone(),
@@ -5109,6 +5176,26 @@ fn DeployTab(
                 }
             },
         }
+        } else {
+            section {
+                class: "card sd-card fp-card",
+                "data-testid": "flake-position-card",
+                "data-fp-state": if matches!(flake_position, FlakePositionRead::Loading) { "loading" } else { "unavailable" },
+                if matches!(flake_position, FlakePositionRead::Loading) {
+                    div { class: "fp-summary",
+                        div { class: "fp-headline", "Loading flake position…" }
+                    }
+                } else {
+                    div { class: "fp-summary",
+                        div { class: "fp-headline", "Flake position unavailable" }
+                        div { class: "fp-sub",
+                            "The server could not load the branch position, other hosts, or build states for {system.hostname}. "
+                            "The targets below come from the commit list, ordered by commit time. They carry no branch position, host, or build information."
+                        }
+                    }
+                }
+            }
+        }
 
         div {
             class: "sd-grid sd-grid-deploy",
@@ -5117,7 +5204,8 @@ fn DeployTab(
                 hostname: system.hostname.clone(),
                 flake_name: flake_name.clone(),
                 commits: lane_commits.clone(),
-                running: running_index,
+                running: picker_running,
+                degraded: !position_ready,
                 generations: generations.clone(),
                 generation_mode: mode() == "generation",
                 selected_commit: effective_commit.clone(),
@@ -12517,6 +12605,47 @@ mod tests {
         }
     }
 
+    fn progress(stage: &str) -> crate::api::models::SystemDeploymentProgress {
+        crate::api::models::SystemDeploymentProgress {
+            id: uuid::Uuid::from_u128(7),
+            stage: stage.to_string(),
+            kind: "deploy".to_string(),
+            target_store_path: "/nix/store/x".to_string(),
+            target_commit: None,
+            target_generation: None,
+            source: "manual".to_string(),
+            issued_at: chrono::Utc::now(),
+            delivered_at: None,
+            applying_at: None,
+            completed_at: None,
+            failed_at: None,
+            failure_message: None,
+        }
+    }
+
+    #[test]
+    fn idle_page_does_not_poll() {
+        // The first request is pending: nothing to poll yet.
+        assert!(!super::deployment_is_active(None));
+        // The server answered "no deployment": the resource is Some(None).
+        // This is the regression: it used to count as active.
+        assert!(!super::deployment_is_active(Some(&None)));
+        // A record, including a finished one inside the display window, polls.
+        assert!(super::deployment_is_active(Some(&Some(progress("queued")))));
+        assert!(super::deployment_is_active(Some(&Some(progress(
+            "activated"
+        )))));
+    }
+
+    #[test]
+    fn deployment_key_changes_on_stage_and_clears_when_idle() {
+        let queued = super::deployment_state_key(Some(&Some(progress("queued"))));
+        let applying = super::deployment_state_key(Some(&Some(progress("applying"))));
+        assert!(queued.is_some());
+        assert_ne!(queued, applying);
+        assert_eq!(super::deployment_state_key(Some(&None)), None);
+        assert_eq!(super::deployment_state_key(None), None);
+    }
     #[test]
     fn revision_scope_cve_intent_is_independent_of_presentation_and_other_query_state() {
         let retained = SystemCveInventorySelection::RetainedGeneration {

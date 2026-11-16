@@ -1,5 +1,5 @@
 //! Isolated PostgreSQL tests for the per-system flake-position read.
-//! Run only against a verified disposable cluster with CREATEDB privileges.
+//! Runs in the isolated CI database path (`packages/devScripts/tests/database-regressions.sh`).
 
 use crystal_forge::api::models::{
     FlakePositionBuildState, FlakePositionOrdering, FlakePositionUnknownReason,
@@ -144,7 +144,6 @@ async fn viewer_in(pool: &PgPool, environment: Uuid) -> Uuid {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "requires an explicitly verified disposable DATABASE_URL"]
 async fn behind_position_peers_and_build_state(pool: PgPool) {
     let fleet = fleet(&pool, true).await;
     let subject = system(&pool, &fleet, "lane-subject", fleet.env_a, Some(2)).await;
@@ -157,7 +156,8 @@ async fn behind_position_peers_and_build_state(pool: PgPool) {
     .execute(&pool)
     .await
     .expect("queued build");
-    // Commit 3: a success followed by a queued retry still reads as ready.
+    // Commit 3: a success followed by a queued retry, with its output pushed to
+    // the cache, still reads as ready.
     sqlx::query(
         "INSERT INTO build_jobs(derivation_id,status) \
          SELECT id, s FROM derivations, unnest(ARRAY['success','queued']) s \
@@ -166,6 +166,31 @@ async fn behind_position_peers_and_build_state(pool: PgPool) {
     .execute(&pool)
     .await
     .expect("success then retry");
+    sqlx::query(
+        "INSERT INTO cache_push_jobs(derivation_id,status,store_path) \
+         SELECT id,'completed',store_path FROM derivations \
+         WHERE derivation_name='lane-subject' AND derivation_path LIKE '%-3.drv'",
+    )
+    .execute(&pool)
+    .await
+    .expect("published");
+    // Commit 4: built, but the cache push never completed (TASK-527).
+    sqlx::query(
+        "INSERT INTO build_jobs(derivation_id,status) \
+         SELECT id,'success' FROM derivations \
+         WHERE derivation_name='lane-subject' AND derivation_path LIKE '%-4.drv'",
+    )
+    .execute(&pool)
+    .await
+    .expect("built");
+    sqlx::query(
+        "INSERT INTO cache_push_jobs(derivation_id,status,store_path,error_message) \
+         SELECT id,'pending',store_path,'cache_probe_failed' FROM derivations \
+         WHERE derivation_name='lane-subject' AND derivation_path LIKE '%-4.drv'",
+    )
+    .execute(&pool)
+    .await
+    .expect("pending publication");
 
     let admin_view = fetch_system_flake_position(&pool, subject, None)
         .await
@@ -197,6 +222,10 @@ async fn behind_position_peers_and_build_state(pool: PgPool) {
         admin_view.commits[3].build_state,
         FlakePositionBuildState::Ready
     );
+    assert_eq!(
+        admin_view.commits[4].build_state,
+        FlakePositionBuildState::Unpublished
+    );
     assert_eq!(admin_view.commits[2].peers, vec!["lane-peer-a".to_string()]);
     assert_eq!(admin_view.commits[0].peers, vec!["lane-peer-b".to_string()]);
 
@@ -211,7 +240,6 @@ async fn behind_position_peers_and_build_state(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "requires an explicitly verified disposable DATABASE_URL"]
 async fn timestamp_fallback_and_unknown_reasons(pool: PgPool) {
     let fleet = fleet(&pool, false).await;
     let unobserved = system(&pool, &fleet, "lane-quiet", fleet.env_a, None).await;
@@ -254,7 +282,6 @@ async fn timestamp_fallback_and_unknown_reasons(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "requires an explicitly verified disposable DATABASE_URL"]
 async fn shared_output_places_the_host_at_the_newest_matching_commit(pool: PgPool) {
     // Commits 0 (HEAD) and 2 build the same closure for this host, as happens
     // when newer commits do not touch its configuration.
@@ -282,7 +309,6 @@ async fn shared_output_places_the_host_at_the_newest_matching_commit(pool: PgPoo
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "requires an explicitly verified disposable DATABASE_URL"]
 async fn deployment_progress_labels_the_requested_or_newest_commit(pool: PgPool) {
     use crystal_forge::queries::system_events::get_system_deployment_progress_row;
     // Commits 0 (HEAD) and 2 share one output; the host runs commit 2.
@@ -336,7 +362,6 @@ async fn deployment_progress_labels_the_requested_or_newest_commit(pool: PgPool)
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "requires an explicitly verified disposable DATABASE_URL"]
 async fn finished_deployment_visibility_window(pool: PgPool) {
     use crystal_forge::queries::system_events::get_system_deployment_progress_row;
     let fleet = fleet(&pool, true).await;

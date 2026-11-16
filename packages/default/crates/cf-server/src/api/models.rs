@@ -4305,20 +4305,28 @@ pub struct FlakePositionCommit {
     pub peers: Vec<String>,
 }
 
-/// Build state of one system configuration at one commit.
+/// Build and publication state of one system configuration at one commit.
 ///
 /// The server derives the state from `build_jobs` of the `nixos` derivation
-/// whose name is the system configuration name. A successful job gives
-/// `ready`, even when a later retry is queued. Otherwise a queued or running
-/// job gives `building`, and a failed job gives `failed`. A commit without a
-/// build job gives `not_built`.
+/// whose name is the system configuration name, and from `cache_push_jobs`.
+/// `ready` means deployable as far as build and publication go: a build job
+/// succeeded and a completed cache push exists for the derivation output, the
+/// same evidence `view_system_deployment_status` requires. A build that
+/// succeeded without that cache push is `unpublished`. This is the state of
+/// builds stuck in pending publication (TASK-527). Otherwise a queued or
+/// running job gives `building`, a failed job gives `failed`, and a commit
+/// without a build job gives `not_built`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlakePositionBuildState {
     /// A build job is queued or running and none has succeeded.
     Building,
-    /// A build job finished successfully.
+    /// A build job succeeded and the output is confirmed in the deployment
+    /// cache.
     Ready,
+    /// A build job succeeded, but no completed cache push for the output is
+    /// recorded.
+    Unpublished,
     /// The last finished build jobs failed and none succeeded.
     Failed,
     /// No build job exists.

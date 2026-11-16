@@ -127,6 +127,7 @@ fn parse_build_state(value: &str) -> FlakePositionBuildState {
     match value {
         "building" => FlakePositionBuildState::Building,
         "ready" => FlakePositionBuildState::Ready,
+        "unpublished" => FlakePositionBuildState::Unpublished,
         "failed" => FlakePositionBuildState::Failed,
         _ => FlakePositionBuildState::NotBuilt,
     }
@@ -295,8 +296,12 @@ pub async fn fetch_system_flake_position(
         LEFT JOIN LATERAL (
           -- A finished success wins: the closure exists even when a retry or
           -- requeue of the same derivation is queued or running afterwards.
+          -- `ready` additionally needs a completed cache push for the output,
+          -- the evidence view_system_deployment_status requires for a
+          -- deployable build; a success without it is `unpublished`.
           SELECT CASE
-            WHEN COUNT(*) FILTER (WHERE bj.status = 'success') > 0 THEN 'ready'
+            WHEN COUNT(*) FILTER (WHERE bj.status = 'success' AND pub.published) > 0 THEN 'ready'
+            WHEN COUNT(*) FILTER (WHERE bj.status = 'success') > 0 THEN 'unpublished'
             WHEN COUNT(*) FILTER (WHERE bj.status IN ('queued', 'building', 'cancelling')) > 0
               THEN 'building'
             WHEN COUNT(*) FILTER (WHERE bj.status = 'failed') > 0 THEN 'failed'
@@ -304,6 +309,14 @@ pub async fn fetch_system_flake_position(
           END AS build_state
           FROM derivations d
           JOIN build_jobs bj ON bj.derivation_id = d.id
+          CROSS JOIN LATERAL (
+            SELECT EXISTS (
+              SELECT 1 FROM cache_push_jobs cpj
+              WHERE cpj.derivation_id = d.id
+                AND cpj.status = 'completed'
+                AND cpj.store_path = d.store_path
+            ) AS published
+          ) pub
           WHERE d.commit_id = o.id
             AND d.derivation_type = 'nixos'
             AND d.derivation_name = $6

@@ -441,10 +441,13 @@ SQL
     # Preserve the existing targets and Cargo's failure propagation. Separate
     # compilation/linking from execution to identify a silent boundary.
     for testTarget in \
+      already_current_deployment \
       assignment_semantics \
       compliance_assignment_zombie_repair \
       composite_policy \
       evidence_for_ato \
+      flake_position \
+      flake_position_http \
       framework_version_id_lifecycle \
       hardening_admission_migration_upgrade \
       management_mode_migration_upgrade \

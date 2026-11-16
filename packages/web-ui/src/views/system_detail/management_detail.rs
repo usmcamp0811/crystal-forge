@@ -303,14 +303,26 @@ pub(super) fn ManagementDetail(
                                         // artifact whose evidence is shown. That revision can
                                         // be older than the selected (HEAD) revision while a
                                         // newer artifact is not built yet.
+                                        //
+                                        // When the configuration was removed, HEAD no longer
+                                        // holds it. The marker is then the last revision that
+                                        // did (artifact, else the newest scan), never HEAD.
+                                        let removed = e.evaluation.availability == "removed";
                                         let artifact = e.selected_artifact.as_ref();
-                                        let evidence_sha = artifact
-                                            .map(|a| a.revision.sha.clone())
-                                            .or_else(|| e.selected_revision.as_ref().map(|r| r.sha.clone()));
+                                        let evidence_sha = if removed {
+                                            artifact
+                                                .map(|a| a.revision.sha.clone())
+                                                .or_else(|| e.latest_good_scan.as_ref().map(|s| s.revision.sha.clone()))
+                                                .or_else(|| e.latest_terminal_scan.as_ref().map(|s| s.revision.sha.clone()))
+                                        } else {
+                                            artifact
+                                                .map(|a| a.revision.sha.clone())
+                                                .or_else(|| e.selected_revision.as_ref().map(|r| r.sha.clone()))
+                                        };
                                         let lane = LaneModel::evidence(
                                             &position,
                                             evidence_sha.as_deref(),
-                                            e.evaluation.availability == "removed",
+                                            removed,
                                         );
                                         let store_path = artifact
                                             .and_then(|a| a.output_path.clone().or_else(|| a.expected_output_path.clone()));

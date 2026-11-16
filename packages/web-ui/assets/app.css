@@ -9337,3 +9337,12 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
 .sd-diff > div{padding:0;background:transparent;border-radius:0;overflow:visible}
 .fp-lane-faded .fp-picked .fp-dot,.fp-lane-faded .fp-pickable .fp-dot:hover{opacity:1}
 .fp-top-sha .fp-pin{font-family:var(--font-sans)}
+/* Picker rows: the row is a container; select and SHA are separate buttons. */
+.tp-row{position:relative}
+.tp-row .tp-select{display:block;min-width:0;width:100%;padding:0;border:0;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.tp-row .tp-select::after{content:"";position:absolute;inset:0;border-radius:8px}
+.tp-row .tp-select:focus-visible{outline:none}
+.tp-row .tp-select:focus-visible::after{outline:2px solid var(--cf-brand-purple);outline-offset:-2px}
+.tp-row .tp-sha{position:relative;z-index:1;padding:0;border:0;background:none;font-size:inherit;cursor:pointer}
+.tp-row .tp-sha:focus-visible{outline:2px solid var(--cf-brand-purple);outline-offset:2px;border-radius:3px}
+.tp-unpublished{color:var(--cf-amber)}

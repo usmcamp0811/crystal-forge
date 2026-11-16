@@ -5435,10 +5435,14 @@ pub struct FlakePositionCommit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlakePositionBuildState {
-    /// A build job is queued or running.
+    /// A build job is queued or running and none has succeeded.
     Building,
-    /// A build job finished successfully.
+    /// A build job succeeded and the output is confirmed in the deployment
+    /// cache. The commit is deployable as far as build and publication go.
     Ready,
+    /// A build job succeeded, but a completed cache push for its output is not
+    /// recorded. A deployment of this commit can wait or fail.
+    Unpublished,
     /// Build jobs failed and none succeeded.
     Failed,
     /// No build job exists.

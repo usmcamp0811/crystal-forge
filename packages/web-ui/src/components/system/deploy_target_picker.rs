@@ -98,6 +98,7 @@ pub fn DeployTargetPicker(
     flake_name: String,
     commits: Vec<FlakePositionCommit>,
     running: Option<usize>,
+    #[props(default)] degraded: bool,
     generations: Vec<SystemGeneration>,
     generation_mode: bool,
     selected_commit: String,
@@ -163,6 +164,8 @@ pub fn DeployTargetPicker(
                     "{flake_name} · "
                     strong { class: "tp-ahead-n", "{newer} newer" }
                     " than what's deployed"
+                } else if degraded {
+                    "{flake_name} · ordered by commit time; branch position unavailable"
                 } else if running.is_some() {
                     "{flake_name} · deployed commit is HEAD"
                 } else {
@@ -186,7 +189,7 @@ pub fn DeployTargetPicker(
                             let is_cur = running == Some(index);
                             let ahead = running.is_some_and(|r| r > 0 && index < r);
                             let class = format!(
-                                "tp-row focus-ring{}{}{}{}{}{}",
+                                "tp-row{}{}{}{}{}{}",
                                 if is_sel { " sel" } else { "" },
                                 if is_cur { " cur" } else { "" },
                                 if ahead { " ahead" } else { "" },
@@ -198,6 +201,7 @@ pub fn DeployTargetPicker(
                             let sha_open = commit.sha.clone();
                             let short: String = commit.sha.chars().take(7).collect();
                             let building = !is_cur && commit.build_state == FlakePositionBuildState::Building;
+                            let unpublished = !is_cur && commit.build_state == FlakePositionBuildState::Unpublished;
                             rsx! {
                                 if let Some(count) = gap_above {
                                     div { class: "tp-gap",
@@ -205,21 +209,29 @@ pub fn DeployTargetPicker(
                                         span { "{count} commits" }
                                     }
                                 }
-                                button {
+                                // ACCESSIBILITY: Selecting the target and opening the commit
+                                // are separate buttons. The select button stretches over the
+                                // whole row with a pseudo-element (see `.tp-select::after`);
+                                // the SHA button sits above it, so both keep their own
+                                // keyboard focus and a pointer click anywhere selects the row.
+                                div {
                                     class: "{class}",
                                     "data-sha": "{commit.sha}",
-                                    onclick: move |_| on_select_commit.call(sha_select.clone()),
-                                    span { class: "tp-lane", i {} b {} }
+                                    span { class: "tp-lane", "aria-hidden": "true", i {} b {} }
                                     span { class: "tp-main",
-                                        span { class: "tp-msg", title: "{commit.message}", "{commit.message}" }
+                                        button {
+                                            class: "tp-select focus-ring",
+                                            "aria-pressed": "{is_sel}",
+                                            title: "{commit.message}",
+                                            onclick: move |_| on_select_commit.call(sha_select.clone()),
+                                            span { class: "tp-msg", "{commit.message}" }
+                                        }
                                         span { class: "tp-meta",
-                                            span {
-                                                class: "mono tp-sha",
+                                            button {
+                                                class: "mono tp-sha focus-ring",
                                                 title: "Open {short} in Flakes",
-                                                onclick: move |event| {
-                                                    event.stop_propagation();
-                                                    on_open_sha.call(sha_open.clone());
-                                                },
+                                                "aria-label": "Open {short} in Flakes",
+                                                onclick: move |_| on_open_sha.call(sha_open.clone()),
                                                 "{short}"
                                             }
                                             span { "{commit.author}" }
@@ -236,6 +248,13 @@ pub fn DeployTargetPicker(
                                             span { class: "tp-build", title: "Building",
                                                 span { class: "deploy-pending-spinner fp-chip-spin", "aria-hidden": "true" }
                                                 " building"
+                                            }
+                                        }
+                                        if unpublished {
+                                            span {
+                                                class: "tp-build tp-unpublished",
+                                                title: "Built, but not yet confirmed in the deployment cache. A deployment of this commit can wait or fail until it is published.",
+                                                " awaiting cache"
                                             }
                                         }
                                     }
@@ -280,7 +299,7 @@ pub fn DeployTargetPicker(
                             };
                             let is_sel = selected_generation == Some(generation.generation);
                             let class = format!(
-                                "tp-row tp-gen focus-ring o-{origin}{}{}{}{}",
+                                "tp-row tp-gen o-{origin}{}{}{}{}",
                                 if is_sel { " sel" } else { "" },
                                 if generation.is_current { " cur" } else { "" },
                                 if k == 0 { " first" } else { "" },
@@ -296,25 +315,27 @@ pub fn DeployTargetPicker(
                             let short = generation.commit_hash.as_ref().map(|sha| sha.chars().take(7).collect::<String>());
                             let message = if generation.is_current { "Active generation" } else { "Generation rollback" };
                             rsx! {
-                                button {
+                                div {
                                     key: "gen-{number}",
                                     class: "{class}",
                                     title: "{title}",
                                     "data-generation": "{number}",
-                                    onclick: move |_| on_select_generation.call(number),
-                                    span { class: "tp-lane", i {} b {} }
+                                    span { class: "tp-lane", "aria-hidden": "true", i {} b {} }
                                     span { class: "tp-main",
-                                        span { class: "tp-msg", "{message}" }
+                                        button {
+                                            class: "tp-select focus-ring",
+                                            "aria-pressed": "{is_sel}",
+                                            onclick: move |_| on_select_generation.call(number),
+                                            span { class: "tp-msg", "{message}" }
+                                        }
                                         span { class: "tp-meta",
                                             span { class: "mono tp-gen-id", "#{number}" }
                                             if let (Some(short), Some(sha)) = (short, sha_open) {
-                                                span {
-                                                    class: "mono tp-sha",
+                                                button {
+                                                    class: "mono tp-sha focus-ring",
                                                     title: "Open {short} in Flakes",
-                                                    onclick: move |event| {
-                                                        event.stop_propagation();
-                                                        on_open_sha.call(sha.clone());
-                                                    },
+                                                    "aria-label": "Open {short} in Flakes",
+                                                    onclick: move |_| on_open_sha.call(sha.clone()),
                                                     "{short}"
                                                 }
                                             } else {
