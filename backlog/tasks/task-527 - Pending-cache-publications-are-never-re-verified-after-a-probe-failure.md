@@ -4,7 +4,7 @@ title: Pending cache publications are never re-verified after a probe failure
 status: Backlog
 assignee: []
 created_date: '2026-11-16T14:06:00Z'
-updated_date: '2026-11-16T14:54:00Z'
+updated_date: '2026-11-16T15:44:00Z'
 labels:
   - server
   - builders
@@ -48,4 +48,6 @@ Backlog. Discovered while reviewing TASK-525.1 (MR !343); not part of that MR.
 
 <!-- SECTION:NOTES:BEGIN -->
 Owner diagnosis 2026-11-16 on reckless: failure is not transient. Probe fails in ~81 ms on every build. The niks3 destination (id 2) was edited 2026-11-12 02:27 UTC (14 min after the last confirmed push, 7103359) to niks3_read_auth_mode=mtls. The same path-info run as an ordinary user with the server nix 2.35.3, stripped env and no client cert succeeds, so reads do not require mTLS. In mTLS mode the probe adds ?tls-certificate=&tls-private-key= to the store URL and, when a CA is configured, sets NIX_SSL_CERT_FILE to only that CA (cf-config cache_credentials.rs PreparedCacheRead). Suspected: configured CA does not validate the niks3 server certificate, or the store does not accept those parameters; Nix stderr is discarded into cache_probe_failed, so the server cannot say which. Additional required outcome: classify TLS/certificate errors and surface a redacted diagnostic; validate mTLS read settings when the destination is saved.
+
+Resolution 2026-11-16: root cause was a wrong cache read URL on the niks3 destination (edited 2026-11-12). Owner corrected it and publications now verify. The defects in this task remain: no re-verification of pending publications, Nix errors discarded into cache_probe_failed, no save-time validation. Operator-visibility work is split into TASK-528.
 <!-- SECTION:NOTES:END -->
