@@ -93,6 +93,10 @@ async fn snapshot_actor(
     tx: &mut Transaction<'_, Postgres>,
     request: &PoamActor,
 ) -> Result<PoamActor, ExportError> {
+    // SECURITY: Export projections are not released for restricted credentials.
+    if !request.credential.is_browser_session() {
+        return Err(ExportError::Forbidden);
+    }
     // SECURITY: Never trust request-carried roles or memberships for exports.
     let roles: Vec<String> = sqlx::query_scalar(
         "SELECT role::text FROM user_role_assignments WHERE user_id=$1 AND EXISTS (SELECT 1 FROM users WHERE id=$1 AND is_active)",
@@ -114,6 +118,7 @@ async fn snapshot_actor(
     .await
     .map_err(|_| ExportError::Internal)?;
     Ok(PoamActor {
+        credential: request.credential.clone(),
         user_id: request.user_id,
         identifier: request.identifier.clone(),
         is_admin,
@@ -311,8 +316,15 @@ fn write_plans(plans: &[Plan]) -> Result<tabular::Exports, ExportError> {
 /// size, or serialization fails. It never joins a separate post-selection
 /// detail read.
 ///
+/// Requires explicit browser-session provenance; browser behavior is unchanged.
+/// Restricted credentials are always forbidden, including Admin-owned grants
+/// with audience `mcp`, both `cves:read` and `poams:read`, and valid expiry.
+/// Current owner authority and an environment grant cannot authorize this
+/// browser export representation.
+///
 /// # Errors
-/// Returns [`ExportError::Forbidden`] for inactive readers,
+/// Returns [`ExportError::Forbidden`] for restricted credentials or inactive
+/// readers,
 /// [`ExportError::TooManyRows`] above the authorized cap, or
 /// [`ExportError::AmbiguousScope`] when a recorded scope is hidden from the reader.
 /// Filter, candidate-scan, database, and writer failures also abort the export.

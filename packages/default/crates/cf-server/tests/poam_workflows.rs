@@ -68,6 +68,384 @@ use uuid::Uuid;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+#[sqlx::test(migrations = "./migrations")]
+async fn restricted_credential_refresh_preserves_grant_and_current_owner_intersection(
+    pool: PgPool,
+) {
+    use crystal_forge::auth::authorization::{CredentialIdentity, RestrictedGrant};
+
+    let staging_host = assessment_fixture(&pool).await;
+    let production_host = assessment_fixture(&pool).await;
+    let staging = assign_environment(&pool, "grant-staging", &[&staging_host]).await;
+    let production = assign_environment(&pool, "grant-production", &[&production_host]).await;
+    let cve = "CVE-2026-52602";
+    let package = "grant-regression";
+    let clock = FixedClock(Utc::now());
+    let staging_observation = seal_exact_cve_scan(
+        &pool,
+        &staging_host,
+        clock.now(),
+        Some((cve, package, "1.0", false)),
+    )
+    .await
+    .unwrap();
+    seal_exact_cve_scan(
+        &pool,
+        &production_host,
+        clock.now(),
+        Some((cve, package, "1.0", false)),
+    )
+    .await;
+    let row_keys = [CveRelationshipRowKey {
+        canonical_cve_id: cve.into(),
+        canonical_package_name: package.into(),
+        scan_id: staging_observation.scan_id,
+        occurrence_derivation_path: staging_observation.occurrence_derivation_path.clone(),
+    }];
+    let user = staging_host.user_id;
+    sync_user_role(&pool, user, AuthRole::Operator)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO user_environment_memberships(user_id,environment_id) VALUES($1,$2),($1,$3) ON CONFLICT DO NOTHING")
+        .bind(user).bind(staging).bind(production).execute(&pool).await.unwrap();
+    let mut actor = admin_actor(user);
+    // Stale request Admin/write claims must not override either source of limits.
+    actor.credential = CredentialIdentity::Restricted(RestrictedGrant::new(
+        Uuid::new_v4(),
+        Some("mcp".into()),
+        [
+            "cves:read".into(),
+            "poams:read".into(),
+            "poams:write".into(),
+        ]
+        .into(),
+        [staging].into(),
+        Utc::now() + TimeDelta::hours(1),
+    ));
+    let assert_scope = |actor: PoamActor| {
+        let pool = pool.clone();
+        async move {
+            assert!(
+                !poam_service::cve_relationships(
+                    &pool,
+                    &actor,
+                    staging_host.system_id,
+                    None,
+                    None,
+                    &FixedClock(Utc::now())
+                )
+                .await
+                .unwrap()
+                .is_empty()
+            );
+            assert!(matches!(
+                poam_service::cve_relationships(
+                    &pool,
+                    &actor,
+                    production_host.system_id,
+                    None,
+                    None,
+                    &FixedClock(Utc::now())
+                )
+                .await,
+                Err(PoamError::NotFound)
+            ));
+        }
+    };
+    assert_scope(actor.clone()).await;
+    sync_user_role(&pool, user, AuthRole::Admin).await.unwrap();
+    assert_scope(actor.clone()).await;
+    // An Admin owner and stale request write flags cannot release mutations.
+    assert!(actor.is_admin && actor.can_mutate);
+    let mutation_state_sql = r#"SELECT
+        COALESCE((SELECT jsonb_agg(to_jsonb(disposition) ORDER BY disposition.id)
+          FROM cve_environment_dispositions disposition
+          WHERE canonical_cve_id=$1 AND canonical_package_name=$2), '[]'::jsonb),
+        COALESCE((SELECT jsonb_agg(to_jsonb(audit) ORDER BY audit.id)
+          FROM admin_audit_events audit WHERE actor_user_id=$3), '[]'::jsonb)"#;
+    let before_mutation: (serde_json::Value, serde_json::Value) = sqlx::query_as(mutation_state_sql)
+        .bind(cve)
+        .bind(package)
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        poam_service::triage_fleet_cve(
+            &pool,
+            &actor,
+            cve,
+            FleetCveTriageRequest {
+                canonical_package_name: package.into(),
+                actions: vec![CveEnvironmentTriageAction::AcceptRisk {
+                    environment_id: staging,
+                    justification: "Admin-owned restricted credential must never persist".into(),
+                    review_date: None,
+                }],
+                poam: None,
+            },
+            &clock,
+        )
+        .await,
+        Err(PoamError::Forbidden)
+    ));
+    let after_mutation: (serde_json::Value, serde_json::Value) = sqlx::query_as(mutation_state_sql)
+        .bind(cve)
+        .bind(package)
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after_mutation, before_mutation);
+    // Promotion cannot add production to the immutable staging grant.
+    let detail =
+        poam_service::system_cve_triage_detail(&pool, &actor, staging_host.system_id, cve, package)
+            .await
+            .unwrap();
+    assert_eq!(detail.scope.environment_id, staging);
+    assert!(matches!(
+        poam_service::system_cve_triage_detail(
+            &pool,
+            &actor,
+            production_host.system_id,
+            cve,
+            package
+        )
+        .await,
+        Err(PoamError::NotFound)
+    ));
+    let batch = poam_service::fleet_cve_batch_detail(
+        &pool,
+        &actor,
+        FleetCveBatchDetailRequest {
+            pairs: vec![CveBatchPairIdentity {
+                cve_id: cve.into(),
+                canonical_package_name: package.into(),
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(batch.items[0].environments.len(), 1);
+    assert_eq!(batch.items[0].environments[0].environment_id, staging);
+    let relationships = poam_service::cve_relationships_for_rows(
+        &pool,
+        &actor,
+        staging_host.system_id,
+        &row_keys,
+        None,
+        None,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(relationships.len(), 1);
+    assert_eq!(relationships[0].observation, staging_observation);
+    for (audience, scopes, expires_at, environments) in [
+        (
+            None,
+            vec!["cves:read", "poams:read"],
+            Utc::now() + TimeDelta::hours(1),
+            vec![staging],
+        ),
+        (
+            Some("cli"),
+            vec!["cves:read", "poams:read"],
+            Utc::now() + TimeDelta::hours(1),
+            vec![staging],
+        ),
+        (
+            Some("mcp"),
+            vec!["cves:read"],
+            Utc::now() + TimeDelta::hours(1),
+            vec![staging],
+        ),
+        (
+            Some("mcp"),
+            vec!["poams:read"],
+            Utc::now() + TimeDelta::hours(1),
+            vec![staging],
+        ),
+        (
+            Some("mcp"),
+            vec!["cves:read", "poams:read"],
+            Utc::now(),
+            vec![staging],
+        ),
+        (
+            Some("mcp"),
+            vec!["cves:read", "poams:read"],
+            Utc::now() + TimeDelta::hours(1),
+            vec![],
+        ),
+    ] {
+        let mut denied = actor.clone();
+        let empty_environments = environments.is_empty();
+        denied.credential = CredentialIdentity::Restricted(RestrictedGrant::new(
+            Uuid::new_v4(),
+            audience.map(str::to_owned),
+            scopes.into_iter().map(str::to_owned).collect(),
+            environments.into_iter().collect(),
+            expires_at,
+        ));
+        let result = poam_service::cve_relationships_for_rows(
+            &pool,
+            &denied,
+            staging_host.system_id,
+            &row_keys,
+            None,
+            None,
+            &clock,
+        )
+        .await;
+        if empty_environments {
+            assert!(matches!(result, Err(PoamError::NotFound)));
+        } else {
+            assert!(matches!(result, Err(PoamError::Forbidden)));
+        }
+    }
+    // A whole-plan response cannot reveal text from a shared hidden scope.
+    let scheduled = poam_service::triage_fleet_cve(
+        &pool,
+        &admin_actor(user),
+        cve,
+        FleetCveTriageRequest {
+            canonical_package_name: package.into(),
+            actions: vec![
+                CveEnvironmentTriageAction::SchedulePatch {
+                    environment_id: staging,
+                },
+                CveEnvironmentTriageAction::SchedulePatch {
+                    environment_id: production,
+                },
+            ],
+            poam: Some(fleet_poam_request(user, &clock)),
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        poam_service::system_cve_triage_detail(&pool, &actor, staging_host.system_id, cve, package)
+            .await,
+        Err(PoamError::NotFound)
+    ));
+    assert!(matches!(
+        poam_service::fleet_cve_batch_detail(
+            &pool,
+            &actor,
+            FleetCveBatchDetailRequest {
+                pairs: vec![CveBatchPairIdentity {
+                    cve_id: cve.into(),
+                    canonical_package_name: package.into()
+                }],
+            }
+        )
+        .await,
+        Err(PoamError::NotFound)
+    ));
+    // Retire the hidden subject and its schedule. Current visibility now allows
+    // this plan, but its recorded hidden subject still forbids the whole read.
+    let shared_poam_id = scheduled.poam_id.unwrap();
+    sqlx::query("UPDATE poam_cve_finding_links SET retired_at=now(),retired_by=$3,retirement_reason='operator_unlinked' WHERE poam_id=$1 AND system_id=$2 AND retired_at IS NULL")
+        .bind(shared_poam_id)
+        .bind(production_host.system_id)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE cve_environment_dispositions SET retired_at=now(),retired_by=$3,retirement_reason='operator_cleared' WHERE poam_id=$1 AND environment_id=$2 AND retired_at IS NULL")
+        .bind(shared_poam_id)
+        .bind(production)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let currently_visible: bool =
+        sqlx::query_scalar("SELECT poam_visible_to_environments($1,$2)")
+            .bind(shared_poam_id)
+            .bind(vec![staging])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(currently_visible);
+    let browser_relationships = poam_service::cve_relationships_for_rows(
+        &pool,
+        &admin_actor(user),
+        staging_host.system_id,
+        &row_keys,
+        None,
+        None,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(browser_relationships.len(), 1);
+    assert_eq!(
+        browser_relationships[0].active_poam.as_ref().unwrap().id,
+        shared_poam_id
+    );
+    assert!(matches!(
+        poam_service::cve_relationships_for_rows(
+            &pool,
+            &actor,
+            staging_host.system_id,
+            &row_keys,
+            None,
+            None,
+            &clock,
+        )
+        .await,
+        Err(PoamError::NotFound)
+    ));
+    // Restricted credentials cannot enter browser-only reads or exports.
+    assert!(matches!(
+        poam_service::dashboard(&pool, &actor, &clock).await,
+        Err(PoamError::Forbidden)
+    ));
+    assert!(matches!(crystal_forge::services::register_export_selection::select_acceptances(&pool, &actor, &AcceptanceListQuery::default()).await, Err(crystal_forge::services::register_export_selection::RegisterExportSelectionError::Forbidden)));
+    sync_user_role(&pool, user, AuthRole::Viewer).await.unwrap();
+    assert!(matches!(
+        poam_service::triage_fleet_cve(
+            &pool,
+            &actor,
+            cve,
+            FleetCveTriageRequest {
+                canonical_package_name: package.into(),
+                actions: vec![CveEnvironmentTriageAction::AcceptRisk {
+                    environment_id: staging,
+                    justification: "must never persist".into(),
+                    review_date: None,
+                }],
+                poam: None,
+            },
+            &clock
+        )
+        .await,
+        Err(PoamError::Forbidden)
+    ));
+    sqlx::query("DELETE FROM user_environment_memberships WHERE user_id=$1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        poam_service::cve_relationships(&pool, &actor, staging_host.system_id, None, None, &clock)
+            .await,
+        Err(PoamError::NotFound)
+    ));
+    sqlx::query("UPDATE users SET is_active=false WHERE id=$1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        poam_service::cve_relationships(&pool, &actor, staging_host.system_id, None, None, &clock)
+            .await,
+        Err(PoamError::Forbidden)
+    ));
+}
+
 async fn apply_migrations_through(pool: &PgPool, version: i64) {
     let mut connection = pool.acquire().await.expect("acquire migration connection");
     connection
@@ -843,6 +1221,7 @@ async fn typed_assignee_create_update_and_legacy_search_matrix(pool: PgPool) {
         .await;
     assert!(delete_assigned_user.is_err());
     let unscoped_assignee = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: candidate_id,
         identifier: "typed-owner".into(),
         is_admin: false,
@@ -1831,6 +2210,7 @@ async fn environment_move_retains_mixed_history_and_separates_visible_poams(pool
         .await
         .unwrap();
     let scoped = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: a_reader.user_id,
         identifier: "a-only-reader".into(),
         is_admin: false,
@@ -3500,6 +3880,7 @@ async fn renew_cve_acceptance_rejects_missing_evidence_and_revoked_membership(po
         .await
         .unwrap();
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: fixture.user_id,
         identifier: "operator".into(),
         is_admin: false,
@@ -4081,6 +4462,7 @@ async fn fleet_cve_triage_is_atomic_environment_scoped_and_semantically_idempote
     );
 
     let scoped_actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: first.user_id,
         identifier: "scoped-fleet-operator@example.invalid".into(),
         is_admin: false,
@@ -7325,6 +7707,7 @@ async fn fleet_cve_inventory_separates_current_scheduled_and_historical_scope(po
     );
 
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: current.user_id,
         identifier: "fleet-section-operator@example.invalid".into(),
         is_admin: false,
@@ -7343,6 +7726,7 @@ async fn fleet_cve_inventory_separates_current_scheduled_and_historical_scope(po
     assert_eq!(detail.environments.len(), 1);
 
     let admin_actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: current.user_id,
         identifier: "fleet-section-admin@example.invalid".into(),
         is_admin: true,
@@ -7359,6 +7743,7 @@ async fn fleet_cve_inventory_separates_current_scheduled_and_historical_scope(po
     assert_eq!(admin_detail.historical_inventory_system_count, 2);
 
     let scheduled_actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: scheduled.user_id,
         identifier: "scheduled-only@example.invalid".into(),
         is_admin: false,
@@ -8410,6 +8795,7 @@ async fn cve_dashboard_reads_scope_before_aggregation_and_count_distinct_hosts(p
     assert_eq!(second_detail.cve.fixed_version.as_deref(), Some("2.1.0"));
     assert_eq!(second_detail.cve.fix_status, "fix_available");
     let scoped_actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: second.user_id,
         identifier: "development-operator@example.invalid".into(),
         is_admin: false,
@@ -9489,6 +9875,7 @@ async fn exact_cve_create_rechecks_scope_after_concurrent_environment_move(pool:
     .await
     .unwrap();
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: fixture.user_id,
         identifier: "moving-operator".into(),
         is_admin: false,
@@ -9570,6 +9957,7 @@ async fn exact_cve_link_rechecks_scope_after_concurrent_environment_move(pool: P
         .await
         .unwrap();
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: first.user_id,
         identifier: "link-moving-operator".into(),
         is_admin: false,
@@ -11179,6 +11567,7 @@ async fn assessment_evidence_snapshot(pool: &PgPool, system_ids: &[Uuid]) -> ser
 
 fn admin_actor(user_id: Uuid) -> PoamActor {
     PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id,
         identifier: format!("poam-admin-{user_id}@example.invalid"),
         is_admin: true,
@@ -11931,6 +12320,7 @@ async fn legacy_finding_authorizes_before_observation_validation(pool: PgPool) {
         .unwrap();
     observation.token = "invalid-token-that-must-not-be-validated".into();
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: fixture.user_id,
         identifier: "out-of-scope@example.invalid".into(),
         is_admin: false,
@@ -14076,6 +14466,7 @@ async fn every_linked_environment_must_be_visible_for_reads_and_mutations(pool: 
         .unwrap();
     tx.commit().await.unwrap();
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: visible.user_id,
         identifier: "limited-operator".into(),
         is_admin: false,
@@ -14184,6 +14575,7 @@ async fn retired_hidden_finding_does_not_deny_current_poam_access(pool: PgPool) 
     .unwrap();
     tx.commit().await.unwrap();
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: visible.user_id,
         identifier: "retired-hidden-operator".into(),
         is_admin: false,
@@ -14220,6 +14612,7 @@ async fn close_waits_for_and_rejects_a_superseding_failed_assessment(pool: PgPoo
     .await
     .unwrap();
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: fixture.user_id,
         identifier: "poam-race-admin".into(),
         is_admin: true,
@@ -15671,6 +16064,7 @@ async fn cve_finding_history_cursor_ignores_inaccessible_retired_links(pool: PgP
     .unwrap();
 
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: fixtures[0].user_id,
         identifier: "finding-history-operator@example.invalid".into(),
         is_admin: false,
@@ -15810,6 +16204,7 @@ async fn close_waits_for_an_uncommitted_waiver_revocation(pool: PgPool) {
     .await
     .unwrap();
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: fixture.user_id,
         identifier: "poam-waiver-admin".into(),
         is_admin: true,
@@ -15958,6 +16353,7 @@ async fn waiver_and_closure_evidence_matrix_is_exact_and_fail_closed(pool: PgPoo
         .await
         .unwrap();
     let operator = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         is_admin: false,
         environment_ids: vec![dev],
         ..actor.clone()
@@ -17504,6 +17900,7 @@ async fn relationship_services_batch_active_history_and_immutable_assignments(po
             .unwrap();
     }
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: visible.user_id,
         identifier: "relationship-operator@example.invalid".into(),
         is_admin: false,
@@ -18349,6 +18746,7 @@ async fn batch_http_requires_membership_mutation_role_csrf_and_bounded_exact_pai
         .unwrap();
     }
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: operator_id,
         identifier: "batch-http-operator".into(),
         is_admin: false,
@@ -18904,6 +19302,7 @@ async fn batch_new_decision_after_hydration_conflicts_for_both_skip_modes(pool: 
         .unwrap();
     }
     let first_actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: first.user_id,
         identifier: "batch-operator-one".into(),
         is_admin: false,
@@ -18912,6 +19311,7 @@ async fn batch_new_decision_after_hydration_conflicts_for_both_skip_modes(pool: 
         request_origin: None,
     };
     let second_actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: second.user_id,
         identifier: "batch-operator-two".into(),
         ..first_actor.clone()
@@ -19387,6 +19787,7 @@ async fn batch_rejects_out_of_scope_environment_for_non_admin_actor(pool: PgPool
         .await
         .unwrap();
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: s1.user_id,
         identifier: "scoped-operator".into(),
         is_admin: false,
@@ -19854,6 +20255,7 @@ async fn batch_detail_distinguishes_visible_inventory_from_hidden_and_stale(pool
         .await
         .unwrap();
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: current.user_id,
         identifier: "scoped-operator".into(),
         is_admin: false,
@@ -20222,6 +20624,7 @@ async fn batch_membership_revoked_after_hydration_rejects_without_write(pool: Pg
         .await
         .unwrap();
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: fixture.user_id,
         identifier: "scoped-operator".into(),
         is_admin: false,
@@ -20598,6 +21001,7 @@ async fn migration_0296_retiring_one_cve_identity_keeps_other_active(pool: PgPoo
     );
     assert_eq!(retired.cve_findings.len(), 2);
     let scoped = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: actor.user_id,
         identifier: "shared-plan-scoped-viewer".into(),
         is_admin: false,
@@ -20618,6 +21022,7 @@ async fn migration_0296_retiring_one_cve_identity_keeps_other_active(pool: PgPoo
         1
     );
     let outsider = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         environment_ids: vec![Uuid::new_v4()],
         ..scoped
     };
@@ -21033,6 +21438,7 @@ async fn migration_0296_shared_plan_requires_all_scheduled_scopes_after_one_pair
         .await
         .unwrap();
     let scoped = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: reader.user_id,
         identifier: "shared-a-only-reader".into(),
         is_admin: false,
@@ -21078,6 +21484,7 @@ async fn migration_0296_shared_plan_requires_all_scheduled_scopes_after_one_pair
         .unwrap();
     assert!(!listed.items.iter().any(|item| item.id == id));
     let both = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         environment_ids: vec![source, other],
         ..scoped
     };
@@ -21190,6 +21597,7 @@ async fn shared_plan_reopen_fails_closed_when_moved_pair_lost_its_last_link(pool
         ]
     );
     let outsider = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: Uuid::new_v4(),
         identifier: "out-of-scope".into(),
         is_admin: false,

@@ -1,6 +1,7 @@
 # Bundle Update Log
 
 ## 2026-11-16
+* **TASK-526.2 credential boundaries:** Added explicit browser/restricted credential provenance to POA&M actors, retained immutable grants during read refresh and denied unreleased restricted paths. Documented independent future OIDC/admin ownership, ambiguous legacy assignments and remaining admission/freshness gates. No live accounts, assignment rows or authentication routes changed; full M0 is not complete.
 * **TASK-526.1 agent access design:** Added the user-provided CF-AGENT-ACCESS-001 v1.1 proposed specification and security index entry. Recorded Operator self-service, immutable grants, MCP and provenance requirements, milestone/test traceability, and the distinction between design fixtures and implemented authorization. No runtime milestone or security acceptance test is marked complete.
 * **Single-file design handoff:** User approved replacing split runtime design assets with readable inline HTML and a static-only preview. Added deterministic export normalization and tests, redirected current source references and the banner test oracle, removed superseded executable assets, and retained written contracts and independently consumed fixtures. Added the import/review workflow and documented export/spec gaps.
 

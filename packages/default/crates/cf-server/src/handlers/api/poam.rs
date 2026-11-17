@@ -79,6 +79,7 @@ pub(super) async fn actor(
         .await
         .map_err(|e| error_response(PoamError::Database(e)))?;
     Ok(PoamActor {
+        credential: crate::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: user.user_id,
         identifier,
         is_admin: user.is_admin(),

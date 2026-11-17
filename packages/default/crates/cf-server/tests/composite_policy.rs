@@ -1574,6 +1574,7 @@ async fn assert_composite_poam_eligible(pool: &PgPool, assessment_id: Uuid) {
     poam_service::compatible_for_assessment(
         pool,
         &PoamActor {
+            credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
             user_id: user.id,
             identifier: user.id.to_string(),
             is_admin: true,

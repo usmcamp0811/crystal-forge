@@ -173,6 +173,10 @@ async fn reading_actor_tx(
     tx: &mut Transaction<'_, Postgres>,
     request: &PoamActor,
 ) -> Result<PoamActor, RegisterExportSelectionError> {
+    // SECURITY: Export projections are not released for restricted credentials.
+    if !request.credential.is_browser_session() {
+        return Err(RegisterExportSelectionError::Forbidden);
+    }
     let roles: Vec<String> = sqlx::query_scalar(
         "SELECT role::text FROM user_role_assignments WHERE user_id=$1 AND EXISTS (SELECT 1 FROM users WHERE id=$1 AND is_active)",
     )
@@ -193,6 +197,7 @@ async fn reading_actor_tx(
     .await
     .map_err(|_| RegisterExportSelectionError::Internal)?;
     Ok(PoamActor {
+        credential: request.credential.clone(),
         user_id: request.user_id,
         identifier: request.identifier.clone(),
         is_admin,
@@ -210,10 +215,16 @@ async fn reading_actor_tx(
 /// filters retain their existing candidate scan limit even if fewer than 1,001
 /// rows match. A concurrent commit cannot change membership or rows mid-export.
 ///
+/// Requires explicit browser-session provenance; browser behavior is unchanged.
+/// Restricted credentials are always forbidden, including Admin-owned grants
+/// with audience `mcp`, both `cves:read` and `poams:read`, and valid expiry.
+/// Scoped credential grants do not authorize this browser export representation.
+///
 /// # Errors
 ///
 /// Returns a sanitized authorization, filter, candidate-limit, row-limit,
 /// duplicate-identity, or internal error. No partial selection is returned.
+/// Returns [`RegisterExportSelectionError::Forbidden`] for restricted credentials.
 pub async fn select(
     pool: &PgPool,
     actor: &PoamActor,
@@ -238,10 +249,15 @@ pub async fn select(
 /// 1,000-row cap applies to the selected families together. Excluded families
 /// are not read and cannot contribute rows or a candidate-limit failure.
 ///
+/// Requires explicit browser-session provenance; browser behavior is unchanged.
+/// Restricted credentials are always forbidden regardless of current owner
+/// authority, environment grant, audience, scopes, or expiry.
+///
 /// # Errors
 ///
 /// Returns a sanitized authorization, filter, cap, incomplete-context, or
 /// persistence error instead of a partial selection.
+/// Returns [`RegisterExportSelectionError::Forbidden`] for restricted credentials.
 pub async fn select_scoped(
     pool: &PgPool,
     actor: &PoamActor,
@@ -267,8 +283,13 @@ pub async fn select_scoped(
 /// loaded inside the same snapshot as source decisions; a missing source scope
 /// aborts the export rather than supplying a guessed label.
 ///
+/// Requires explicit browser-session provenance; browser behavior is unchanged.
+/// Restricted credentials are always forbidden regardless of current owner
+/// authority, environment grant, audience, scopes, or expiry.
+///
 /// # Errors
 /// Returns sanitized authorization, filter, cap, or persistence errors.
+/// Returns [`RegisterExportSelectionError::Forbidden`] for restricted credentials.
 pub async fn select_acceptances(
     pool: &PgPool,
     actor: &PoamActor,

@@ -39,6 +39,7 @@ async fn reader(pool: &PgPool) -> (PoamActor, Uuid, Uuid) {
         .unwrap();
     (
         PoamActor {
+            credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
             user_id: user,
             identifier: "export reader".into(),
             is_admin: true, // A stale request claim must not expand the snapshot scope.

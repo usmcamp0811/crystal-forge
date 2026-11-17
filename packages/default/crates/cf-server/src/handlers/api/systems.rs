@@ -1442,6 +1442,7 @@ pub async fn get_system_cves(
     }
 
     let actor = PoamActor {
+        credential: crate::auth::authorization::CredentialIdentity::BrowserSession,
         user_id,
         identifier: user_id.to_string(),
         is_admin: matches!(caller_role, Role::Admin),
@@ -1546,6 +1547,7 @@ pub async fn get_system_cve_inventory(
         return not_found();
     }
     let actor = PoamActor {
+        credential: crate::auth::authorization::CredentialIdentity::BrowserSession,
         user_id,
         identifier: user_id.to_string(),
         is_admin: matches!(caller_role, Role::Admin),
@@ -1690,6 +1692,7 @@ pub async fn get_system_cve_inventory_page(
         return not_found();
     }
     let actor = PoamActor {
+        credential: crate::auth::authorization::CredentialIdentity::BrowserSession,
         user_id,
         identifier: user_id.to_string(),
         is_admin: matches!(caller_role, Role::Admin),
