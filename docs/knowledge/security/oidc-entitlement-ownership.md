@@ -10,19 +10,19 @@ tags:
 implementation_status: partial
 sources:
   - id: migration
-    resource: packages/default/crates/cf-server/migrations/0335_oidc_entitlement_sources.sql
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0335_oidc_entitlement_sources.sql at commit c2c22b02"
     title: Source flags and entitlement state migration
   - id: reconciliation
-    resource: packages/default/crates/cf-server/src/queries/oidc_entitlements.rs
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/oidc_entitlements.rs at commit c2c22b02"
     title: Ordered reconciliation and freshness eligibility helper
   - id: admin
-    resource: packages/default/crates/cf-server/src/queries/admin.rs
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/admin.rs at commit c2c22b02"
     title: Source-aware administrator grant replacement and guards
   - id: callback
-    resource: packages/default/crates/cf-server/src/handlers/api/auth_oidc.rs
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/handlers/api/auth_oidc.rs at commit c2c22b02"
     title: Login generation reservation and bound callback reconciliation
   - id: policy
-    resource: packages/default/crates/cf-config/src/config/oidc.rs
+    resource: "Crystal Forge repository file packages/default/crates/cf-config/src/config/oidc.rs at commit c2c22b02"
     title: Positive entitlement maximum age configuration
 ---
 
@@ -157,16 +157,20 @@ This is an operator procedure, not an executed migration or database session.
 
 1. Before deployment, take and verify a restorable backup. Verify the configured
    issuer, subject-to-user bindings, linked-identity counts, claim path, group
-   mappings and active environment names. Confirm an independent, reachable
-   local/bootstrap recovery Admin path that works in the selected authentication
-   mode. A bootstrap **group mapping** is still IdP-managed and alone does not
-   protect against losing the final IdP Admin. Do not proceed without recovery.
+   mappings and active environment names. Confirm an independent, tested console
+   recovery procedure, such as a controlled switch to the existing local auth
+   mode with a separately provisioned recovery account, or verified backup
+   restoration. This is recovery, not a second concurrent login mode. A bootstrap
+   **group mapping** is still IdP-managed and alone does not protect against
+   losing the final IdP Admin. Do not proceed without recovery.
 2. Inventory the two existing accounts and every role/membership separately.
    Record current effective grants, identity bindings, source flags and the
    intended local or IdP ownership. Do not derive ownership from screenshots,
    actor nulls or current group membership alone. Rehearse on an isolated restored
    copy before scheduling the production change.
-3. Deploy the forward migration through the established upgrade process. Verify
+3. Stop older cf-server writers before deploying the forward migration through
+   the established upgrade process. Mixed old/new OIDC or admin writers are not
+   supported: old code cannot preserve source ownership. Verify
    preserved effective grants and unresolved flags before classification. Leave
    ambiguous grants unresolved until their owner approves the inventory; they
    continue to block future OIDC PAT eligibility.

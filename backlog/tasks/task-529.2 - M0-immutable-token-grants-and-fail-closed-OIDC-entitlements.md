@@ -127,3 +127,27 @@ Active branch is now `TASK-529.2-agent-authorization`; the worktree path and
 retained tmux socket still use the original 526.2 allocation. The previous pushed
 526.2 branch remains historical. User requests an MR when the scoped work and
 required checks are ready; do not move to Review or claim M0 completion yet.
+
+Farm verification update: at checkpoint `c2c22b02`, all three integration targets
+and the server library test target compiled on the farm. The real PostgreSQL
+run passed the restricted-grant regression and all 10 `admin_source_grants`
+tests. `oidc_entitlements` passed 16/17; its normalization fixture attempted to
+insert `prod`, already seeded by migrations. Fixed only that fixture to reuse
+the seeded environment and re-running the database tests. This is not a passing
+OIDC-suite result yet. The standalone database derivation now runs database
+targets only; ordinary component builds retain ownership of unit tests rather
+than duplicating their expensive compilation in the focused database proof.
+
+NixOS evaluation passed: default age `86400`, configured age `3600`, and rejection
+of zero, negative and u32-overflow policy values, with correct systemd environment
+wiring. OKF validation passed after correcting source-provenance descriptors:
+58 validator tests, 199 concepts, 219 Mermaid blocks. The first Access-owner
+attempt failed before VM startup because farm `etc-lsb-release` derivation
+`r5fsmdq1f9mh9w9mbki32sa2vz7ik1xp` crashed with signal 11. It was not an
+application/test failure and does not establish any HTTP-case result. The gate
+is being retried on the farm; no local compilation fallback.
+
+Static re-review found no remaining blocker in the corrected generation,
+normalization, binding or shared-lock code. This is source review, not runtime
+acceptance. Current requests continue in retained tmux windows `regression`
+and `access`; inspect their exit markers before launching more builds.

@@ -252,10 +252,12 @@ async fn delayed_valid_and_invalid_evidence_cannot_overwrite_newer_success(
 #[sqlx::test]
 async fn mapped_environment_names_normalize_before_resolution(pool: PgPool) -> Result<()> {
     let (user_id, identity_id, _) = fixture(&pool).await?;
-    let prod: Uuid =
-        sqlx::query_scalar("INSERT INTO environments (name) VALUES ('prod') RETURNING id")
-            .fetch_one(&pool)
-            .await?;
+    let prod: Uuid = sqlx::query_scalar(
+        "INSERT INTO environments (name) VALUES ('prod')
+             ON CONFLICT (name) DO UPDATE SET is_active = true RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await?;
     sqlx::query("UPDATE oidc_group_mappings SET environments = ARRAY['Prod', ' prod ', '']")
         .execute(&pool)
         .await?;

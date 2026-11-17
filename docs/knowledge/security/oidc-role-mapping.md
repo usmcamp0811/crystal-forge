@@ -34,10 +34,10 @@ sources:
     resource: "Crystal Forge repository file modules/nixos/crystal-forge/default.nix at commit 3b23d36f"
     title: NixOS OIDC options
   - id: current-reconciliation
-    resource: packages/default/crates/cf-server/src/queries/oidc_entitlements.rs
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/oidc_entitlements.rs at commit c2c22b02"
     title: TASK-529.2 source-aware reconciliation
   - id: current-callback
-    resource: packages/default/crates/cf-server/src/handlers/api/auth_oidc.rs
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/handlers/api/auth_oidc.rs at commit c2c22b02"
     title: TASK-529.2 ordered callback reconciliation
 ---
 
