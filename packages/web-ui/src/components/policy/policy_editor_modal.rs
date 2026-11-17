@@ -4521,9 +4521,9 @@ mod tests {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../docs/design/CrystalForge/data-enforcement.js")
+                    .join("../../docs/design/CrystalForge/crystal-forge.html")
             });
-        let source = std::fs::read_to_string(path).expect("read data-enforcement.js test oracle");
+        let source = std::fs::read_to_string(path).expect("read crystal-forge.html test oracle");
         source
             .split_once("const DOD_CONSENT_BANNER = `")
             .expect("DOD_CONSENT_BANNER declaration")

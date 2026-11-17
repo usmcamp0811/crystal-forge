@@ -36,7 +36,7 @@ Follow existing OKF schema/index patterns and Mermaid rules. Preserve source req
 
 1. Compare the complete v1.1 source with the OKF concept section by section; record source location and any deliberate formatting-only transformations.
 2. Run `nix build .#okf-knowledge -L` and inspect the generated concept/index links.
-3. Record a before/after legacy design interaction inventory. Exercise new owner, admin oversight, and inspector flows and every impacted legacy flow in the task-owned live preview; record design comparisons and browser errors.
+3. Record a before/after exported-resource and design interaction inventory. Exercise the supplied owner workflow in the task-owned static preview; record missing admin/inspector/remediation surfaces as gaps, not passing flows.
 4. Map each v1.1 requirement to acceptance tests or an explicitly tracked later milestone; do not check implementation tests as passed for design-only work.
 
 ## Impact, risk, and dependencies
@@ -61,4 +61,12 @@ Follow existing OKF schema/index patterns and Mermaid rules. Preserve source req
 LOCK: OpenCode on vm-agent in /home/mcamp/code/crystal-forge/TASK-526.1-agent-access-design
 
 Activated on 2026-11-16 by explicit user direction. Dedicated worktree verified clean before backlog mirroring; branch `TASK-526.1-agent-access-design`, base `dev` at `bd8d068dc287d222baeea9c7336363a03da55371`. User subsequently approved single-file runtime replacement, legacy runtime cleanup, static-only preview and regular commits/pushes. Specification is recorded; design migration is underway. No runtime milestone or security test has been marked complete.
+
+Checkpoint: specification and task records committed as `43b27c53` and pushed to origin. Default SSH port 22 timed out; command-scoped Git URL rewriting to GitLab's alternate SSH endpoint on port 443 succeeded without changing persistent Git configuration.
+
+Design comparison: 65 existing bundled resources matched byte-for-byte; new Access Tokens source plus a Profile insertion after Active sessions. Normalized 67 resources, 71 scripts and one unchanged CSS block into readable HTML. Removed 75 split/duplicate runtime assets and repointed current test/design consumers; written contracts, review assets and independently consumed golden JSON remain. No existing Profile section was reordered or merged by the export. The supplied export lacks admin oversight, inspector, MCP status, Connect agent shortcuts and remediation panels; TASK-526 M1–M3 retains these obligations. The mockup is not evidence of backend authorization.
+
+Verification so far: six importer unit tests pass; exact normalization/idempotency and script order/content/CSS preservation pass; manifest contracts and reference resolution pass; consent banner extraction is byte-identical; web-ui oracle/derivation Nix evaluation passes. Browser smoke passed Profile navigation, create, one-time reveal acknowledgement and resulting row with zero page errors/failed requests. Full persona/mobile/legacy-flow matrix remains unverified. Static preview is `http://127.0.0.1:8526/crystal-forge.html`, task-owned loopback PID 28238, no DB/backend.
+
+Known checks: broader static harness fails on missing `Inventory only` relation coverage, reproduced against the baseline harness/manifest. The exported HTML retains seven source trailing-whitespace lines; these are not security verification failures but are reported by `git diff --check`. Initial OKF attempts found arrow-heading diagram candidates and unsupported source metadata; corrected. Final `nix build .#okf-knowledge -L` passed: 58 validator tests, 197 concepts, 219 Mermaid blocks, zero unclassified/stale diagram candidates. Full production Web UI, SQLx/PostgreSQL and NixOS integration checks were not run for this design-only change; no production authentication behavior changed.
 <!-- SECTION:NOTES:END -->

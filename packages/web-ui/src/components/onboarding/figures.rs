@@ -1,7 +1,7 @@
 //! Compact figures drawn inside a walkthrough card.
 //!
 //! Content is plain data so tests can check the teaching points. Copy follows
-//! `CoachFigure` in `docs/design/CrystalForge/components/CoachTours.jsx`.
+//! `CoachFigure` in `docs/design/CrystalForge/crystal-forge.html`.
 
 use dioxus::prelude::*;
 

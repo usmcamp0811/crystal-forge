@@ -18,7 +18,7 @@
 //!
 //! # Authority
 //!
-//! The authoritative design is `docs/design/CrystalForge/components/SetupCoach.jsx`
+//! The authoritative design is `docs/design/CrystalForge/crystal-forge.html` (`SetupCoach`)
 //! and `CoachTours.jsx`. The coach navigates and opens read-only surfaces. It
 //! never submits a mutation. See [`super::runner`].
 

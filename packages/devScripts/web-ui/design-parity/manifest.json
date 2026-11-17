@@ -22,7 +22,7 @@
       "route": "/",
       "designMarker": { "selector": ".content[data-screen-label='dashboard']" },
       "dioxusMarker": { "selector": "[data-testid='dashboard']" },
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "systems",
@@ -30,7 +30,7 @@
       "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Systems" }],
       "designMarker": { "selector": ".content[data-screen-label='systems']" },
       "dioxusMarker": { "selector": ".page-title", "text": "Systems" },
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "system-detail",
@@ -46,7 +46,7 @@
         { "type": "click", "selector": "button", "text": "Open full detail", "waitFor": "[data-testid='system-detail']" }
       ],
       "dioxusMarker": { "selector": "[data-testid='system-detail']" },
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "builds",
@@ -54,7 +54,7 @@
       "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Builds" }],
       "designMarker": { "selector": ".content[data-screen-label='builds']" },
       "dioxusMarker": { "selector": ".page-title", "text": "Builds" },
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "evaluations",
@@ -62,7 +62,7 @@
       "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Evaluations" }],
       "designMarker": { "selector": ".content[data-screen-label='evals']" },
       "dioxusMarker": { "selector": ".page-title", "text": "Evaluations" },
-      "designRef": "docs/design/CrystalForge/components/EvalsView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "flakes",
@@ -70,7 +70,7 @@
       "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Flakes" }],
       "designMarker": { "selector": ".content[data-screen-label='flakes']" },
       "dioxusMarker": { "selector": ".page-title", "text": "Flakes" },
-      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "environments",
@@ -78,7 +78,7 @@
       "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Environments" }],
       "designMarker": { "selector": ".content[data-screen-label='environments']" },
       "dioxusMarker": { "selector": ".page-title", "text": "Environments" },
-      "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "caches",
@@ -86,7 +86,7 @@
       "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Caches" }],
       "designMarker": { "selector": ".content[data-screen-label='caches']" },
       "dioxusMarker": { "selector": ".page-title", "text": "Caches" },
-      "designRef": "docs/design/CrystalForge/components/CachesView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "builders",
@@ -94,7 +94,7 @@
       "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Builders" }],
       "designMarker": { "selector": ".content[data-screen-label='builders']" },
       "dioxusMarker": { "selector": ".page-title", "text": "Builders" },
-      "designRef": "docs/design/CrystalForge/components/BuildersView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "policies",
@@ -102,7 +102,7 @@
       "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Policies" }],
       "designMarker": { "selector": ".content[data-screen-label='policies']" },
       "dioxusMarker": { "selector": ".page-title", "text": "Policies" },
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "policy-editor",
@@ -116,7 +116,7 @@
         { "type": "click", "selector": "button", "text": "New custom policy", "waitFor": "[data-testid='policy-editor-modal']" }
       ],
       "dioxusMarker": { "selector": "[data-testid='policy-editor-modal']", "text": "New custom policy" },
-      "designRef": "docs/design/CrystalForge/components/PolicyEditor.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "compliance",
@@ -124,7 +124,7 @@
       "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Compliance" }],
       "designMarker": { "selector": ".content[data-screen-label='compliance']" },
       "dioxusMarker": { "selector": ".page-title", "text": "Compliance" },
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "compliance-evidence",
@@ -140,7 +140,7 @@
         { "type": "click", "selector": "[data-testid='bundle-systems-card'] tbody tr[role='button']", "waitFor": "#compliance-evidence-dialog" }
       ],
       "dioxusMarker": { "selector": "#compliance-evidence-dialog" },
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "cves",
@@ -148,7 +148,7 @@
       "designActions": [{ "type": "click", "selector": ".nav-item", "text": "CVEs" }],
       "designMarker": { "selector": ".content[data-screen-label='cves']" },
       "dioxusMarker": { "selector": ".page-title", "text": "CVEs" },
-      "designRef": "docs/design/CrystalForge/components/CvesView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "scanning",
@@ -156,7 +156,7 @@
       "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Scanning" }],
       "designMarker": { "selector": ".content[data-screen-label='scanning']" },
       "dioxusMarker": { "selector": ".page-title", "text": "Scanning" },
-      "designRef": "docs/design/CrystalForge/components/ScanningView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "admin",
@@ -164,7 +164,7 @@
       "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Server" }],
       "designMarker": { "selector": ".content[data-screen-label='admin']" },
       "dioxusMarker": { "selector": ".page-title", "text": "Server Management" },
-      "designRef": "docs/design/CrystalForge/components/AdminView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "notifications",
@@ -173,14 +173,14 @@
       "designMarker": { "selector": ".notif-panel", "text": "Notifications" },
       "dioxusActions": [{ "type": "click", "selector": "[data-testid='topbar-notifications-button']", "waitFor": "[data-testid='topbar-notifications-panel']" }],
       "dioxusMarker": { "selector": "[data-testid='topbar-notifications-panel']" },
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "setup-coach",
       "route": "/",
       "designMarker": { "selector": ".coach[aria-label='Crystal Forge Coach']", "text": "Crystal Forge Coach" },
       "dioxusMarker": { "selector": "[data-testid='onboarding-coach-panel']" },
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "name": "poam-detail",
@@ -192,7 +192,7 @@
       "designMarker": { "selector": ".poam-tray", "text": "Remediation plan" },
       "dioxusActions": [],
       "dioxusMarker": { "selector": "[data-testid='poam-detail']", "text": "Remediation plan" },
-      "designRef": "docs/design/CrystalForge/components/PoamViews.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     }
   ],
   "targets": {
@@ -200,7 +200,7 @@
       {
         "name": "task440-config-wide-expanded",
         "viewport": { "width": 1920, "height": 1080 },
-        "designRef": "docs/design/CrystalForge/components/ConfigExplorer.jsx",
+        "designRef": "docs/design/CrystalForge/crystal-forge.html",
         "dioxusStep": "12p-task440-config-canonical-wide-expanded",
         "comparisonNote": "The contract compares the consolidated observational Config Explorer with Configured selected and one option in the persistent inspector pane.",
         "contentSelector": ".cfgx",
@@ -209,7 +209,7 @@
       {
         "name": "task440-config-narrow",
         "viewport": { "width": 900, "height": 900 },
-        "designRef": "docs/design/CrystalForge/components/ConfigExplorer.jsx",
+        "designRef": "docs/design/CrystalForge/crystal-forge.html",
         "dioxusStep": "12q-task440-config-canonical-narrow",
         "comparisonNote": "The narrow contract keeps the same consolidated observational Explorer concepts and persistent option inspector without the removed table/sidebar layout.",
         "contentSelector": ".cfgx",
@@ -218,7 +218,7 @@
       {
         "name": "task440-flake-systems-wide",
         "viewport": { "width": 1920, "height": 1080 },
-        "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+        "designRef": "docs/design/CrystalForge/crystal-forge.html",
         "dioxusStep": "13l-task440-flake-systems-canonical-wide",
         "contentSelector": ".fl-tray",
         "designState": { "kind": "flake-pane", "flake": "infrastructure", "pane": "Systems", "expectedText": ["nixosConfiguration", "atlas-01"] }
@@ -226,7 +226,7 @@
       {
         "name": "task440-flake-systems-narrow",
         "viewport": { "width": 900, "height": 900 },
-        "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+        "designRef": "docs/design/CrystalForge/crystal-forge.html",
         "dioxusStep": "13m-task440-flake-systems-canonical-narrow",
         "contentSelector": ".fl-tray",
         "designState": { "kind": "flake-pane", "flake": "infrastructure", "pane": "Systems", "expectedText": ["nixosConfiguration", "atlas-01"] }
@@ -234,7 +234,7 @@
       {
         "name": "task440-flake-modules-wide-expanded",
         "viewport": { "width": 1920, "height": 1080 },
-        "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+        "designRef": "docs/design/CrystalForge/crystal-forge.html",
         "dioxusStep": "13n-task440-flake-modules-canonical-wide-expanded",
         "contentSelector": ".fl-tray",
         "designState": { "kind": "flake-pane", "flake": "infrastructure", "pane": "Modules", "expandModule": "system", "expectedText": ["Declared options", "cf.system.enable"] }
@@ -242,7 +242,7 @@
       {
         "name": "task440-flake-modules-narrow-expanded",
         "viewport": { "width": 900, "height": 900 },
-        "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+        "designRef": "docs/design/CrystalForge/crystal-forge.html",
         "dioxusStep": "13o-task440-flake-modules-canonical-narrow-expanded",
         "contentSelector": ".fl-tray",
         "designState": { "kind": "flake-pane", "flake": "infrastructure", "pane": "Modules", "expandModule": "system", "expectedText": ["Declared options", "cf.system.enable"] }
@@ -250,7 +250,7 @@
       {
         "name": "task440-flake-inputs-wide",
         "viewport": { "width": 1920, "height": 1080 },
-        "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+        "designRef": "docs/design/CrystalForge/crystal-forge.html",
         "dioxusStep": "13p-task440-flake-inputs-canonical-wide",
         "contentSelector": ".fl-tray",
         "designState": { "kind": "flake-pane", "flake": "infrastructure", "pane": "Inputs", "expectedText": ["Input", "nixpkgs"] }
@@ -258,7 +258,7 @@
       {
         "name": "task440-flake-inputs-narrow",
         "viewport": { "width": 900, "height": 900 },
-        "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+        "designRef": "docs/design/CrystalForge/crystal-forge.html",
         "dioxusStep": "13q-task440-flake-inputs-canonical-narrow",
         "contentSelector": ".fl-tray",
         "designState": { "kind": "flake-pane", "flake": "infrastructure", "pane": "Inputs", "expectedText": ["Input", "nixpkgs"] }

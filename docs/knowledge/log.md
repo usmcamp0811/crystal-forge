@@ -2,6 +2,7 @@
 
 ## 2026-11-16
 * **TASK-526.1 agent access design:** Added the user-provided CF-AGENT-ACCESS-001 v1.1 proposed specification and security index entry. Recorded Operator self-service, immutable grants, MCP and provenance requirements, milestone/test traceability, and the distinction between design fixtures and implemented authorization. No runtime milestone or security acceptance test is marked complete.
+* **Single-file design handoff:** User approved replacing split runtime design assets with readable inline HTML and a static-only preview. Added deterministic export normalization and tests, redirected current source references and the banner test oracle, removed superseded executable assets, and retained written contracts and independently consumed fixtures. Added the import/review workflow and documented export/spec gaps.
 
 ## 2026-10-31
 * **TASK-508 management modes:** Updated the partial worktree contract for DB-owned enrollment epochs, persistent registration metadata, Native declaration discovery without full module/input snapshots, scoped exact scan intent, independent hardening evidence, guest-batch recovery and inactive detail telemetry. Corrected builder-claim and unknown-health claims in place. Recorded owner-reported targeted passes and selected VM cases separately from pending exact-source owner runs, upgrade and final UI parity; the normal state-machine full-run failure remains unresolved.
