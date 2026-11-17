@@ -314,23 +314,29 @@ pub async fn fetch_system_flake_position(
             WHEN COUNT(*) FILTER (WHERE bj.status = 'failed') > 0 THEN 'failed'
             ELSE 'not_built'
           END AS build_state
-          -- INVARIANT: Build and publication evidence belongs to the PHYSICAL
-          -- derivation. A commit that reuses an existing build has an alias
-          -- derivation (`reused_from_derivation_id`) that owns no job and no
-          -- cache push of its own, and it can adopt a successful job directly
-          -- (`reused_build_job_id`). Reading only `bj.derivation_id = d.id`
-          -- classified such a commit as `not_built` even when the reused
-          -- output was built and published.
+          -- INVARIANT: A job and its cache push belong to the derivation that
+          -- EXECUTED the build, which is not always this commit's derivation.
+          -- A commit that reuses a build has an alias derivation
+          -- (`reused_from_derivation_id`) that owns no job of its own. It can
+          -- read jobs of its physical origin, and it can adopt a successful job
+          -- (`reused_build_job_id`) that belongs to a different alias than the
+          -- origin. Publication is therefore checked on the derivation that
+          -- owns each job (`exec`), the same rule the reuse admission applies
+          -- (`derivation_publication_eligible(source.id, ...)`). Checking the
+          -- origin only reported an output built and published on an alias
+          -- as `unpublished`.
           FROM derivations d
-          JOIN derivations phys ON phys.id = COALESCE(d.reused_from_derivation_id, d.id)
           JOIN build_jobs bj
-            ON bj.derivation_id IN (d.id, phys.id) OR bj.id = d.reused_build_job_id
+            ON bj.derivation_id = d.id
+            OR bj.derivation_id = COALESCE(d.reused_from_derivation_id, d.id)
+            OR bj.id = d.reused_build_job_id
+          JOIN derivations exec ON exec.id = bj.derivation_id
           CROSS JOIN LATERAL (
             SELECT EXISTS (
               SELECT 1 FROM cache_push_jobs cpj
-              WHERE cpj.derivation_id = phys.id
+              WHERE cpj.derivation_id = exec.id
                 AND cpj.status = 'completed'
-                AND cpj.store_path = COALESCE(phys.store_path, phys.expected_store_path)
+                AND cpj.store_path = COALESCE(exec.store_path, exec.expected_store_path)
             ) AS published
           ) pub
           WHERE d.commit_id = o.id

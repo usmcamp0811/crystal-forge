@@ -596,3 +596,93 @@ async fn latest_observation_decides_not_observed(pool: PgPool) {
     );
     assert_eq!(view.running_position, None);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn adopted_job_is_published_on_the_alias_that_executed_it(pool: PgPool) {
+    // A (commit 3) is the original physical derivation and never built. B
+    // (commit 4) is an execution alias: it owns the successful job and the
+    // completed cache push. C (commit 2) is an alias that adopts B's job. The
+    // publication evidence belongs to B, not to the origin A.
+    let fleet = fleet(&pool, true).await;
+    let subject = system(&pool, &fleet, "lane-alias", fleet.env_a, Some(0)).await;
+    let derivation = |commit_index: usize| {
+        let pool = pool.clone();
+        let commit = fleet.commits[commit_index];
+        async move {
+            sqlx::query_scalar::<_, i32>(
+                "SELECT id FROM derivations WHERE commit_id=$1 AND derivation_name='lane-alias'",
+            )
+            .bind(commit)
+            .fetch_one(&pool)
+            .await
+            .expect("derivation")
+        }
+    };
+    let (a, b, c) = (
+        derivation(3).await,
+        derivation(4).await,
+        derivation(2).await,
+    );
+
+    // B becomes an alias of A first: a derivation's identity is locked once it
+    // has execution evidence.
+    sqlx::query(
+        "UPDATE derivations alias SET derivation_path=origin.derivation_path, \
+                expected_store_path=origin.store_path, store_path=origin.store_path, \
+                reused_from_derivation_id=origin.id \
+         FROM derivations origin WHERE alias.id=$1 AND origin.id=$2",
+    )
+    .bind(b)
+    .bind(a)
+    .execute(&pool)
+    .await
+    .expect("execution alias");
+    let job_of_b: Uuid = sqlx::query_scalar(
+        "INSERT INTO build_jobs(derivation_id,status) VALUES($1,'success') RETURNING id",
+    )
+    .bind(b)
+    .fetch_one(&pool)
+    .await
+    .expect("job on the execution alias");
+    sqlx::query(
+        "INSERT INTO cache_push_jobs(derivation_id,status,store_path) \
+         SELECT id,'completed',store_path FROM derivations WHERE id=$1",
+    )
+    .bind(b)
+    .execute(&pool)
+    .await
+    .expect("push on the execution alias");
+    sqlx::query(
+        "UPDATE derivations alias SET derivation_path=origin.derivation_path, \
+                expected_store_path=origin.store_path, store_path=NULL, \
+                reused_from_derivation_id=origin.id, reused_build_job_id=$3 \
+         FROM derivations origin WHERE alias.id=$1 AND origin.id=$2",
+    )
+    .bind(c)
+    .bind(a)
+    .bind(job_of_b)
+    .execute(&pool)
+    .await
+    .expect("adopting alias");
+
+    let view = fetch_system_flake_position(&pool, subject, None)
+        .await
+        .expect("read")
+        .expect("system exists");
+    let state = |position: usize| view.commits[position].build_state;
+    assert_eq!(
+        state(4),
+        FlakePositionBuildState::Ready,
+        "the execution alias built and published"
+    );
+    assert_eq!(
+        state(2),
+        FlakePositionBuildState::Ready,
+        "the adopting alias is published through the alias that executed the job"
+    );
+    assert_eq!(
+        state(3),
+        FlakePositionBuildState::NotBuilt,
+        "the origin evaluator owns no build"
+    );
+}
