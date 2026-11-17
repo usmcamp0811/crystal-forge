@@ -4,7 +4,7 @@ title: Deploy tab flake-position lane, target picker, and flake-position API
 status: In Progress
 assignee: []
 created_date: '2026-11-15T16:11:00Z'
-updated_date: '2026-11-16T05:26:00Z'
+updated_date: '2026-11-17T01:05:00Z'
 labels:
   - web-ui
   - server
@@ -153,4 +153,15 @@ Owner-reported bug fixed (f998583e, b1f55f4b): a same-commit redeploy drew the U
 Owner review round 2 (2026-11-16): (1) lane shows picked targets during an active deployment and keeps target + pick in the window (fad10069); (2) plan Show diff reads GET /flakes/:id/commits/:sha/diff (Flakes view source) with loading/error/empty states, mock removed (fad10069); (3) running position = newest branch commit whose nixos output equals the running store path, matching view_system_deployment_status, resolver only as fallback (2dc11c39); (4) owner asked to fix TASK-453 AC #10 here: record_report_events_tx completes a still-pending deployment whose target equals the unchanged reported store path (90a7eee9). Verification: farm web-ui 873 passed; farm sandbox PostgreSQL run of tests/flake_position.rs (3) and tests/already_current_deployment.rs (2): 5 passed (build overrides in ~/.cache/cf525/db-tests.nix); preview: atlas-01 with shared HEAD closure placed on HEAD, picker selection drawn during deploy, diff panel shows real server 404 for demo commits. Still not run: integration owners.
 
 Owner review round 3 (2026-11-16): progress label for shared-output deployments now uses requested_commit_id, else the newest commit with that output by branch position (6048710e, 13856446); untracked-host reference lane is pickable on the Deploy tab instead of opening the flake drawer (6f95467a). Farm: web-ui 873 passed; sandbox PostgreSQL DB tests 6 passed (flake_position 4, already_current_deployment 2). Preview: untracked host gaia-web-03 lane click selects target in lane, picker and plan; no drawer; no page errors.
+
+MR review round (2026-11-16, review of 45c8d602), fixed at a1facf55:
+P1-1 lane draws a deployment only when it places source and target (can_draw_deployment); otherwise the progress banner shows on the Deploy tab (unknown position, unplaceable target, failed read). Browser: no_history host with an active deployment shows the banner.
+P1-2 history and flake-position reads advance only while a deployment record exists (deployment_is_active), and the flake-position read keys on a memo (the status resource republishes every 4 s). Browser: idle page 0 flake-position requests in 14 s (3 before the memo).
+P2-3 owner decided: amend AC 1 (500-commit bound; configuration_removed is UI-derived from configuration-assurance). Boundary DB test added.
+P2-4 explicit loading/unavailable card; picker drops running/ahead/build claims when degraded.
+P2-5 removed configuration keeps the last valid revision (artifact, else newest scan, never HEAD) as the last-tracked marker. P2-9 unknown-state lane uses the bounded gap window (8 nodes for 14 commits; far pick adds nodes only around itself).
+P2-6 picker rows have separate select and open-commit buttons (browser: Tab order, Enter selects, row click selects, SHA opens tray).
+P2-7 ready now needs a completed cache push; new unpublished state (AC 2 clarified). P2-8 unplaceable targets fall back to the banner.
+P2-10 HTTP authorization test (403/404/200, peers scoped, hidden = missing); DB tests no longer ignored and added to database-regressions.sh; Delivery fragment asserts keyboard access and the post-activation pin; Assurance fragment asserts the removed last-tracked marker.
+Verification: farm web-ui 878 passed; farm sandbox PostgreSQL: flake_position 6, flake_position_http 1, already_current_deployment 2 = 9 passed. Not yet run locally: Delivery and Assurance fragments (CI owns them). AC checkboxes stay unchecked until the integration owners pass at the review revision.
 <!-- SECTION:NOTES:END -->
