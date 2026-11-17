@@ -7,7 +7,7 @@ tags:
   - security
   - mcp
   - access-tokens
-implementation_status: proposed
+implementation_status: partial
 status: draft
 sources:
   - id: design-export
@@ -18,7 +18,7 @@ sources:
 # Crystal Forge: Agent Access Tokens, MCP, and Remediation Context
 
 - Design specification: **CF-AGENT-ACCESS-001**
-- Status: **Proposed; implementation not started** (runtime subsystem).
+- Source status at handoff: **Proposed; implementation not started**.
 - Version: **1.1 (Operator self-service clarification)**
 - Date: **2026-11-16**
 - Repository baseline: `dev` at `bd8d068dc287d222baeea9c7336363a03da55371`
@@ -34,7 +34,12 @@ The prose and tables below preserve the requirements; source box diagrams are
 represented as Mermaid and tab-separated contracts as Markdown tables/lists.
 The illustrative SQL remains a schema contract, not an executable migration.
 TASK-529 tracks delivery, TASK-529.1 tracks this knowledge/design handoff, and
-TASK-529.2 tracks the M0 security prerequisites. No runtime milestone is complete.
+TASK-529.2 tracks the M0 security prerequisites. M0 authorization and OIDC source
+groundwork is implemented for review; PAT issuance and MCP transport remain
+unimplemented. No milestone is marked complete by this progress note. See
+[credential grant groundwork](credential-grant-groundwork.md) and
+[OIDC ownership](oidc-entitlement-ownership.md) for implemented boundaries,
+checkpoint-specific farm evidence and remaining release gates.
 Our old TASK-526, TASK-526.1 and TASK-526.2 names were session allocation
 collisions resolved after rebasing onto origin/dev at `881dbc76`; upstream
 TASK-526 remains the farm parser-deadline task. Historical commit hashes and

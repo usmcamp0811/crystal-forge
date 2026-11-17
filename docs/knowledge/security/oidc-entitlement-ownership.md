@@ -31,7 +31,8 @@ sources:
 ## Status and authority
 
 TASK-529.2 implements the source model and callback reconciliation described
-below in this worktree. Current-source farm verification remains pending.
+below. The final database regressions passed on the farm at `24b3bad6`; the
+Access scenario passed at `89e7689b`. Exact review-revision CI remains pending.
 `implementation_status: partial` also records that the freshness helper is not
 wired to PAT admission. There are no PAT/MCP endpoints or token-row validator.
 The approved [CF-AGENT-ACCESS-001 v1.1 specification](agent-access-tokens-mcp-remediation-context.md),
@@ -196,13 +197,23 @@ path. The approved future PAT design returns a secret once to its authenticated
 owner; this groundwork does not issue tokens or let an Admin mint another
 human's session/token.
 
-## Pending verification
+## Verification scope and remaining gates
 
-Source files and regression definitions are evidence of implementation, not of
-passing execution. Current-source component/database, signed OIDC callback,
-concurrency, upgrade and request-boundary acceptance remain to be demonstrated.
-The existing Access scenario proves only its asserted browser-admin boundary;
-it does not prove PAT admission or a signed provider callback.
+At `24b3bad6`, the farm executed 29 nonignored PostgreSQL regressions: 18 OIDC
+entitlement cases, 10 admin-source cases and the restricted-grant refresh case.
+They cover populated migration, ownership union, binding conflicts, ordered
+reconciliation, freshness, rollback and concurrency. At `89e7689b`, the full
+Access scenario passed, including both new source-union and Operator-denial HTTP
+cases. Its production server and Web UI package dependencies passed their normal
+unit checks. The separate core package passed its library tests but its extra
+native-Nix post-checks have not yet produced a final package result.
+
+These are checkpoint-specific results, not an exact-head CI or release claim.
+The Access scenario proves its browser-admin boundary, not PAT admission or a
+signed provider callback. PAT/OIDC self-service and MCP acceptance remain later
+delivery obligations. The existing ignored real-provider JWT test is not a
+passing provider-integration result. No live grant classification or deployment
+was performed. Review-revision CI and the documented rollout gates still apply.
 
 When execution is authorized, use the configured farm (`max-jobs = 0`, builders
 from `/etc/nix/machines`), from the task worktree:
@@ -214,8 +225,9 @@ nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-boo
 nix build .#okf-knowledge --no-link -L
 ```
 
-These commands were not run for this documentation update. The core package's
-ordinary tests do not execute ignored PostgreSQL integration targets.
+Exact commands, derivations, results and remaining runs are recorded in
+TASK-529.2. The core package's ordinary tests do not execute the PostgreSQL
+integration targets; do not substitute a package pass for those database proofs.
 `tests/oidc_entitlements.rs`, `tests/admin_source_grants.rs` and the POA&M target
 are selected by the existing `packages/devScripts/tests/database-regressions.sh`;
 their execution needs a farm/CI-owned disposable database and retained results.

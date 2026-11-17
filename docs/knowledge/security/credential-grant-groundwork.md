@@ -101,12 +101,12 @@ source constraints and the one-time upgrade/recovery procedure.
 
 ## Remaining release gates
 
-M0 remains incomplete. The following work is still required before PAT/MCP
-release:
+The M0 source groundwork is under review, not a complete PAT/MCP release. The
+following work remains required before that release:
 
-1. Current-source farm evidence for OIDC reconciliation, freshness,
-   failure/rollback and concurrency; reviewed legacy classification/cutover and
-   independent recovery Admin. The source helper alone is not PAT admission.
+1. Review-revision CI and reviewed legacy classification/cutover with independent
+   recovery. Checkpoint-specific database and Access results are recorded in
+   TASK-529.2; the source helper alone is not PAT admission.
 2. Token-row validation for every admitted request and transaction-aware checks
    for any future mutation, with deterministic revocation ordering.
 3. Binding the credential to the authenticated current owner; role and
@@ -130,7 +130,8 @@ The existing state-machine database regression runner already runs the entire
 `poam_workflows` integration target. Adding this test does not create another
 top-level check. Execution results, failures and unrun integration-owner gates
 are recorded in TASK-529.2. Historical passes do not establish current-source
-verification. Current-source farm gates and documentation validation remain
-pending; none were run for this documentation update. Exact farm commands and
-database-test scope are in [OIDC entitlement ownership](oidc-entitlement-ownership.md#pending-verification).
+verification. The final 29 database regressions passed at `24b3bad6`; Access
+passed at `89e7689b`. Review-revision CI and the extra core native-Nix post-checks
+remain pending. Exact farm commands and database-test scope are in
+[OIDC entitlement ownership](oidc-entitlement-ownership.md#verification-scope-and-remaining-gates).
 No local Cargo compilation is authorized.

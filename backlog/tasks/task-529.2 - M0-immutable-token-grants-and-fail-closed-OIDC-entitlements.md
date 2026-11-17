@@ -174,3 +174,28 @@ passing result yet. Core component verification is also still pending after
 the earlier documented failures. The user requested MR creation when ready;
 GitLab CLI API authentication is absent, but authenticated Git push options may
 be used to request an MR after readiness instead of requesting secret tokens.
+
+Final source database proof at `24b3bad6`: 29/29 passed, none ignored (18 OIDC,
+10 admin-source, one restricted-grant case). Derivation
+`h0xpgx1fjhchb5sp5z74d5qdsf5s7y3m-cf-oidc-authorization-regressions-0.3.0.drv`,
+output `dpnm1gk4q057w539fynkd3nqkgq20q4x-cf-oidc-authorization-regressions-0.3.0`.
+PostgreSQL stopped cleanly. Source-aware binding conflict rejection is covered.
+
+The full Access gate passed on the farm at source `89e7689b`, output
+`f29h090fgamgm4xsxbajngrrwg4bjzi3-cf-it-access-lifecycle-local-bootstrap`.
+Both new source-union/Admin HTTP cases passed, alongside retained session,
+CSRF, registration, administration, environment and preference cases. Its
+production server package passed 1570 library tests and Web UI passed 878;
+ignored tests are not counted as passes. The final source differs in the
+explicitly tested identity-creation conflict fix and the corrected task comment.
+Exact review-revision CI must still run; these are not exact-head CI claims.
+
+The separate core run at the earlier checkpoint passed 1568 library tests,
+103 cf-config tests and 43 protocol tests, including new strict claims and age
+policy assertions. Its additional native-Nix post-checks are still running;
+no complete core-package pass is claimed. Source-specific required database,
+module-policy, documentation and Access evidence is recorded above.
+
+Implementation checkpoint is being submitted as a DRAFT M0 MR to collect
+exact-head CI. Keep this task In Progress, not Review or Done, until the remaining
+verification is resolved. No milestone or full PAT/MCP feature is marked complete.
