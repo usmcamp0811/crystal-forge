@@ -364,7 +364,7 @@ def authz_source_union_boundary():
                              source("environment_id", environment_ids[2], True)],
         }, "explicit overlapping, legacy and local-only prerequisites")
 
-        status, patched = http(controller, "PATCH", path, {"role": "Viewer"},
+        status, patched = http(controller, "PATCH", path, {"role": "Viewer", "edit_local_grants": True},
                                session=authz_admin_jar, csrf=True)
         expect_equal(status, 200, "Admin explicitly replaces the local role")
         expect_equal(patched["role"], "Operator", "PATCH returns highest effective role, not requested Viewer")
@@ -372,7 +372,7 @@ def authz_source_union_boundary():
         expect_equal(sources(), {"roles": expected_roles, "environments": before["environments"]},
                      "role classification preserves IdP and leaves legacy environment category unresolved")
 
-        status, patched = http(controller, "PATCH", path, {"environments": []},
+        status, patched = http(controller, "PATCH", path, {"environments": [], "edit_local_grants": True},
                                session=authz_admin_jar, csrf=True)
         expect_equal(status, 200, "Admin explicitly replaces local and legacy memberships with empty set")
         expect_equal(patched["role"], "Operator", "environment PATCH still returns effective Operator")
@@ -401,7 +401,7 @@ def authz_source_union_boundary():
             before_state = authz_state()
             before_sources = [sources(operator_id), sources(target)]
             status, body = http(controller, "PATCH", "/api/v1/admin/users/" + target,
-                                {"role": "Admin", "environments": ["cf-it-source-idp"]},
+                                {"role": "Admin", "environments": ["cf-it-source-idp"], "edit_local_grants": True},
                                 session=authz_actors["operator"][1], csrf=True)
             authz_assert_forbidden(status, body, "source-union Operator self/cross-user PATCH")
             expect_equal(authz_state(), before_state, "denial preserves every protected user, grant and audit count")
@@ -412,7 +412,7 @@ def authz_source_union_boundary():
         # Restore the existing actor through the real Admin API before removing
         # only the injected IdP prerequisite. Later fragments require Operator
         # with empty explicit memberships.
-        status, _ = http(controller, "PATCH", path, {"role": "Operator", "environments": []},
+        status, _ = http(controller, "PATCH", path, {"role": "Operator", "environments": [], "edit_local_grants": True},
                          session=authz_admin_jar, csrf=True)
         expect_equal(status, 200, "Admin restores the Operator's local contribution")
         fixture_sql("""
@@ -430,3 +430,11 @@ def authz_source_union_boundary():
 
 
 authz_source_union_boundary()
+
+with case("authorization-operator-has-no-usable-admin-mutation-in-ui"):
+    before = authz_state()
+    receipt("authorization.operator.browserRequested", True)
+    run_browser(controller, "operator-admin-denied")
+    expect_equal(receipts()["authorization.operator.browserUserId"],
+                 receipts()["authorization.operator.userId"], "browser is the restored Operator")
+    expect_equal(authz_state(), before, "Operator UI denial leaves protected state unchanged")

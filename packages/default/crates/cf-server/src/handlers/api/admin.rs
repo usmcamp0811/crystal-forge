@@ -7,14 +7,14 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use sqlx::PgPool;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 use crate::api::models::{
-    AdminUserSummary, ApiError, AuditAction, AuditEvent, AutomaticRetryPolicyResponse,
-    ClassificationBannerConfig, DatabaseRuntimeInfo, IdentitySource, OidcGroupMapping,
-    PaginatedResponse, Role, ServerRuntimeInfoResponse, UpdateAutomaticRetryPolicyRequest,
-    UpdateClassificationBannerRequest,
+    AdminUserGrantSources, AdminUserSummary, ApiError, AuditAction, AuditEvent,
+    AutomaticRetryPolicyResponse, ClassificationBannerConfig, DatabaseRuntimeInfo, IdentitySource,
+    OidcGroupMapping, PaginatedResponse, Role, ServerRuntimeInfoResponse,
+    UpdateAutomaticRetryPolicyRequest, UpdateClassificationBannerRequest,
 };
 use crate::auth::password::hash_password;
 use crate::handlers::agent_request::CFState;
@@ -22,7 +22,6 @@ use crate::handlers::api::rbac::{extract_request_origin, require_admin as requir
 use crate::models::auth_identity::AuthRole;
 use crate::models::retry_policy::{AutomaticRetryPolicy, RetryPolicyValidationError};
 use crate::queries::admin::{self, GuardedMutationOutcome, OidcMappingRow};
-use crate::queries::auth_identity::get_user_roles;
 use crate::queries::users::{insert_user, update_password_hash_by_user_id};
 
 #[derive(Debug, Deserialize)]
@@ -35,11 +34,23 @@ pub struct CreateAdminUserRequest {
     pub environments: Vec<String>,
 }
 
+/// Carries optional explicit local override edits and account changes.
+/// Omitted grant categories retain their existing source classification.
 #[derive(Debug, Deserialize)]
 pub struct UpdateAdminUserRequest {
+    /// Confirms deliberate local grant edits instead of effective-value round trips.
+    #[serde(default)]
+    pub edit_local_grants: bool,
+    /// Removes only local role contributions, preserving managed and legacy sources.
+    #[serde(default)]
+    pub clear_local_role: bool,
+    /// Replaces local role sources, retaining managed roles.
     pub role: Option<Role>,
+    /// Sets account status if supplied.
     pub enabled: Option<bool>,
+    /// Replaces local membership sources; an empty list clears those sources.
     pub environments: Option<Vec<String>>,
+    /// Resets the password if nonempty after trimming.
     pub password: Option<String>,
 }
 
@@ -51,6 +62,7 @@ pub struct UpsertOidcMappingRequest {
     pub environments: Vec<String>,
 }
 
+/// Lists accounts with effective grants and source metadata for administrators.
 pub async fn list_users(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
     let Some(_admin_user) = require_admin_user(&pool, &headers).await else {
         return forbidden();
@@ -61,17 +73,16 @@ pub async fn list_users(State(pool): State<PgPool>, headers: HeaderMap) -> impl 
         Err(_) => return internal_error("Failed to list admin users"),
     };
 
+    let user_ids = rows.iter().map(|row| row.id).collect::<Vec<_>>();
+    let mut grants = match load_admin_grant_projections(&pool, &user_ids).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load admin user grants"),
+    };
+
     let mut result = Vec::with_capacity(rows.len());
     for row in rows {
-        let role = match get_user_roles(&pool, row.id).await {
-            Ok(roles) => highest_role(roles.into_iter().map(|r| r.role).collect()),
-            Err(_) => None,
-        };
-
-        let environments = load_user_environments(&pool, row.id)
-            .await
-            .unwrap_or_default();
-
+        let (role, environments, grant_sources) =
+            grants.remove(&row.id).unwrap_or_default().finish();
         result.push(AdminUserSummary {
             id: row.id.to_string(),
             identifier: if row.username.trim().is_empty() {
@@ -87,6 +98,7 @@ pub async fn list_users(State(pool): State<PgPool>, headers: HeaderMap) -> impl 
             role,
             enabled: row.is_active,
             environments,
+            grant_sources: Some(grant_sources),
             updated_at: row.updated_at,
         });
     }
@@ -366,6 +378,10 @@ pub async fn create_user(
 ///
 /// Managed IdP grants survive replacement. The response reports the highest
 /// effective role and all effective environments, which can exceed the request.
+/// All supplied fields and their audits commit atomically. Validation and
+/// last-admin rejection leave every category and source classification intact.
+/// Grant edits require explicit intent; clearing local roles preserves legacy
+/// ownership and cannot be combined with a replacement role.
 pub async fn update_user(
     State(pool): State<PgPool>,
     Path(user_id): Path<String>,
@@ -375,162 +391,74 @@ pub async fn update_user(
     let Some(admin_user_id) = require_admin_user(&pool, &headers).await else {
         return forbidden();
     };
-    let request_origin = extract_request_origin(&headers);
-
+    if let Err(response) = crate::handlers::api::auth_session::require_csrf(&headers) {
+        return response;
+    }
+    if (payload.role.is_some() || payload.environments.is_some() || payload.clear_local_role)
+        && !payload.edit_local_grants
+    {
+        return bad_request("Local grant edits require edit_local_grants=true");
+    }
+    if payload.role.is_some() && payload.clear_local_role {
+        return bad_request("Cannot set role and clear_local_role together");
+    }
     let target_user_id = match Uuid::parse_str(&user_id) {
         Ok(value) => value,
         Err(_) => return bad_request("User id must be a valid UUID"),
     };
 
-    let current = match admin::find_admin_user(&pool, target_user_id).await {
-        Ok(Some(value)) => value,
-        Ok(None) => return not_found("User not found"),
-        Err(_) => return internal_error("Failed to load user"),
-    };
-
-    let roles = match get_user_roles(&pool, target_user_id).await {
-        Ok(value) => value,
-        Err(_) => return internal_error("Failed to load user roles"),
-    };
-    let current_role = highest_role(roles.iter().map(|role| role.role).collect());
-    let prior_environments = load_user_environments(&pool, target_user_id)
-        .await
-        .unwrap_or_default();
-    let mut audit_events: Vec<(AuditAction, serde_json::Value)> = vec![];
-
-    if let Some(enabled) = payload.enabled {
-        if !enabled {
-            match admin::disable_user_with_admin_guard(&pool, target_user_id).await {
-                Ok(GuardedMutationOutcome::Applied) => {}
-                Ok(GuardedMutationOutcome::GuardrailViolation) => {
-                    return conflict("Cannot disable the last enabled admin");
-                }
-                Ok(GuardedMutationOutcome::NotFound) => return not_found("User not found"),
-                Err(_) => return internal_error("Failed to validate admin guardrail"),
-            }
-        } else if admin::update_user_active(&pool, target_user_id, enabled)
-            .await
-            .is_err()
-        {
-            return internal_error("Failed to update user status");
-        }
-
-        if enabled != current.is_active {
-            audit_events.push((
-                if enabled {
-                    AuditAction::UserEnabled
-                } else {
-                    AuditAction::UserDisabled
-                },
-                serde_json::json!({ "enabled": enabled }),
-            ));
-        }
-    }
-
-    if let Some(role) = payload.role {
-        match admin::replace_user_primary_role_with_admin_guard(
-            &pool,
-            target_user_id,
-            role_to_auth_role(role),
-            admin_user_id,
-            true,
-        )
-        .await
-        {
-            Ok(GuardedMutationOutcome::Applied) => {}
-            Ok(GuardedMutationOutcome::GuardrailViolation) => {
-                return conflict("Cannot remove the final admin role assignment");
-            }
-            Ok(GuardedMutationOutcome::NotFound) => return not_found("User not found"),
-            Err(_) => return internal_error("Failed to validate admin guardrail"),
-        }
-
-        // Source classification is auditable even if effective authority stays
-        // unchanged because the IdP contributes the same or a higher role.
-        audit_events.push((
-            AuditAction::UserRoleAssigned,
-            serde_json::json!({ "from": current_role, "local_role": role, "classifies_legacy_roles": true }),
-        ));
-    }
-
-    if let Some(environments) = payload.environments {
-        if let Err(message) =
-            sync_user_environments(&pool, target_user_id, admin_user_id, &environments).await
-        {
-            return bad_request(&message);
-        }
-
-        audit_events.push((
-            AuditAction::UserEnvironmentMembershipUpdated,
-            serde_json::json!({ "from": prior_environments, "local_environments": environments, "classifies_legacy_environments": true }),
-        ));
-    }
-
-    if let Some(password) = payload
+    // Prepare the whole DTO before mutation. Environment existence is checked
+    // under transaction locks; names keep the existing local-edit normalization.
+    let environments = payload.environments.map(|names| {
+        names
+            .into_iter()
+            .map(|name| name.trim().to_ascii_lowercase())
+            .filter(|name| !name.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    });
+    let password_hash = if let Some(password) = payload
         .password
         .as_ref()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
     {
-        let password_hash = match hash_password(password) {
-            Ok(value) => value,
+        if password.len() < 8 {
+            return bad_request("Password must be at least 8 characters");
+        }
+        match hash_password(password) {
+            Ok(value) => Some(value),
             Err(_) => return internal_error("Failed to hash password"),
-        };
-
-        if update_password_hash_by_user_id(&pool, target_user_id, &password_hash)
-            .await
-            .is_err()
-        {
-            return internal_error("Failed to update user password");
         }
-
-        audit_events.push((
-            AuditAction::UserUpdated,
-            serde_json::json!({ "password_reset": true }),
-        ));
-    }
-
-    if !audit_events.is_empty() {
-        let actor = fetch_user_identifier(&pool, admin_user_id)
-            .await
-            .unwrap_or_else(|| admin_user_id.to_string());
-        let target = format!("{} ({})", current.email, current.id);
-
-        if record_admin_audit_event(
-            &pool,
-            admin_user_id,
-            AuditAction::UserUpdated,
-            target.clone(),
-            request_origin.clone(),
-            serde_json::json!({
-                "actor": actor,
-                "change_count": audit_events.len(),
-            }),
-        )
-        .await
-        .is_err()
-        {
-            return internal_error("Failed to write audit event");
+    } else {
+        None
+    };
+    let actor_identifier = match admin::find_user_email(&pool, admin_user_id).await {
+        Ok(Some(email)) => email,
+        Ok(None) => return forbidden(),
+        Err(_) => return internal_error("Failed to load audit actor"),
+    };
+    let patch = admin::AdminUserPatch {
+        enabled: payload.enabled,
+        role: payload.role.map(role_to_auth_role),
+        clear_local_role: payload.clear_local_role,
+        environments,
+        password_hash,
+        actor_user_id: admin_user_id,
+        actor_identifier,
+        request_origin: extract_request_origin(&headers),
+    };
+    match admin::patch_admin_user(&pool, target_user_id, patch).await {
+        Ok(admin::AdminUserPatchOutcome::Applied) => {}
+        Ok(admin::AdminUserPatchOutcome::NotFound) => return not_found("User not found"),
+        Ok(admin::AdminUserPatchOutcome::InvalidEnvironments) => {
+            return bad_request("Unknown environment(s)");
         }
-
-        for (action, metadata) in audit_events {
-            if record_admin_audit_event(
-                &pool,
-                admin_user_id,
-                action,
-                target.clone(),
-                request_origin.clone(),
-                serde_json::json!({
-                    "actor": actor,
-                    "changes": metadata,
-                }),
-            )
-            .await
-            .is_err()
-            {
-                return internal_error("Failed to write audit event");
-            }
+        Ok(admin::AdminUserPatchOutcome::LastAdmin) => {
+            return conflict("Cannot remove the final enabled admin");
         }
+        Err(_) => return internal_error("Failed to update user"),
     }
 
     match fetch_admin_user_summary(&pool, target_user_id).await {
@@ -831,11 +759,11 @@ async fn fetch_admin_user_summary(pool: &PgPool, user_id: Uuid) -> Result<AdminU
         .await
         .map_err(|_| ())?;
 
-    let roles = get_user_roles(pool, user_id).await.map_err(|_| ())?;
-    let role = highest_role(roles.into_iter().map(|r| r.role).collect());
-    let environments = load_user_environments(pool, user_id)
-        .await
-        .map_err(|_| ())?;
+    let (role, environments, grant_sources) = load_admin_grant_projections(pool, &[user_id])
+        .await?
+        .remove(&user_id)
+        .unwrap_or_default()
+        .finish();
 
     Ok(AdminUserSummary {
         id: row.id.to_string(),
@@ -852,8 +780,93 @@ async fn fetch_admin_user_summary(pool: &PgPool, user_id: Uuid) -> Result<AdminU
         role,
         enabled: row.is_active,
         environments,
+        grant_sources: Some(grant_sources),
         updated_at: row.updated_at,
     })
+}
+
+#[derive(Default)]
+struct AdminGrantProjection {
+    roles: Vec<AuthRole>,
+    environments: BTreeSet<String>,
+    sources: AdminUserGrantSources,
+}
+
+impl AdminGrantProjection {
+    fn finish(mut self) -> (Option<Role>, Vec<String>, AdminUserGrantSources) {
+        // Role has no Ord contract. Use the same authority order as highest_role.
+        for roles in [
+            &mut self.sources.local_roles,
+            &mut self.sources.oidc_roles,
+            &mut self.sources.legacy_roles,
+        ] {
+            *roles = [Role::Admin, Role::Operator, Role::Viewer]
+                .into_iter()
+                .filter(|role| roles.contains(role))
+                .collect();
+        }
+        for environments in [
+            &mut self.sources.local_environments,
+            &mut self.sources.oidc_environments,
+            &mut self.sources.legacy_environments,
+        ] {
+            environments.sort();
+            environments.dedup();
+        }
+        (
+            highest_role(self.roles),
+            self.environments.into_iter().collect(),
+            self.sources,
+        )
+    }
+}
+
+async fn load_admin_grant_projections(
+    pool: &PgPool,
+    user_ids: &[Uuid],
+) -> Result<HashMap<Uuid, AdminGrantProjection>, ()> {
+    let rows = admin::list_admin_user_grant_sources(pool, user_ids)
+        .await
+        .map_err(|_| ())?;
+    let mut projections = HashMap::<Uuid, AdminGrantProjection>::new();
+    for row in rows {
+        let projection = projections.entry(row.user_id).or_default();
+        // Ownership flags are independent: overlap belongs in every source.
+        let sources = [
+            (
+                row.local_grant,
+                &mut projection.sources.local_roles,
+                &mut projection.sources.local_environments,
+            ),
+            (
+                row.oidc_identity_id.is_some(),
+                &mut projection.sources.oidc_roles,
+                &mut projection.sources.oidc_environments,
+            ),
+            (
+                row.legacy_ownership_unresolved,
+                &mut projection.sources.legacy_roles,
+                &mut projection.sources.legacy_environments,
+            ),
+        ];
+        if let Some(role) = row.role {
+            projection.roles.push(role);
+        }
+        if let Some(environment) = &row.environment_name {
+            projection.environments.insert(environment.clone());
+        }
+        for (present, roles, environments) in sources {
+            if present {
+                if let Some(role) = row.role {
+                    roles.push(auth_role_to_role(role));
+                }
+                if let Some(environment) = &row.environment_name {
+                    environments.push(environment.clone());
+                }
+            }
+        }
+    }
+    Ok(projections)
 }
 
 async fn load_user_environments(pool: &PgPool, user_id: Uuid) -> Result<Vec<String>, ()> {
@@ -1362,6 +1375,8 @@ mod tests {
             Path(Uuid::new_v4().to_string()),
             HeaderMap::new(),
             Json(UpdateAdminUserRequest {
+                edit_local_grants: true,
+                clear_local_role: false,
                 role: Some(Role::Operator),
                 enabled: Some(true),
                 environments: Some(vec![]),

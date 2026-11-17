@@ -326,6 +326,88 @@ Admin-only endpoints for user and system management.
 | PATCH | `/admin/users/:id` | Admin | Update user |
 | DELETE | `/admin/users/:id` | Admin | Delete user |
 
+### User PATCH contract (MR !345 requested changes)
+
+This section describes the current TASK-529.2 worktree fix in
+`packages/default/crates/cf-server/src/handlers/api/admin.rs` (`update_user`),
+`src/queries/admin.rs` (`patch_admin_user`), and `src/api/models.rs`, relative to
+the `cf-server` crate. These changes are not attributed to the older commits in
+the provenance above. Server, PostgreSQL and new real-browser verification are
+**PENDING**. See the [source-aware editor review addendum](../ui/admin-user-grant-source-editor.md).
+
+`PATCH /api/v1/admin/users/:id` requires an Admin browser session and the shared
+CSRF guard. A successful request returns `200` with `AdminUserSummary`.
+
+| Request field | Contract |
+| --- | --- |
+| `enabled` | Optional account status. Omission preserves status. |
+| `password` | Optional reset. Trimmed empty input preserves the password; nonempty input must have at least eight characters. Never returned. |
+| `edit_local_grants` | Boolean intent marker, default `false`. Must be `true` when supplying `role`, `environments`, or `clear_local_role: true`. The marker alone does not change grants. |
+| `role` | Optional local role replacement (`Admin`, `Operator`, `Viewer`). Clears local and unresolved legacy role contributions, installs the selected local role, and preserves IdP roles. |
+| `clear_local_role` | Boolean, default `false`. `true` removes **only local** role contributions, preserving IdP and unresolved legacy roles. Cannot be combined with `role`. |
+| `environments` | Optional complete replacement of local and unresolved legacy memberships by environment name. Names are trimmed, ASCII-lowercased, deduplicated, and empty names discarded; unknown names reject the request. `[]` explicitly removes local and legacy memberships. IdP memberships survive. |
+
+Status-only and password-only edits MUST omit both grant categories and leave
+grant intent unset/false. Omitted categories retain all source flags. For example:
+
+```json
+{"enabled": false}
+```
+
+An explicit role clear is distinct from a replacement role:
+
+```json
+{"edit_local_grants": true, "clear_local_role": true}
+```
+
+Grant fields without the true marker, or `role` together with
+`clear_local_role: true`, return `400`. Old cached clients that round-trip
+effective role/environments without the marker now fail with `400` until updated.
+Clients must implement source-aware intent, not merely add the marker to their
+old merged payload. The UI requires acknowledgment before replacement of an
+unresolved legacy category; this acknowledgment is a UI condition, not another
+API field. Clearing only local roles does not classify legacy roles.
+
+The server prepares syntax and the password hash before mutation, then acquires
+the shared grant advisory lock before the target user lock. It validates exact
+environment names under locks and commits status, notification eligibility,
+password, role/membership sources, and all corresponding audit records in **one
+transaction**. Invalid environments, database/audit failures and final-enabled-
+Admin rejection roll back every supplied category. The last-Admin guard evaluates
+the combined final effective union; violation returns `409`. Missing users return
+`404`. The response summary is loaded after commit: a summary-load failure can
+return `500` after a successful mutation and must not be treated as proof of rollback.
+
+### Effective authority and source metadata
+
+List, create and PATCH summaries expose effective `role` (highest union role,
+nullable when absent) and `environments` (sorted, deduplicated union). A requested
+local Viewer can therefore return effective Operator or Admin from another source.
+`identity_source` describes login origin, not grant ownership. Empty memberships
+mean no memberships, not an `all` grant; Admin's broader authorization is separate.
+
+`grant_sources` contains six independent vectors:
+
+```json
+{
+  "local_roles": ["Viewer"],
+  "local_environments": ["dev"],
+  "oidc_roles": ["Operator"],
+  "oidc_environments": ["prod"],
+  "legacy_roles": [],
+  "legacy_environments": []
+}
+```
+
+Roles are deduplicated in Admin/Operator/Viewer order; environments use lexical
+order. Overlap appears in every applicable source. List projection batches grant
+rows for the listed user IDs rather than issuing a source query per account.
+Current servers return metadata even when all vectors are empty. Missing/null
+metadata from an older server means **unknown ownership**, not empty local grants;
+clients must disable grant editing and must not infer local grants from effective
+values. The metadata exposes no identity IDs, issuer/subject, raw claims, tokens,
+credentials or password hashes.
+
 ### Audit Log
 
 | Method | Endpoint | Role | Description |

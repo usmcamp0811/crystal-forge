@@ -2,6 +2,16 @@
 //! SQLx supplies isolated databases with the full production migrations.
 
 use anyhow::Result;
+use axum::{
+    Router,
+    body::Body,
+    http::{Request, StatusCode},
+    routing::patch,
+};
+use crystal_forge::auth::session::{
+    CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token,
+};
+use crystal_forge::handlers::api::admin::update_user;
 use crystal_forge::models::auth_identity::AuthRole;
 use crystal_forge::queries::admin::{
     GuardedMutationOutcome, delete_user_with_admin_guard, disable_user_with_admin_guard,
@@ -13,6 +23,7 @@ use crystal_forge::queries::oidc_entitlements::{
 };
 use serde_json::json;
 use sqlx::PgPool;
+use tower::ServiceExt;
 use uuid::Uuid;
 
 async fn user(pool: &PgPool) -> Result<Uuid> {
@@ -527,5 +538,848 @@ async fn deletion_removes_sources_before_identity_and_retains_actor_identifier(
             .fetch_one(&pool)
             .await?;
     assert_eq!(identities, 0);
+    Ok(())
+}
+
+// Exercise the real Axum JSON/session/CSRF boundary in process. SQLx owns the
+// isolated database; these tests need no listening HTTP server.
+async fn patch_session(pool: &PgPool, actor: Uuid) -> Result<String> {
+    let token = format!("admin-patch-{}", Uuid::new_v4());
+    crystal_forge::queries::auth_identity::create_user_session(
+        pool,
+        actor,
+        hash_token(&token),
+        chrono::Utc::now() + chrono::Duration::hours(1),
+        None,
+        None,
+        "local".into(),
+    )
+    .await?;
+    Ok(token)
+}
+
+async fn http_patch(
+    pool: &PgPool,
+    actor_token: &str,
+    owner: Uuid,
+    body: serde_json::Value,
+    csrf: bool,
+) -> Result<(StatusCode, serde_json::Value)> {
+    let app = Router::new()
+        .route("/api/v1/admin/users/:id", patch(update_user))
+        .with_state(pool.clone());
+    let mut request = Request::builder()
+        .method("PATCH")
+        .uri(format!("/api/v1/admin/users/{owner}"))
+        .header("content-type", "application/json")
+        .header("x-real-ip", "192.0.2.42")
+        .header(
+            "cookie",
+            format!("{SESSION_COOKIE_NAME}={actor_token}; {CSRF_COOKIE_NAME}=patch-csrf"),
+        );
+    if csrf {
+        request = request.header(CSRF_HEADER_NAME.as_str(), "patch-csrf");
+    }
+    let response = app
+        .oneshot(request.body(Body::from(body.to_string()))?)
+        .await?;
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    Ok((status, serde_json::from_slice(&body)?))
+}
+
+async fn patch_fixture(pool: &PgPool) -> Result<(Uuid, Uuid, Uuid, String)> {
+    let (owner, actor, identity, environment) = fixture(pool).await?;
+    legacy(pool, owner, environment).await?;
+    replace_role(pool, actor, actor, AuthRole::Admin).await?;
+    sqlx::query(
+        "UPDATE users SET is_active = false, password_hash = 'original-hash' WHERE id = $1",
+    )
+    .bind(owner)
+    .execute(pool)
+    .await?;
+    // Keep independent managed authority beside the unresolved local category.
+    sqlx::query(
+        "INSERT INTO user_role_assignments (user_id, role, local_grant, oidc_identity_id, legacy_ownership_unresolved)
+         VALUES ($1, 'viewer', false, $2, false)",
+    ).bind(owner).bind(identity).execute(pool).await?;
+    let token = patch_session(pool, actor).await?;
+    Ok((owner, actor, identity, token))
+}
+
+async fn patch_snapshot(pool: &PgPool, owner: Uuid) -> Result<serde_json::Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+          'user', (SELECT to_jsonb(u) FROM users u WHERE id = $1),
+          'roles', (SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY role), '[]'::jsonb)
+                    FROM user_role_assignments r WHERE user_id = $1),
+          'environments', (SELECT coalesce(jsonb_agg(to_jsonb(m) ORDER BY environment_id), '[]'::jsonb)
+                           FROM user_environment_memberships m WHERE user_id = $1),
+          'preferences', (SELECT to_jsonb(p) FROM user_notification_preferences p WHERE user_id = $1),
+          'audits', (SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY id), '[]'::jsonb) FROM admin_audit_events a))",
+    ).bind(owner).fetch_one(pool).await?)
+}
+
+fn all_fields_patch() -> serde_json::Value {
+    json!({"edit_local_grants": true, "enabled": true, "role": "Admin", "environments": ["admin-source"], "password": "replacement-password"})
+}
+
+#[sqlx::test]
+async fn http_mixed_patch_validates_every_field_before_mutation(pool: PgPool) -> Result<()> {
+    let (owner, _, _, token) = patch_fixture(&pool).await?;
+    let before = patch_snapshot(&pool, owner).await?;
+    for invalid in [
+        json!({"edit_local_grants": true, "enabled": true, "role": "Admin", "environments": ["does-not-exist"], "password": "replacement-password"}),
+        json!({"edit_local_grants": true, "enabled": true, "role": "Admin", "environments": ["admin-source"], "password": "short"}),
+        json!({"edit_local_grants": true, "clear_local_role": true, "enabled": true, "environments": ["does-not-exist"], "password": "replacement-password"}),
+    ] {
+        let (status, body) = http_patch(&pool, &token, owner, invalid, true).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(patch_snapshot(&pool, owner).await?, before);
+    }
+    let (status, _) = http_patch(&pool, &token, owner, all_fields_patch(), false).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(patch_snapshot(&pool, owner).await?, before);
+    let (status, _) = http_patch(&pool, "invalid-session", owner, all_fields_patch(), true).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(patch_snapshot(&pool, owner).await?, before);
+    let (status, _) = http_patch(&pool, &token, Uuid::new_v4(), json!({}), true).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let viewer = user(&pool).await?;
+    replace_role(&pool, viewer, viewer, AuthRole::Viewer).await?;
+    let viewer_token = patch_session(&pool, viewer).await?;
+    let (status, _) = http_patch(&pool, &viewer_token, owner, all_fields_patch(), true).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(patch_snapshot(&pool, owner).await?, before);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn http_patch_rolls_back_failures_after_each_write_and_audits(pool: PgPool) -> Result<()> {
+    let (owner, _, _, token) = patch_fixture(&pool).await?;
+    let before = patch_snapshot(&pool, owner).await?;
+    sqlx::raw_sql(
+        "CREATE SEQUENCE admin_patch_failures;
+         CREATE FUNCTION fail_admin_patch_write() RETURNS trigger AS $$
+         BEGIN
+             PERFORM nextval('admin_patch_failures');
+             RAISE EXCEPTION 'injected private database failure';
+         END;
+         $$ LANGUAGE plpgsql;",
+    )
+    .execute(&pool)
+    .await?;
+    // AFTER triggers prove the mutation actually ran before the failure. The
+    // final audit trigger allows the summary and earlier detail audits to write.
+    for (index, (table, event, condition)) in [
+        (
+            "users",
+            "UPDATE OF is_active",
+            format!("NEW.id = '{owner}'::uuid"),
+        ),
+        (
+            "user_role_assignments",
+            "INSERT",
+            format!("NEW.user_id = '{owner}'::uuid AND NEW.local_grant"),
+        ),
+        (
+            "user_environment_memberships",
+            "INSERT",
+            format!("NEW.user_id = '{owner}'::uuid AND NEW.local_grant"),
+        ),
+        (
+            "users",
+            "UPDATE OF password_hash",
+            format!("NEW.id = '{owner}'::uuid"),
+        ),
+        (
+            "admin_audit_events",
+            "INSERT",
+            "NEW.metadata @> '{\"changes\":{\"password_reset\":true}}'::jsonb".into(),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        sqlx::raw_sql(&format!(
+            "CREATE TRIGGER fail_patch AFTER {event} ON {table}
+             FOR EACH ROW WHEN ({condition}) EXECUTE FUNCTION fail_admin_patch_write();",
+        ))
+        .execute(&pool)
+        .await?;
+        let (status, body) = http_patch(&pool, &token, owner, all_fields_patch(), true).await?;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{table}: {body}");
+        assert_eq!(body["message"], "Failed to update user");
+        assert!(body["details"].is_null());
+        assert!(!body.to_string().contains("injected private"));
+        // Sequences do not roll back: prove this exact fault was reached,
+        // rather than accepting an unrelated earlier database error as proof.
+        let (hits, called): (i64, bool) =
+            sqlx::query_as("SELECT last_value, is_called FROM admin_patch_failures")
+                .fetch_one(&pool)
+                .await?;
+        assert!(called, "{table} {event}");
+        assert_eq!(hits, index as i64 + 1, "{table} {event}");
+        assert_eq!(
+            patch_snapshot(&pool, owner).await?,
+            before,
+            "{table} {event}"
+        );
+        sqlx::raw_sql(&format!("DROP TRIGGER fail_patch ON {table}"))
+            .execute(&pool)
+            .await?;
+    }
+    Ok(())
+}
+
+#[sqlx::test]
+async fn http_patch_commits_all_fields_and_coherent_audits(pool: PgPool) -> Result<()> {
+    let (owner, actor, identity, token) = patch_fixture(&pool).await?;
+    let (status, body) = http_patch(&pool, &token, owner, all_fields_patch(), true).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["enabled"], true);
+    assert_eq!(body["role"], "Admin");
+    assert_eq!(body["environments"], json!(["admin-source"]));
+    assert_eq!(
+        role_sources(&pool, owner).await?,
+        [
+            ("admin".into(), true, None, false),
+            ("viewer".into(), false, Some(identity), false),
+        ]
+    );
+    let snapshot = patch_snapshot(&pool, owner).await?;
+    let hash = snapshot["user"]["password_hash"].as_str().unwrap();
+    crystal_forge::auth::password::verify_password("replacement-password", hash)?;
+    assert_eq!(snapshot["environments"][0]["local_grant"], true);
+    assert_eq!(
+        snapshot["environments"][0]["assigned_by_user_id"],
+        actor.to_string()
+    );
+    assert_eq!(
+        snapshot["environments"][0]["legacy_ownership_unresolved"],
+        false
+    );
+    assert!(!snapshot["preferences"].is_null());
+    let audits = snapshot["audits"].as_array().unwrap();
+    assert_eq!(audits.len(), 5);
+    let actor_email = format!("{actor}@example.invalid");
+    for audit in audits {
+        assert_eq!(audit["actor_user_id"], actor.to_string());
+        assert_eq!(audit["actor_identifier"], actor_email);
+        assert_eq!(audit["request_origin"], "192.0.2.42");
+        assert_eq!(
+            audit["target"],
+            format!("{owner}@example.invalid ({owner})")
+        );
+        assert_eq!(audit["created_at"], audits[0]["created_at"]);
+        assert!(!audit.to_string().contains(hash));
+        assert!(!audit.to_string().contains("replacement-password"));
+    }
+    assert_eq!(
+        audits
+            .iter()
+            .filter(|a| a["metadata"]["change_count"] == 4)
+            .count(),
+        1
+    );
+    let role_audit = audits
+        .iter()
+        .find(|a| a["action"] == "user_role_assigned")
+        .unwrap();
+    assert_eq!(
+        role_audit["metadata"]["changes"],
+        json!({
+            "from": "Operator", "local_role": "Admin", "classifies_legacy_roles": true,
+        })
+    );
+    let environment_audit = audits
+        .iter()
+        .find(|a| a["action"] == "user_environment_membership_updated")
+        .unwrap();
+    assert_eq!(
+        environment_audit["metadata"]["changes"],
+        json!({
+            "from": ["admin-source"], "local_environments": ["admin-source"],
+            "classifies_legacy_environments": true,
+        })
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn http_omitted_grants_preserve_unresolved_and_managed_sources(pool: PgPool) -> Result<()> {
+    let (owner, _, _, token) = patch_fixture(&pool).await?;
+    let before = patch_snapshot(&pool, owner).await?;
+    let (status, _) = http_patch(&pool, &token, owner, json!({"enabled": true}), true).await?;
+    assert_eq!(status, StatusCode::OK);
+    let after = patch_snapshot(&pool, owner).await?;
+    assert_eq!(before["roles"], after["roles"]);
+    assert_eq!(before["environments"], after["environments"]);
+    let (status, _) = http_patch(
+        &pool,
+        &token,
+        owner,
+        json!({"password": "replacement-password"}),
+        true,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    let after = patch_snapshot(&pool, owner).await?;
+    assert_eq!(before["roles"], after["roles"]);
+    assert_eq!(before["environments"], after["environments"]);
+    crystal_forge::auth::password::verify_password(
+        "replacement-password",
+        after["user"]["password_hash"].as_str().unwrap(),
+    )?;
+    let (status, _) = http_patch(
+        &pool,
+        &token,
+        owner,
+        json!({"edit_local_grants": true, "environments": []}),
+        true,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    let after = patch_snapshot(&pool, owner).await?;
+    assert_eq!(before["roles"], after["roles"]);
+    assert_eq!(after["environments"], json!([]));
+    Ok(())
+}
+
+#[sqlx::test]
+async fn http_combined_patch_last_admin_rejection_is_atomic(pool: PgPool) -> Result<()> {
+    let (owner, actor, _, token) = patch_fixture(&pool).await?;
+    // The actor is the only enabled Admin. Every requested category must roll
+    // back together when the combined final state would remove that Admin.
+    let before = patch_snapshot(&pool, actor).await?;
+    for body in [
+        json!({"edit_local_grants": true, "enabled": false, "role": "Admin", "environments": ["admin-source"], "password": "replacement-password"}),
+        json!({"edit_local_grants": true, "enabled": true, "role": "Viewer", "environments": [], "password": "replacement-password"}),
+    ] {
+        let (status, _) = http_patch(&pool, &token, actor, body, true).await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(patch_snapshot(&pool, actor).await?, before);
+    }
+    // A managed Admin survives an explicit local Viewer edit, but cannot
+    // satisfy the guard if the same PATCH also disables the account.
+    sqlx::query("UPDATE users SET is_active = true WHERE id = $1")
+        .bind(owner)
+        .execute(&pool)
+        .await?;
+    let identity: Uuid =
+        sqlx::query_scalar("SELECT id FROM external_identities WHERE user_id = $1")
+            .bind(owner)
+            .fetch_one(&pool)
+            .await?;
+    replace_role(&pool, owner, actor, AuthRole::Viewer).await?;
+    replace_user_environment_memberships(&pool, owner, actor, &[])
+        .await
+        .map_err(anyhow::Error::msg)?;
+    sync(&pool, owner, identity).await?;
+    let (status, _) = http_patch(&pool, &token, actor, json!({"enabled": false}), true).await?;
+    assert_eq!(status, StatusCode::OK);
+    // Authenticate as the remaining managed Admin.
+    let managed_token = patch_session(&pool, owner).await?;
+    let (status, body) = http_patch(
+        &pool,
+        &managed_token,
+        owner,
+        json!({"edit_local_grants": true, "role": "Viewer"}),
+        true,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["role"], "Admin");
+    let before = patch_snapshot(&pool, owner).await?;
+    let (status, _) = http_patch(
+        &pool,
+        &managed_token,
+        owner,
+        json!({"edit_local_grants": true, "enabled": false, "role": "Viewer"}),
+        true,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(patch_snapshot(&pool, owner).await?, before);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn concurrent_http_multi_field_patches_retain_one_enabled_admin(pool: PgPool) -> Result<()> {
+    let first = user(&pool).await?;
+    let second = user(&pool).await?;
+    replace_role(&pool, first, first, AuthRole::Admin).await?;
+    replace_role(&pool, second, second, AuthRole::Admin).await?;
+    let first_token = patch_session(&pool, first).await?;
+    let second_token = patch_session(&pool, second).await?;
+    let first_before = patch_snapshot(&pool, first).await?;
+    let second_before = patch_snapshot(&pool, second).await?;
+    let body = json!({"edit_local_grants": true, "enabled": false, "role": "Viewer", "environments": [], "password": "replacement-password"});
+    let work = async {
+        tokio::join!(
+            http_patch(&pool, &first_token, first, body.clone(), true),
+            http_patch(&pool, &second_token, second, body.clone(), true),
+        )
+    };
+    let (first_result, second_result) =
+        tokio::time::timeout(std::time::Duration::from_secs(15), work).await?;
+    let (first_status, first_body) = first_result?;
+    let (second_status, second_body) = second_result?;
+    assert!(
+        (first_status == StatusCode::OK && second_status == StatusCode::CONFLICT)
+            || (second_status == StatusCode::OK && first_status == StatusCode::CONFLICT),
+        "{first_status}: {first_body}; {second_status}: {second_body}",
+    );
+    let (rejected, before) = if first_status == StatusCode::CONFLICT {
+        (first, first_before)
+    } else {
+        (second, second_before)
+    };
+    let after = patch_snapshot(&pool, rejected).await?;
+    for category in ["user", "roles", "environments", "preferences"] {
+        assert_eq!(after[category], before[category], "{category}");
+    }
+    assert_eq!(after["audits"].as_array().unwrap().len(), 5);
+    assert_eq!(
+        crystal_forge::queries::admin::count_enabled_admins(&pool).await?,
+        1
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn http_grant_edits_require_explicit_intent_for_every_user(pool: PgPool) -> Result<()> {
+    let (owner, actor, _, token) = patch_fixture(&pool).await?;
+    // Both externally linked and local accounts reject old clients that send
+    // effective values back without deliberate local-source edit intent.
+    for (target, role, environments) in [
+        (owner, "Operator", vec!["admin-source"]),
+        (actor, "Admin", vec![]),
+    ] {
+        let before = patch_snapshot(&pool, target).await?;
+        for invalid in [
+            json!({"role": role, "enabled": true, "password": "replacement-password"}),
+            json!({"environments": environments, "enabled": true, "password": "replacement-password"}),
+            json!({"role": role, "environments": environments}),
+            json!({"clear_local_role": true}),
+            json!({"edit_local_grants": false, "role": role}),
+            json!({"edit_local_grants": false, "environments": []}),
+            json!({"edit_local_grants": true, "role": role, "clear_local_role": true,
+                   "enabled": true, "password": "replacement-password"}),
+        ] {
+            let (status, body) = http_patch(&pool, &token, target, invalid, true).await?;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(patch_snapshot(&pool, target).await?, before);
+        }
+    }
+    Ok(())
+}
+
+async fn clear_role_fixture(pool: &PgPool) -> Result<(Uuid, Uuid, Uuid, String)> {
+    let (owner, actor, identity, token) = patch_fixture(pool).await?;
+    // Overlap local with both other sources and add a local-only orphan. Clear
+    // must remove only the local contributions, without classifying legacy.
+    sqlx::query(
+        "UPDATE user_role_assignments SET local_grant = true, granted_by_user_id = $2
+         WHERE user_id = $1",
+    )
+    .bind(owner)
+    .bind(actor)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO user_role_assignments
+         (user_id, role, local_grant, legacy_ownership_unresolved, granted_by_user_id)
+         VALUES ($1, 'admin', true, false, $2)",
+    )
+    .bind(owner)
+    .bind(actor)
+    .execute(pool)
+    .await?;
+    Ok((owner, actor, identity, token))
+}
+
+#[sqlx::test]
+async fn http_clear_local_role_preserves_managed_and_unresolved_legacy_sources(
+    pool: PgPool,
+) -> Result<()> {
+    let (owner, _, identity, token) = clear_role_fixture(&pool).await?;
+    let before = patch_snapshot(&pool, owner).await?;
+    let (status, body) = http_patch(
+        &pool,
+        &token,
+        owner,
+        json!({"edit_local_grants": true, "clear_local_role": true, "enabled": true,
+               "password": "replacement-password"}),
+        true,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["role"], "Operator");
+    assert_eq!(
+        role_sources(&pool, owner).await?,
+        [
+            ("operator".into(), false, None, true),
+            ("viewer".into(), false, Some(identity), false),
+        ]
+    );
+    let after = patch_snapshot(&pool, owner).await?;
+    assert_eq!(before["environments"], after["environments"]);
+    for row in after["roles"].as_array().unwrap() {
+        let original = before["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|prior| prior["id"] == row["id"])
+            .unwrap();
+        let mut expected = original.clone();
+        expected["local_grant"] = json!(false);
+        assert_eq!(*row, expected);
+    }
+    let audits = after["audits"].as_array().unwrap();
+    assert_eq!(audits.len(), 4);
+    let clear = audits
+        .iter()
+        .find(|a| a["action"] == "user_role_assigned")
+        .unwrap();
+    assert_eq!(
+        clear["metadata"]["changes"],
+        json!({
+            "from": "Admin", "clear_local_role": true, "classifies_legacy_roles": false,
+        })
+    );
+    // Like explicit replacement, a repeated clear audits source intent even
+    // when there is no local contribution left to remove.
+    let (status, _) = http_patch(
+        &pool,
+        &token,
+        owner,
+        json!({"edit_local_grants": true, "clear_local_role": true}),
+        true,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    let repeated = patch_snapshot(&pool, owner).await?;
+    for category in ["user", "roles", "environments", "preferences"] {
+        assert_eq!(repeated[category], after[category], "{category}");
+    }
+    assert_eq!(repeated["audits"].as_array().unwrap().len(), 6);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn http_clear_local_role_audit_failure_rolls_back_all_fields(pool: PgPool) -> Result<()> {
+    let (owner, _, _, token) = clear_role_fixture(&pool).await?;
+    let before = patch_snapshot(&pool, owner).await?;
+    sqlx::raw_sql(
+        "CREATE SEQUENCE clear_role_audit_failure;
+         CREATE FUNCTION fail_clear_role_audit() RETURNS trigger AS $$
+         BEGIN
+             PERFORM nextval('clear_role_audit_failure');
+             RAISE EXCEPTION 'private clear role audit failure';
+         END;
+         $$ LANGUAGE plpgsql;
+         CREATE TRIGGER fail_clear_role_audit AFTER INSERT ON admin_audit_events
+         FOR EACH ROW WHEN (NEW.metadata @> '{\"changes\":{\"clear_local_role\":true}}'::jsonb)
+         EXECUTE FUNCTION fail_clear_role_audit();",
+    )
+    .execute(&pool)
+    .await?;
+    let (status, body) = http_patch(
+        &pool,
+        &token,
+        owner,
+        json!({"edit_local_grants": true, "clear_local_role": true, "enabled": true,
+               "environments": [], "password": "replacement-password"}),
+        true,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["message"], "Failed to update user");
+    let called: bool = sqlx::query_scalar("SELECT is_called FROM clear_role_audit_failure")
+        .fetch_one(&pool)
+        .await?;
+    assert!(called);
+    assert_eq!(patch_snapshot(&pool, owner).await?, before);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn http_clear_local_role_uses_final_effective_union_for_last_admin(
+    pool: PgPool,
+) -> Result<()> {
+    let actor = user(&pool).await?;
+    replace_role(&pool, actor, actor, AuthRole::Admin).await?;
+    let token = patch_session(&pool, actor).await?;
+    let before = patch_snapshot(&pool, actor).await?;
+    let (status, _) = http_patch(
+        &pool,
+        &token,
+        actor,
+        json!({"edit_local_grants": true, "clear_local_role": true, "enabled": true,
+               "environments": [], "password": "replacement-password"}),
+        true,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(patch_snapshot(&pool, actor).await?, before);
+    // The same Admin row may also carry managed or unresolved legacy sources.
+    // Either survives clear, but disabling it still removes the final Admin.
+    let identity: Uuid = sqlx::query_scalar(
+        "INSERT INTO external_identities (user_id, provider_key, subject)
+         VALUES ($1, 'oidc', $2) RETURNING id",
+    )
+    .bind(actor)
+    .bind(actor.to_string())
+    .fetch_one(&pool)
+    .await?;
+    for managed in [true, false] {
+        sqlx::query(
+            "UPDATE user_role_assignments
+             SET local_grant = true, oidc_identity_id = $2, legacy_ownership_unresolved = $3
+             WHERE user_id = $1 AND role = 'admin'",
+        )
+        .bind(actor)
+        .bind(if managed { Some(identity) } else { None })
+        .bind(!managed)
+        .execute(&pool)
+        .await?;
+        let before = patch_snapshot(&pool, actor).await?;
+        let (status, _) = http_patch(
+            &pool,
+            &token,
+            actor,
+            json!({"edit_local_grants": true, "clear_local_role": true, "enabled": false,
+                   "environments": [], "password": "replacement-password"}),
+            true,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(patch_snapshot(&pool, actor).await?, before);
+        let (status, body) = http_patch(
+            &pool,
+            &token,
+            actor,
+            json!({"edit_local_grants": true, "clear_local_role": true}),
+            true,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["role"], "Admin");
+        assert_eq!(
+            role_sources(&pool, actor).await?,
+            [(
+                "admin".into(),
+                false,
+                if managed { Some(identity) } else { None },
+                !managed
+            ),]
+        );
+    }
+    Ok(())
+}
+
+async fn http_source_list(pool: &PgPool, token: &str) -> Result<(StatusCode, serde_json::Value)> {
+    let response = Router::new()
+        .route(
+            "/api/v1/admin/users",
+            axum::routing::get(crystal_forge::handlers::api::admin::list_users),
+        )
+        .with_state(pool.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/users")
+                .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    Ok((status, serde_json::from_slice(&bytes)?))
+}
+
+#[sqlx::test]
+async fn batched_source_projection_matches_admin_http_and_patch_summary(
+    pool: PgPool,
+) -> Result<()> {
+    use crystal_forge::api::models::AdminUserSummary;
+    use crystal_forge::queries::admin::list_admin_user_grant_sources;
+
+    let (owner, actor, identity, overlap_environment) = fixture(&pool).await?;
+    let empty = user(&pool).await?;
+    replace_role(&pool, actor, actor, AuthRole::Admin).await?;
+    // Three independent flags on one row must appear in all three vectors.
+    // The remaining rows prove false local flags never become inferred grants.
+    sqlx::query(
+        "INSERT INTO user_role_assignments
+         (user_id, role, local_grant, oidc_identity_id, legacy_ownership_unresolved)
+         VALUES ($1, 'viewer', false, NULL, true),
+                ($1, 'operator', false, $2, false),
+                ($1, 'admin', true, $2, true)",
+    )
+    .bind(owner)
+    .bind(identity)
+    .execute(&pool)
+    .await?;
+    for (name, local, managed, legacy) in [
+        ("z-source-legacy", false, false, true),
+        ("a-source-local", true, false, false),
+        ("m-source-oidc", false, true, false),
+    ] {
+        let environment: Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+                .bind(name)
+                .fetch_one(&pool)
+                .await?;
+        sqlx::query(
+            "INSERT INTO user_environment_memberships
+             (user_id, environment_id, local_grant, oidc_identity_id, legacy_ownership_unresolved)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(owner)
+        .bind(environment)
+        .bind(local)
+        .bind(if managed { Some(identity) } else { None })
+        .bind(legacy)
+        .execute(&pool)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO user_environment_memberships
+         (user_id, environment_id, local_grant, oidc_identity_id, legacy_ownership_unresolved)
+         VALUES ($1, $2, true, $3, true)",
+    )
+    .bind(owner)
+    .bind(overlap_environment)
+    .bind(identity)
+    .execute(&pool)
+    .await?;
+    sqlx::query("UPDATE users SET password_hash = 'source-projection-secret-hash' WHERE id = $1")
+        .bind(owner)
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE external_identities SET claims = '{\"private\":\"source-projection-secret-claim\"}'
+         WHERE id = $1",
+    )
+    .bind(identity)
+    .execute(&pool)
+    .await?;
+
+    let rows = list_admin_user_grant_sources(&pool, &[owner, empty]).await?;
+    assert_eq!(rows.len(), 7);
+    assert!(rows.iter().all(|row| row.user_id == owner));
+    let admin = rows
+        .iter()
+        .find(|row| row.role == Some(AuthRole::Admin))
+        .unwrap();
+    assert!(admin.local_grant && admin.legacy_ownership_unresolved);
+    assert_eq!(admin.oidc_identity_id, Some(identity));
+    let overlap = rows
+        .iter()
+        .find(|row| row.environment_name.as_deref() == Some("admin-source"))
+        .unwrap();
+    assert!(overlap.local_grant && overlap.legacy_ownership_unresolved);
+    assert_eq!(overlap.oidc_identity_id, Some(identity));
+    assert!(list_admin_user_grant_sources(&pool, &[]).await?.is_empty());
+
+    let token = patch_session(&pool, actor).await?;
+    let (status, body) = http_source_list(&pool, &token).await?;
+    assert_eq!(status, StatusCode::OK);
+    let summaries = body.as_array().unwrap();
+    let summary = summaries
+        .iter()
+        .find(|value| value["id"] == owner.to_string())
+        .unwrap();
+    let expected_sources = json!({
+        "local_roles": ["Admin"],
+        "local_environments": ["a-source-local", "admin-source"],
+        "oidc_roles": ["Admin", "Operator"],
+        "oidc_environments": ["admin-source", "m-source-oidc"],
+        "legacy_roles": ["Admin", "Viewer"],
+        "legacy_environments": ["admin-source", "z-source-legacy"]
+    });
+    assert_eq!(summary["grant_sources"], expected_sources);
+    assert_eq!(summary["role"], "Admin");
+    assert_eq!(summary["identity_source"], "oidc_derived");
+    assert_eq!(
+        summary["environments"],
+        json!([
+            "a-source-local",
+            "admin-source",
+            "m-source-oidc",
+            "z-source-legacy"
+        ])
+    );
+    let empty_summary = summaries
+        .iter()
+        .find(|value| value["id"] == empty.to_string())
+        .unwrap();
+    assert_eq!(empty_summary["role"], serde_json::Value::Null);
+    assert_eq!(empty_summary["environments"], json!([]));
+    assert_eq!(
+        empty_summary["grant_sources"],
+        json!({
+            "local_roles": [], "local_environments": [],
+            "oidc_roles": [], "oidc_environments": [],
+            "legacy_roles": [], "legacy_environments": []
+        })
+    );
+    // Exact key sets exclude credentials, claims, tokens and identity IDs.
+    let mut keys = summary
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "enabled",
+            "environments",
+            "grant_sources",
+            "id",
+            "identifier",
+            "identity_source",
+            "role",
+            "updated_at"
+        ]
+    );
+    let serialized = body.to_string();
+    for secret in [
+        "source-projection-secret-hash",
+        "source-projection-secret-claim",
+        &token,
+        &identity.to_string(),
+    ] {
+        assert!(!serialized.contains(secret));
+    }
+    let (status, patched) =
+        http_patch(&pool, &token, owner, json!({"enabled": true}), true).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(patched["grant_sources"], expected_sources);
+    assert_eq!(patched["role"], summary["role"]);
+    assert_eq!(patched["environments"], summary["environments"]);
+
+    let mut older_response = summary.clone();
+    older_response
+        .as_object_mut()
+        .unwrap()
+        .remove("grant_sources");
+    assert!(
+        serde_json::from_value::<AdminUserSummary>(older_response)?
+            .grant_sources
+            .is_none()
+    );
+    let non_admin = patch_session(&pool, empty).await?;
+    assert_eq!(
+        http_source_list(&pool, &non_admin).await?.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        http_source_list(&pool, "invalid-session").await?.0,
+        StatusCode::FORBIDDEN
+    );
     Ok(())
 }

@@ -43,6 +43,13 @@ sources:
 - **Assign Environments** - Add user to environments
 - **Delete User** - Remove user
 
+For MR !345's source-aware role/environment editor, the
+[maintainer-approved review addendum](admin-user-grant-source-editor.md) defines
+explicit local edit intent, separate effective and local/IdP/legacy summaries,
+legacy replacement acknowledgment, and error-draft retention. Saving unrelated
+account changes does not implicitly reassign effective grants. The addendum also
+records the single-HTML comparison and pending browser verification.
+
 **User Types:**
 1. **Local** - Created in CF with email/password
 2. **IdP** - Created automatically from OIDC login

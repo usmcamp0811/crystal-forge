@@ -17,6 +17,54 @@ pub struct AdminUserRow {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Carries one effective role or environment and its independent source flags.
+///
+/// Exactly one of `role` and `environment_name` is populated. Identity IDs are
+/// internal ownership evidence and must not be included in the API projection.
+#[derive(Debug, sqlx::FromRow)]
+pub struct AdminUserGrantSourceRow {
+    /// Identifies the account receiving the grant.
+    pub user_id: Uuid,
+    /// Contains the effective role for a role-assignment row.
+    pub role: Option<AuthRole>,
+    /// Contains the environment name for a membership row.
+    pub environment_name: Option<String>,
+    /// Indicates an independent explicit local contribution.
+    pub local_grant: bool,
+    /// Identifies the managed contribution, independently of local ownership.
+    pub oidc_identity_id: Option<Uuid>,
+    /// Indicates unresolved legacy ownership, independently of other sources.
+    pub legacy_ownership_unresolved: bool,
+}
+
+/// Loads grant contributions for all requested accounts in one MVCC snapshot.
+///
+/// Callers derive both effective authority and source metadata from these rows
+/// to avoid inconsistent reads and per-account role/membership queries. Accounts
+/// without grants produce no rows. No credentials or identity claims are read.
+///
+/// # Errors
+/// Returns an error if the database cannot load the grant projection.
+pub async fn list_admin_user_grant_sources(
+    pool: &PgPool,
+    user_ids: &[Uuid],
+) -> Result<Vec<AdminUserGrantSourceRow>> {
+    Ok(sqlx::query_as::<_, AdminUserGrantSourceRow>(
+        "SELECT user_id, role, NULL::text AS environment_name,
+                local_grant, oidc_identity_id, legacy_ownership_unresolved
+         FROM user_role_assignments WHERE user_id = ANY($1::uuid[])
+         UNION ALL
+         SELECT m.user_id, NULL::auth_role AS role, e.name AS environment_name,
+                m.local_grant, m.oidc_identity_id, m.legacy_ownership_unresolved
+         FROM user_environment_memberships m
+         JOIN environments e ON e.id = m.environment_id
+         WHERE m.user_id = ANY($1::uuid[])",
+    )
+    .bind(user_ids)
+    .fetch_all(pool)
+    .await?)
+}
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct OidcMappingRow {
     pub id: Uuid,
@@ -163,6 +211,13 @@ pub async fn count_users_by_email(pool: &PgPool, email: &str) -> Result<i64> {
     Ok(count)
 }
 
+/// Updates account status and resets notification eligibility on reactivation.
+///
+/// Does not enforce the last-admin guard. Administrator PATCH callers use
+/// [`patch_admin_user`] to commit status with grants and audits atomically.
+///
+/// # Errors
+/// Returns an error on database failure; status and preferences roll back together.
 pub async fn update_user_active(pool: &PgPool, user_id: Uuid, enabled: bool) -> Result<()> {
     let mut tx = pool.begin().await?;
     let was_active: Option<bool> =
@@ -171,13 +226,26 @@ pub async fn update_user_active(pool: &PgPool, user_id: Uuid, enabled: bool) -> 
             .fetch_optional(&mut *tx)
             .await?;
 
+    if let Some(was_active) = was_active {
+        update_user_active_tx(&mut tx, user_id, was_active, enabled).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn update_user_active_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    was_active: bool,
+    enabled: bool,
+) -> Result<()> {
     sqlx::query("UPDATE users SET is_active = $1 WHERE id = $2")
         .bind(enabled)
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
-    if was_active == Some(false) && enabled {
+    if !was_active && enabled {
         // SECURITY: A reactivated account starts a new notification eligibility
         // interval. Events created while the account was inactive must not enter
         // its inbox or external-email queue.
@@ -237,11 +305,10 @@ pub async fn update_user_active(pool: &PgPool, user_id: Uuid, enabled: bool) -> 
                  updated_at = NOW()",
         )
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
 
-    tx.commit().await?;
     Ok(())
 }
 
@@ -430,6 +497,30 @@ async fn clear_local_roles(tx: &mut Transaction<'_, Postgres>, user_id: Uuid) ->
     Ok(())
 }
 
+// Clearing an override is not a legacy ownership decision. Delete only rows
+// whose final source would disappear, then retain all managed/legacy sources.
+async fn remove_local_role_contributions(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM user_role_assignments
+         WHERE user_id = $1 AND local_grant AND oidc_identity_id IS NULL
+           AND NOT legacy_ownership_unresolved",
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE user_role_assignments SET local_grant = false
+         WHERE user_id = $1 AND local_grant",
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 /// Removes local and unresolved legacy role sources, retaining managed roles.
 ///
 /// Does not classify environment ownership or enforce the last-admin guard.
@@ -491,7 +582,27 @@ pub async fn replace_user_primary_role_with_admin_guard(
     let Some(target) = lock_user_guard(&mut tx, user_id).await? else {
         return Ok(GuardedMutationOutcome::NotFound);
     };
-    clear_local_roles(&mut tx, user_id).await?;
+    replace_local_role_tx(&mut tx, user_id, role, granted_by_user_id).await?;
+
+    if enforce_last_admin_guard
+        && target.is_active
+        && target.has_admin_role
+        && enabled_admin_count(&mut tx).await? == 0
+    {
+        tx.rollback().await?;
+        return Ok(GuardedMutationOutcome::GuardrailViolation);
+    }
+    tx.commit().await?;
+    Ok(GuardedMutationOutcome::Applied)
+}
+
+async fn replace_local_role_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    role: AuthRole,
+    granted_by_user_id: Uuid,
+) -> Result<()> {
+    clear_local_roles(tx, user_id).await?;
 
     sqlx::query(
         "INSERT INTO user_role_assignments
@@ -505,20 +616,9 @@ pub async fn replace_user_primary_role_with_admin_guard(
     .bind(user_id)
     .bind(role)
     .bind(granted_by_user_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-
-    if enforce_last_admin_guard
-        && target.is_active
-        && target.has_admin_role
-        && enabled_admin_count(&mut tx).await? == 0
-    {
-        tx.rollback().await?;
-        return Ok(GuardedMutationOutcome::GuardrailViolation);
-    }
-
-    tx.commit().await?;
-    Ok(GuardedMutationOutcome::Applied)
+    Ok(())
 }
 
 /// Deletes a user and owned grants before deleting linked identities.
@@ -688,50 +788,59 @@ pub async fn replace_user_environment_memberships(
         return Err("User not found".to_string());
     }
 
+    let resolved = resolve_patch_environments(&mut tx, &normalized)
+        .await
+        .map_err(|_| "Failed to validate environments".to_string())?;
+    if resolved.len() != normalized.len() {
+        let missing = normalized
+            .iter()
+            .filter(|name| !resolved.iter().any(|env| &env.name == *name))
+            .cloned()
+            .collect::<Vec<_>>();
+        return Err(format!("Unknown environment(s): {}", missing.join(", ")));
+    }
+    replace_local_environments_tx(&mut tx, user_id, assigned_by_user_id, &resolved)
+        .await
+        .map_err(|_| "Failed to update environment memberships".to_string())?;
+    tx.commit()
+        .await
+        .map_err(|_| "Failed to commit environment memberships".to_string())?;
+    Ok(())
+}
+
+async fn resolve_patch_environments(
+    tx: &mut Transaction<'_, Postgres>,
+    names: &[String],
+) -> Result<Vec<EnvironmentLookupRow>> {
+    // Keep exact-name validation stable until commit, including deletion/rename.
+    Ok(sqlx::query_as::<_, EnvironmentLookupRow>(
+        "SELECT id, name FROM environments WHERE name = ANY($1) ORDER BY id FOR SHARE",
+    )
+    .bind(names)
+    .fetch_all(&mut **tx)
+    .await?)
+}
+
+async fn replace_local_environments_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    assigned_by_user_id: Uuid,
+    resolved: &[EnvironmentLookupRow],
+) -> Result<()> {
     sqlx::query(
         "DELETE FROM user_environment_memberships WHERE user_id = $1 AND oidc_identity_id IS NULL",
     )
     .bind(user_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|_| "Failed to update environment memberships".to_string())?;
+    .execute(&mut **tx)
+    .await?;
 
     sqlx::query(
         "UPDATE user_environment_memberships
          SET local_grant = false, legacy_ownership_unresolved = false WHERE user_id = $1",
     )
     .bind(user_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|_| "Failed to classify environment memberships".to_string())?;
-
-    if normalized.is_empty() {
-        tx.commit()
-            .await
-            .map_err(|_| "Failed to commit environment memberships".to_string())?;
-        return Ok(());
-    }
-
-    let resolved = sqlx::query_as::<_, EnvironmentLookupRow>(
-        "SELECT id, name FROM environments WHERE name = ANY($1)",
-    )
-    .bind(&normalized)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|_| "Failed to validate environments".to_string())?;
-
-    if resolved.len() != normalized.len() {
-        let known = resolved
-            .iter()
-            .map(|row| row.name.clone())
-            .collect::<BTreeSet<_>>();
-        let missing = normalized
-            .iter()
-            .filter(|name| !known.contains((*name).as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
-        return Err(format!("Unknown environment(s): {}", missing.join(", ")));
-    }
+    .execute(&mut **tx)
+    .await?;
 
     for env in resolved {
         sqlx::query(
@@ -746,14 +855,208 @@ pub async fn replace_user_environment_memberships(
         .bind(user_id)
         .bind(env.id)
         .bind(assigned_by_user_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| "Failed to insert environment membership".to_string())?;
+        .execute(&mut **tx)
+        .await?;
     }
 
-    tx.commit()
-        .await
-        .map_err(|_| "Failed to commit environment memberships".to_string())?;
+    Ok(())
+}
+
+/// Carries a prepared administrator PATCH and its authenticated audit context.
+///
+/// Omitted grants preserve their category unless `clear_local_role` is true.
+/// Supplied replacement grants classify local/unresolved sources; clearing a
+/// local role instead preserves all managed and unresolved legacy sources.
+/// Callers validate DTO syntax and hash passwords before opening a transaction.
+pub struct AdminUserPatch {
+    /// Sets account status when supplied.
+    pub enabled: Option<bool>,
+    /// Replaces local role sources when supplied.
+    pub role: Option<AuthRole>,
+    /// Removes only local role contributions; mutually exclusive with `role`.
+    pub clear_local_role: bool,
+    /// Replaces local environment sources with exact database names.
+    pub environments: Option<Vec<String>>,
+    /// Sets an already prepared password hash; never contains plaintext.
+    pub password_hash: Option<String>,
+    /// Identifies the authenticated administrator assigning local grants.
+    pub actor_user_id: Uuid,
+    /// Retains the actor identifier in durable audit records.
+    pub actor_identifier: String,
+    /// Retains best-effort request origin metadata.
+    pub request_origin: Option<String>,
+}
+
+/// Describes an atomic PATCH result without exposing database details.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AdminUserPatchOutcome {
+    /// Commits all requested mutations and audit records.
+    Applied,
+    /// Leaves all state unchanged because the target does not exist.
+    NotFound,
+    /// Leaves all state unchanged because an exact environment name is unknown.
+    InvalidEnvironments,
+    /// Leaves all state unchanged to retain the final enabled effective Admin.
+    LastAdmin,
+}
+
+/// Applies all PATCH categories and audit records in one transaction.
+///
+/// Acquires the shared grant advisory lock before the target user lock. Validates
+/// all environment names before writes and checks the final effective Admin
+/// union before commit. Rejections and audit failures roll back every category,
+/// source flag and notification-eligibility change.
+///
+/// # Errors
+/// Returns an error for conflicting role edits or database failure, with no
+/// partial committed mutation.
+pub async fn patch_admin_user(
+    pool: &PgPool,
+    user_id: Uuid,
+    patch: AdminUserPatch,
+) -> Result<AdminUserPatchOutcome> {
+    anyhow::ensure!(
+        patch.role.is_none() || !patch.clear_local_role,
+        "conflicting local role edits"
+    );
+    let mut tx = pool.begin().await?;
+    lock_admin_grant_changes(&mut tx).await?;
+    let Some(prior) = lock_user_guard(&mut tx, user_id).await? else {
+        return Ok(AdminUserPatchOutcome::NotFound);
+    };
+    let environments = if let Some(names) = &patch.environments {
+        let resolved = resolve_patch_environments(&mut tx, names).await?;
+        if names
+            .iter()
+            .any(|name| !resolved.iter().any(|env| &env.name == name))
+        {
+            return Ok(AdminUserPatchOutcome::InvalidEnvironments);
+        }
+        Some(resolved)
+    } else {
+        None
+    };
+    let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let mut events = Vec::new();
+    if let Some(enabled) = patch.enabled {
+        update_user_active_tx(&mut tx, user_id, prior.is_active, enabled).await?;
+        if enabled != prior.is_active {
+            events.push((
+                if enabled {
+                    "user_enabled"
+                } else {
+                    "user_disabled"
+                },
+                serde_json::json!({ "enabled": enabled }),
+            ));
+        }
+    }
+    if patch.role.is_some() || patch.clear_local_role {
+        let roles: Vec<AuthRole> =
+            sqlx::query_scalar("SELECT role FROM user_role_assignments WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_all(&mut *tx)
+                .await?;
+        let from = [AuthRole::Admin, AuthRole::Operator, AuthRole::Viewer]
+            .into_iter()
+            .find(|role| roles.contains(role));
+        let changes = if let Some(role) = patch.role {
+            replace_local_role_tx(&mut tx, user_id, role, patch.actor_user_id).await?;
+            serde_json::json!({
+                "from": from, "local_role": role, "classifies_legacy_roles": true,
+            })
+        } else {
+            remove_local_role_contributions(&mut tx, user_id).await?;
+            serde_json::json!({
+                "from": from, "clear_local_role": true, "classifies_legacy_roles": false,
+            })
+        };
+        // Explicit role intent is audited even if effective authority or local
+        // sources are unchanged, including repeated clears with no local role.
+        events.push(("user_role_assigned", changes));
+    }
+    if let Some(resolved) = environments {
+        let from: Vec<String> = sqlx::query_scalar(
+            "SELECT e.name FROM user_environment_memberships m
+             JOIN environments e ON e.id = m.environment_id
+             WHERE m.user_id = $1 ORDER BY e.name",
+        )
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        replace_local_environments_tx(&mut tx, user_id, patch.actor_user_id, &resolved).await?;
+        events.push((
+            "user_environment_membership_updated",
+            serde_json::json!({
+                "from": from, "local_environments": patch.environments,
+                "classifies_legacy_environments": true,
+            }),
+        ));
+    }
+    if let Some(hash) = &patch.password_hash {
+        sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+            .bind(hash)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        events.push((
+            "user_updated",
+            serde_json::json!({ "password_reset": true }),
+        ));
+    }
+    // Check the combined final state: a role edit cannot mask disabling the
+    // final Admin, and an overlapping managed Admin still satisfies the guard.
+    if prior.is_active && prior.has_admin_role && enabled_admin_count(&mut tx).await? == 0 {
+        tx.rollback().await?;
+        return Ok(AdminUserPatchOutcome::LastAdmin);
+    }
+    write_patch_audits(&mut tx, &patch, &format!("{email} ({user_id})"), events).await?;
+    tx.commit().await?;
+    Ok(AdminUserPatchOutcome::Applied)
+}
+
+async fn write_patch_audits(
+    tx: &mut Transaction<'_, Postgres>,
+    patch: &AdminUserPatch,
+    target: &str,
+    mut events: Vec<(&str, serde_json::Value)>,
+) -> Result<()> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let count = events.len();
+    events.insert(
+        0,
+        (
+            "user_updated",
+            serde_json::json!({
+                "actor": patch.actor_identifier, "change_count": count,
+            }),
+        ),
+    );
+    for (index, (action, changes)) in events.into_iter().enumerate() {
+        let metadata = if index == 0 {
+            changes
+        } else {
+            serde_json::json!({ "actor": patch.actor_identifier, "changes": changes })
+        };
+        sqlx::query(
+            "INSERT INTO admin_audit_events
+             (actor_user_id, actor_identifier, action, target, request_origin, metadata)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(patch.actor_user_id)
+        .bind(&patch.actor_identifier)
+        .bind(action)
+        .bind(target)
+        .bind(&patch.request_origin)
+        .bind(metadata)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(())
 }
 

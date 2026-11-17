@@ -5176,15 +5176,55 @@ pub struct UserSessionsResponse {
     pub sessions: Vec<UserSessionDto>,
 }
 
-/// Admin users list item.
+/// Reports independent grant contributions without identity or credential data.
+///
+/// Each vector is sorted and deduplicated. Roles use Admin, Operator, Viewer
+/// order; environments use lexical order. Overlapping contributions appear in
+/// every applicable source. Unresolved legacy ownership is independent of local
+/// and OIDC ownership; account login source does not determine grant ownership.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AdminUserGrantSources {
+    /// Lists roles with an explicit local contribution.
+    pub local_roles: Vec<Role>,
+    /// Lists environments with an explicit local contribution.
+    pub local_environments: Vec<String>,
+    /// Lists roles with an OIDC identity contribution.
+    pub oidc_roles: Vec<Role>,
+    /// Lists environments with an OIDC identity contribution.
+    pub oidc_environments: Vec<String>,
+    /// Lists roles with unresolved legacy ownership.
+    pub legacy_roles: Vec<Role>,
+    /// Lists environments with unresolved legacy ownership.
+    pub legacy_environments: Vec<String>,
+}
+
+/// Reports an administrator-visible account and its effective grant union.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminUserSummary {
+    /// Identifies the account.
     pub id: String,
+    /// Displays the account username and email.
     pub identifier: String,
+    /// Describes account login source, not grant ownership.
     pub identity_source: IdentitySource,
+    /// Reports the highest role across all grant contributions.
     pub role: Option<Role>,
+    /// Reports whether the account is active.
     pub enabled: bool,
+    /// Lists the sorted, deduplicated union of assigned memberships.
+    ///
+    /// This does not encode the Admin role's global browser-access bypass and
+    /// never represents a wildcard grant for a restricted credential.
     pub environments: Vec<String>,
+    /// Reports grant ownership when known by the server version.
+    ///
+    /// Older responses deserialize missing metadata as `None` (source unknown).
+    /// Current servers always return `Some`, including empty vectors for an
+    /// account without grants. Clients must not infer local grants from effective
+    /// values or login source when this field is `None`.
+    #[serde(default)]
+    pub grant_sources: Option<AdminUserGrantSources>,
+    /// Records the account's last update time.
     pub updated_at: DateTime<Utc>,
 }
 

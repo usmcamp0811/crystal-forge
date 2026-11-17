@@ -33,6 +33,10 @@ sources:
 TASK-529.2 implements the source model and callback reconciliation described
 below. The final database regressions passed on the farm at `24b3bad6`; the
 Access scenario passed at `89e7689b`. Exact review-revision CI remains pending.
+Those are historical checkpoints, not proof of the MR !345 requested-change
+fixes now in the worktree. Current server, database and new real-browser
+verification is **PENDING**. The reported UI farm result is 887 tests, including
+nine new tests; it does not establish server or browser acceptance.
 `implementation_status: partial` also records that the freshness helper is not
 wired to PAT admission. There are no PAT/MCP endpoints or token-row validator.
 The approved [CF-AGENT-ACCESS-001 v1.1 specification](agent-access-tokens-mcp-remediation-context.md),
@@ -71,10 +75,53 @@ and installs the requested local role, while retaining IdP contributions.
 Explicit environment replacement does the same for **memberships**, including
 an explicitly empty list. Omitted categories stay unchanged. A role-only change
 does not resolve legacy memberships. Reassigning the same effective value still
-classifies that category as local. PATCH and list responses report the effective
-union, so requested Viewer can still return Operator or Admin from the IdP.
-The handler commits categories separately; do not assume a multi-field PATCH is
-one atomic cutover. Verify each result before continuing.
+classifies that category as local when the client explicitly submits replacement.
+`clear_local_role: true` instead removes only local role contributions and retains
+unresolved legacy and IdP roles. PATCH grant edits require
+`edit_local_grants: true`; replacement role and role clear are mutually exclusive.
+PATCH and list responses report the effective union and separate `grant_sources`
+metadata, so requested Viewer can still return Operator or Admin from the IdP.
+The source-aware UI requires explicit category opt-in and acknowledgment before
+legacy replacement. Ordinary save, status and password edits no longer implicitly
+reassign effective grants as local overrides.
+
+All supplied PATCH fields, source flags, notification eligibility and audit events
+now commit in one transaction under the shared grant advisory lock before the
+user lock. Invalid environments, audit failure or last-Admin rejection rolls back
+the entire mutation. See the [PATCH contract](../api/builders-queues-environments-dashboard-admin-api.md#user-patch-contract-mr-345-requested-changes)
+and [editor addendum](../ui/admin-user-grant-source-editor.md). The uncommitted
+fix is in `packages/default/crates/cf-server/src/handlers/api/admin.rs`,
+`src/queries/admin.rs` and `src/api/models.rs` (the latter paths relative to that
+crate); the provenance commits above describe the earlier groundwork.
+
+## Identity helper and first-creation contract
+
+The MR !345 worktree changes in
+`packages/default/crates/cf-server/src/queries/auth_identity.rs` and
+`packages/default/crates/cf-server/src/handlers/api/auth_oidc.rs` close separate
+binding races. Runtime verification of these fixes is **PENDING**.
+
+- Public `upsert_external_identity` means insert-or-return for the same owner.
+  It MUST NOT move an existing provider/subject/normalized-tenant binding. A
+  different owner returns `IdentityOwnershipConflict`. A same-owner call returns
+  the existing row without updating claims, timestamps or freshness. Only a new
+  row uses the supplied initial claims; later authoritative claims updates belong
+  to reconciliation. The helper does not authorize account linking.
+- `create_user_and_bind_external_identity` takes a transaction-scoped per-key
+  advisory lock before any candidate user insert, then rechecks the **exact**
+  normalized stable key in a fresh statement. An existing binding returns
+  `IdentityAlreadyBound` without creating a user. Hash collisions only serialize
+  unrelated keys; the hash never proves identity. The lock is released before
+  reconciliation; callers must not hold user/identity row locks while waiting.
+- Callback recovery is narrow: `IdentityAlreadyBound`, or SQLSTATE `23505` with
+  constraint `idx_external_identities_provider_subject_tenant`, permits reloading
+  the winning binding by its stable key and validating its active owner. Failed
+  candidate creation rolls back user and preferences before recovery. The callback
+  retains the original pre-redirect generation; it does not reserve a newer one
+  or bypass reconciliation's ordering, linkage and activity checks.
+- An unrelated email/username uniqueness collision or other database failure
+  remains an error. It MUST NOT link accounts by email, retry as another owner,
+  replace claims or transfer the winning identity.
 
 ## Ordered callback reconciliation
 
@@ -175,12 +222,17 @@ This is an operator procedure, not an executed migration or database session.
    preserved effective grants and unresolved flags before classification. Leave
    ambiguous grants unresolved until their owner approves the inventory; they
    continue to block future OIDC PAT eligibility.
-4. For the selected independent local overrides, explicitly reassign approved
-   roles and memberships through existing admin controls, one category at a
-   time. Verify the effective result and audit record after each operation.
+4. For the selected independent local overrides, use the source-aware editor's
+   explicit category opt-in and acknowledge legacy replacement. Submit approved
+   roles and membership lists with `edit_local_grants: true`; do not use an old
+   cached merged-field client. Verify each source vector, effective result and
+   audit record after the atomic PATCH.
    **This creates LOCAL overrides. IdP group removal will not remove them.**
    Supply an explicit membership list (including empty when intended); a role
-   reassignment alone does not classify memberships.
+   reassignment alone does not classify memberships. Clearing a local role alone
+   preserves legacy roles and is not classification. Environment replacement,
+   including an empty list, clears both local and legacy memberships before
+   installing the selected local set; the UI requires legacy acknowledgment.
 5. If a pre-existing grant must instead become IdP-owned, stop for an explicit,
    controlled source-classification change reviewed against the inventory,
    identity binding, source constraints and locking contract. Existing admin UI
@@ -209,6 +261,12 @@ unit checks. The separate core package passed its library tests but its extra
 native-Nix post-checks have not yet produced a final package result.
 
 These are checkpoint-specific results, not an exact-head CI or release claim.
+For the MR !345 requested changes, only the reported 887-test UI farm result
+(nine new tests) is available. Atomic PATCH/rollback, metadata projection, public
+identity-helper immutability and concurrent callback recovery still require
+current-source server/database execution and the new real-browser Access cases.
+Documentation validation for this docs-only update is also **PENDING**; no builds
+were requested. No newer checkpoint result or production cutover is asserted.
 The Access scenario proves its browser-admin boundary, not PAT admission or a
 signed provider callback. PAT/OIDC self-service and MCP acceptance remain later
 delivery obligations. The existing ignored real-provider JWT test is not a

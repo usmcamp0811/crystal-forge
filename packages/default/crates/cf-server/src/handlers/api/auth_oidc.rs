@@ -26,7 +26,8 @@ use crate::auth::oidc::{
 use crate::config::{OidcConfig, ServerConfig};
 use crate::handlers::api::auth_session::{establish_user_session, resolve_client_ip};
 use crate::queries::auth_identity::{
-    AuthIdentityRepository, create_user_and_bind_external_identity, get_user_by_id,
+    AuthIdentityRepository, AuthRepositoryError, create_user_and_bind_external_identity,
+    get_user_by_id,
 };
 use crate::queries::oidc_entitlements::{
     ReconciliationOutcome, reconcile, reserve_entitlement_generation,
@@ -166,6 +167,11 @@ pub struct OidcCallbackParams {
 /// session cookies. Reconciliation errors deny login. Unresolved legacy ownership
 /// preserves browser login and existing grants without advancing freshness.
 /// Valid empty mappings produce OIDC-owned Viewer with no managed memberships.
+/// A concurrent first creation serializes by stable identity key. An existing
+/// binding found under that lock or an identity-key insertion conflict reloads
+/// the winning binding and active user without changing claims or reserving a
+/// replacement generation.
+/// Other database failures, including username/email conflicts, remain errors.
 ///
 /// # Errors
 /// Returns an error when flow, token, nonce, verified email, identity binding,
@@ -396,7 +402,7 @@ pub async fn oidc_callback(
 
             let claims_json = serde_json::to_value(&user_info.custom_claims)
                 .unwrap_or_else(|_| serde_json::json!({}));
-            let created = create_user_and_bind_external_identity(
+            let creation = create_user_and_bind_external_identity(
                 &pool,
                 email,
                 user_info.display_name.as_deref(),
@@ -405,22 +411,36 @@ pub async fn oidc_callback(
                 tenant_discriminator,
                 claims_json,
             )
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to create user/identity binding: {}", e);
-                OidcError::DatabaseError
-            })?;
-
-            tracing::info!(
-                "Created user + OIDC identity binding atomically: user_id={} provider={} subject={}",
-                created.id,
-                provider_key,
-                subject
-            );
-
-            created
+            .await;
+            match creation {
+                Ok(created) => created,
+                Err(error) if is_identity_creation_conflict(&error) => {
+                    // CONCURRENCY: Only the stable identity key can select a
+                    // winning account. Creation either found an existing binding
+                    // before inserting a user or rolled back user/preferences.
+                    // Its creation lock is released before reconciliation.
+                    // Retain this flow's original generation;
+                    // reconciliation still fences stale or invalid evidence.
+                    let winner = auth_repo
+                        .find_external_identity(provider_key, subject, tenant_discriminator)
+                        .await
+                        .map_err(|_| OidcError::DatabaseError)?
+                        .ok_or(OidcError::DatabaseError)?;
+                    get_user_by_id(&pool, winner.user_id)
+                        .await
+                        .map_err(|_| OidcError::DatabaseError)?
+                }
+                Err(error) => {
+                    tracing::error!("Failed to create user/identity binding: {}", error);
+                    return Err(OidcError::DatabaseError);
+                }
+            }
         }
     };
+
+    if !user.is_active {
+        return Err(OidcError::EntitlementReconciliationFailed);
+    }
 
     // SECURITY: Reload the binding by provider/sub/issuer, including after atomic
     // creation. Never select an identity by email or assume a user's identity ID.
@@ -498,6 +518,17 @@ pub async fn oidc_callback(
         .append(header::SET_COOKIE, session_cookies.csrf_cookie);
 
     Ok(response)
+}
+
+// The typed conflict comes only from the exact key recheck under the creation
+// lock. PostgreSQL names the unique index in the constraint field for creators
+// that do not use that lock. User email/name collisions and all other database
+// failures must remain errors, not linking.
+fn is_identity_creation_conflict(error: &AuthRepositoryError) -> bool {
+    matches!(error, AuthRepositoryError::IdentityAlreadyBound)
+        || matches!(error, AuthRepositoryError::Database(sqlx::Error::Database(database))
+        if database.code().as_deref() == Some("23505")
+            && database.constraint() == Some("idx_external_identities_provider_subject_tenant"))
 }
 
 /// Generate the OIDC state cookie name based on security context.

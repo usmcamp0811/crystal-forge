@@ -110,7 +110,14 @@ flowchart TD
 **Removed groups.** Valid empty groups or no matching mappings remove obsolete
 IdP rights and yield managed Viewer with no managed environments. Effective
 rights still include local overrides. An Admin's explicit reassignment creates
-a local override; later IdP group removal does not revoke it. The last-Admin
+a local override; later IdP group removal does not revoke it. In the MR !345
+source-aware editor, reassignment now requires explicit category intent and
+legacy acknowledgment where applicable. Ordinary save, status and password edits
+do not round-trip effective grants. Clearing only local roles preserves unresolved
+legacy roles; environment replacement clears local and legacy contributions but
+preserves IdP memberships. See the [editor addendum](../ui/admin-user-grant-source-editor.md)
+and [PATCH contract](../api/builders-queues-environments-dashboard-admin-api.md#user-patch-contract-mr-345-requested-changes).
+The last-Admin
 guard cannot retain revoked IdP Admin rights, so plan independent recovery before
 cutover: final IdP Admin removal can leave zero Admins.
 

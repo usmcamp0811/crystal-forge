@@ -7,15 +7,26 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use uuid::Uuid;
 
+/// Reports persistence failures, existing bindings or attempted takeovers.
 #[derive(Debug)]
 pub enum AuthRepositoryError {
+    /// The database operation failed.
     Database(sqlx::Error),
+    /// The stable provider/subject/tenant key already belongs to another user.
+    IdentityOwnershipConflict,
+    /// The exact stable key already has a binding; no candidate user was created.
+    /// Callers must reload that key and validate its owner, never link by email.
+    IdentityAlreadyBound,
 }
 
 impl Display for AuthRepositoryError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Database(err) => write!(f, "database error: {err}"),
+            Self::IdentityOwnershipConflict => {
+                write!(f, "external identity belongs to another user")
+            }
+            Self::IdentityAlreadyBound => write!(f, "external identity is already bound"),
         }
     }
 }
@@ -28,12 +39,21 @@ impl From<sqlx::Error> for AuthRepositoryError {
     }
 }
 
+/// Supplies authenticated identity evidence for an initial authorized binding.
+///
+/// Existing bindings are immutable through the insert-or-return helper; these
+/// claims initialize only a new row and do not certify entitlement freshness.
 #[derive(Debug, Clone)]
 pub struct NewExternalIdentity {
+    /// User authorized to own the initial binding.
     pub user_id: Uuid,
+    /// Identity provider namespace.
     pub provider_key: String,
+    /// Stable provider-issued subject, never an email-based lookup key.
     pub subject: String,
+    /// Tenant or issuer namespace; absent values normalize to the empty key.
     pub tenant_discriminator: Option<String>,
+    /// Validated initial claims; ignored for a same-owner existing binding.
     pub claims: serde_json::Value,
 }
 
@@ -86,19 +106,27 @@ impl<'a> AuthIdentityRepository<'a> {
         Ok(record)
     }
 
+    /// Inserts a binding or returns the existing binding for the same owner.
+    ///
+    /// The caller must already authenticate the identity and authorize its initial
+    /// binding. This method does not authorize account linking. Existing claims,
+    /// timestamps and entitlement freshness remain unchanged, even for the same
+    /// owner. Authoritative claims updates belong to OIDC reconciliation.
+    ///
+    /// # Errors
+    /// Returns [`AuthRepositoryError::IdentityOwnershipConflict`] if the key is
+    /// bound to another user, or a database error if persistence fails.
     pub async fn upsert_external_identity(
         &self,
         record: &NewExternalIdentity,
     ) -> Result<ExternalIdentity, AuthRepositoryError> {
         let tenant_key = normalize_tenant_discriminator(record.tenant_discriminator.as_deref());
-        let external_identity = sqlx::query_as::<_, ExternalIdentity>(
+        let mut tx = self.pool.begin().await?;
+        let inserted = sqlx::query_as::<_, ExternalIdentity>(
             "INSERT INTO external_identities (user_id, provider_key, subject, tenant_discriminator, claims)
              VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (provider_key, subject, tenant_discriminator)
-             DO UPDATE SET
-                 user_id = EXCLUDED.user_id,
-                 claims = EXCLUDED.claims,
-                 updated_at = NOW()
+             DO NOTHING
              RETURNING id, user_id, provider_key, subject, tenant_discriminator, claims, created_at, updated_at",
         )
         .bind(record.user_id)
@@ -106,9 +134,30 @@ impl<'a> AuthIdentityRepository<'a> {
         .bind(&record.subject)
         .bind(&tenant_key)
         .bind(&record.claims)
-        .fetch_one(self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
+        // CONCURRENCY: The insert waits for a competing creator. A separate
+        // statement sees its committed row under READ COMMITTED; lock that row
+        // through the ownership check without firing the updated_at trigger.
+        let external_identity = match inserted {
+            Some(identity) => identity,
+            None => sqlx::query_as::<_, ExternalIdentity>(
+                "SELECT id, user_id, provider_key, subject, tenant_discriminator, claims, created_at, updated_at
+                 FROM external_identities WHERE provider_key = $1 AND subject = $2
+                   AND tenant_discriminator = $3 FOR UPDATE",
+            )
+            .bind(&record.provider_key)
+            .bind(&record.subject)
+            .bind(&tenant_key)
+            .fetch_one(&mut *tx)
+            .await?,
+        };
+        if external_identity.user_id != record.user_id {
+            tx.rollback().await?;
+            return Err(AuthRepositoryError::IdentityOwnershipConflict);
+        }
+        tx.commit().await?;
         Ok(external_identity)
     }
 
@@ -469,14 +518,26 @@ pub async fn is_user_active(pool: &PgPool, user_id: Uuid) -> Result<bool, AuthRe
 
 /// Creates a user and its stable external identity binding atomically.
 ///
-/// An identity conflict never moves an existing binding or replaces its claims.
-/// A concurrent first sign-in must retry identity lookup instead of taking over
-/// the winning transaction's user. Profile/entitlement updates use their own
-/// authenticated, source-aware paths.
+/// Serializes creation by the normalized provider/subject/tenant key and rechecks
+/// that exact key before inserting a user. An existing binding is never moved and
+/// its claims remain unchanged. A caller may recover
+/// [`AuthRepositoryError::IdentityAlreadyBound`] or SQLSTATE `23505` naming
+/// `idx_external_identities_provider_subject_tenant` by reloading the stable key
+/// and checking its active owner. Username/email uniqueness failures do not
+/// authorize linking. Profile/entitlement updates use their own authenticated,
+/// source-aware paths, retaining the original flow generation.
+///
+/// The transaction takes the per-key creation advisory lock before inserting any
+/// user or identity rows and releases it before callback reconciliation. Callers
+/// must not hold user/identity row locks while waiting for this operation. Hash
+/// collisions only serialize unrelated keys; only the exact lookup proves a
+/// binding exists. This lock does not serialize all user creation.
 ///
 /// # Errors
-/// Returns a database error on a user/identity conflict or persistence failure;
-/// the new user and notification preferences roll back with the binding.
+/// Returns [`AuthRepositoryError::IdentityAlreadyBound`] if the stable key exists,
+/// before creating a candidate user. Returns a database error on a user/identity
+/// conflict or persistence failure; the new user and notification preferences
+/// roll back with the binding.
 pub async fn create_user_and_bind_external_identity(
     pool: &PgPool,
     email: &str,
@@ -487,6 +548,34 @@ pub async fn create_user_and_bind_external_identity(
     claims: serde_json::Value,
 ) -> Result<User, AuthRepositoryError> {
     let mut tx = pool.begin().await?;
+    let tenant_key = normalize_tenant_discriminator(tenant_discriminator);
+    // CONCURRENCY: Lock the stable identity before any candidate user insert.
+    // Identical profile callbacks must reach the exact binding recheck rather
+    // than racing on username/email constraints. The hash is only a lock key.
+    // The separate recheck statement gets a fresh READ COMMITTED snapshot after
+    // the lock wait, so it sees the winning transaction's committed binding.
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended(
+             jsonb_build_array($1::text, $2::text, $3::text)::text, 0))",
+    )
+    .bind(provider_key)
+    .bind(subject)
+    .bind(&tenant_key)
+    .execute(&mut *tx)
+    .await?;
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM external_identities
+         WHERE provider_key = $1 AND subject = $2 AND tenant_discriminator = $3",
+    )
+    .bind(provider_key)
+    .bind(subject)
+    .bind(&tenant_key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if existing.is_some() {
+        tx.rollback().await?;
+        return Err(AuthRepositoryError::IdentityAlreadyBound);
+    }
 
     let user_id = Uuid::new_v4();
     let username = email.split('@').next().unwrap_or(email);
@@ -522,8 +611,7 @@ pub async fn create_user_and_bind_external_identity(
     .execute(&mut *tx)
     .await?;
 
-    let tenant_key = normalize_tenant_discriminator(tenant_discriminator);
-    sqlx::query(
+    let binding = sqlx::query(
         "INSERT INTO external_identities (user_id, provider_key, subject, tenant_discriminator, claims)
          VALUES ($1, $2, $3, $4, $5)",
     )
@@ -533,7 +621,13 @@ pub async fn create_user_and_bind_external_identity(
     .bind(&tenant_key)
     .bind(claims)
     .execute(&mut *tx)
-    .await?;
+    .await;
+    if let Err(error) = binding {
+        // Complete rollback before callback recovery reloads the winning owner.
+        // Preserve the original SQLSTATE and constraint for narrow classification.
+        tx.rollback().await?;
+        return Err(error.into());
+    }
 
     tx.commit().await?;
 

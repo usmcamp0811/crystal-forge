@@ -205,3 +205,65 @@ Draft MR opened and verified: https://gitlab.com/crystal-forge/crystal-forge/-/m
 existing authorized SSH identity; no API token was requested or exposed.
 The MR page confirms draft status and the scope/evidence caveats. No pipeline
 result was available at creation. The MR is not merge-ready and was not merged.
+
+## Maintainer review changes requested
+
+The user reviewed MR !345 at `1e41fc32` and confirmed two P1 findings (effective
+grants round-tripped into local overrides; non-atomic PATCH/audit) and two P2
+findings (remaining mutable identity helper; concurrent first-sign-in recovery).
+Keep the MR Draft, this task In Progress, and all six acceptance items unchecked.
+PAT issuance, transport, and future token UI remain excluded. The review expands
+this task to the existing production Users editor because its integration is a
+security boundary, not a cosmetic parity exercise.
+
+Review-fix implementation (execution still pending unless explicitly stated):
+
+- User summaries now expose separate local, IdP and unresolved legacy vectors.
+  Effective role and assigned memberships are read-only summaries, never local
+  editor defaults. Source metadata is batched, and absent metadata disables grant
+  edits instead of inferring ownership. The editor omits unchanged categories,
+  uses explicit local-override controls/legacy confirmation, and corrects the
+  old next-login-overwrite warning. Admin browser access remains distinct from
+  assigned memberships and restricted credential grants.
+- Grant-bearing PATCH requires `edit_local_grants=true`; old cached clients
+  fail closed with 400 rather than create local authority. `clear_local_role`
+  explicitly removes local roles only, preserves IdP/legacy contributions, and
+  cannot accompany a replacement role. Account/password-only requests need no
+  grant marker. These fields are validated before mutation.
+- All requested account, role, environment, password, notification eligibility
+  and audit changes commit in one transaction, with final-state last-Admin
+  guards and environment validation before writes. Fault-injection regressions
+  verify failure points and full rollback, including late audit failures.
+- Public identity upsert inserts or returns the same-owner binding without
+  changing claims, timestamps or freshness; different-owner reuse is rejected.
+  First creation serializes on the stable provider/subject/issuer key before
+  inserting a user. Typed/key-specific conflict recovery reloads the winning
+  binding, validates it and retains the original ordered flow generation.
+  Unrelated username/email uniqueness failures are not account-linking signals.
+  Signed RS256/code-exchange/JWKS/PKCE HTTP regressions cover identical/different
+  profile races, the real named-index conflict fallback, and malformed claims.
+- Existing Access scenarios gain real browser PATCH-body and SQL source/audit
+  checks for unrelated edits on a pure-IdP account, plus no local fallback after
+  explicit fixture withdrawal. Existing positive grant mutations now carry the
+  explicit intent marker; unrelated account edits do not. No production test
+  endpoint or new top-level integration check was added.
+
+The production application preview was started before UI edits at
+`http://127.0.0.1:8529/admin` on vm-agent, with a fresh task-owned database on
+35529. It initially serves the older `89e7689b` farm binary; keep that freshness
+limitation visible until the new farm-built embedded binary replaces it. Runtime
+ownership, sandbox constraints and refresh procedure are retained in
+`/tmp/opencode/task529-preview/HANDOFF.md`. No user database or real credentials
+were used. This is not the earlier static-design preview exception.
+
+The frontend farm build passed 887 tests (nine new grant-state regressions), one
+ignored; a subsequent text-only membership/Admin-bypass clarification still
+requires the final build. Static security review found no remaining concrete
+P1/P2 blocker by inspection, not by runtime execution. Server/database/callback
+and new browser regressions are being built on the farm. A stale-file-handle
+evaluation failure is not a test result and must be retried. No local Cargo or
+Dioxus compilation is permitted. The public pipeline API returned 403 for the
+review-provided pipeline, so its status is unverified here, not assumed pending
+or passing. Migration 0335 is unchanged; no schema migration is required by these
+fixes. Do not mark review findings resolved until the corresponding current
+source regressions and required gates actually pass.

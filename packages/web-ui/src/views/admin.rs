@@ -1,6 +1,6 @@
 use chrono::Local;
 use dioxus::prelude::*;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::api::client::{
     create_admin_user, delete_admin_oidc_mapping, delete_admin_user, fetch_admin_audit_events,
@@ -11,9 +11,9 @@ use crate::api::client::{
 };
 use crate::api::models::{
     AdminAuditEventsParams, AdminCreateUserRequest, AdminUpdateUserRequest,
-    AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, AuthMode, AutomaticRetryPolicy,
-    ClassificationBannerConfig, EnvironmentSummary, IdentitySource, OidcGroupMapping, Role,
-    ServerRuntimeInfoResponse, UpdateAutomaticRetryPolicyRequest,
+    AdminUpsertOidcMappingRequest, AdminUserGrantSources, AdminUserSummary, AuditEvent, AuthMode,
+    AutomaticRetryPolicy, ClassificationBannerConfig, EnvironmentSummary, IdentitySource,
+    OidcGroupMapping, Role, ServerRuntimeInfoResponse, UpdateAutomaticRetryPolicyRequest,
     UpdateClassificationBannerRequest,
 };
 use crate::components::onboarding::CoachController;
@@ -631,9 +631,9 @@ fn UsersTab(
                     thead {
                         tr {
                             th { "User" }
-                            th { "Role" }
-                            th { "Source" }
-                            th { "Environments" }
+                            th { "Effective role" }
+                            th { "Login source" }
+                            th { "Assigned environments" }
                             th { "MFA" }
                             th { "Status" }
                             th { "Updated" }
@@ -647,7 +647,7 @@ fn UsersTab(
                                 let initials = get_user_initials(&user.identifier);
 
                                 rsx! {
-                                    tr {
+                                    tr { "data-testid": "admin-user-{user_id}",
                                         td {
                                             div { style: "display:flex;align-items:center;gap:10px;",
                                                 // Avatar
@@ -669,7 +669,7 @@ fn UsersTab(
                                                     span {
                                                         class: "chip",
                                                         style: "background:color-mix(in oklab, {role_def.color} 16%, transparent);color:{role_def.color};font-size:10px;",
-                                                        "{role_def.role}"
+                                                        if user.role.is_some() { "{role_def.role}" } else { "None" }
                                                     }
                                                 }
                                             }
@@ -680,7 +680,7 @@ fn UsersTab(
                                         td {
                                             div { style: "display:flex;gap:4px;flex-wrap:wrap;",
                                                 if user.environments.is_empty() {
-                                                    span { class: "chip chip-info", style: "font-size:10px;", "all" }
+                                                    span { class: "chip chip-unknown", style: "font-size:10px;", "None" }
                                                 } else {
                                                     for env in &user.environments {
                                                         span { class: "chip chip-unknown", style: "font-size:10px;", "{env}" }
@@ -704,6 +704,7 @@ fn UsersTab(
                                                 button {
                                                     class: "btn-icon focus-ring",
                                                     title: "Edit",
+                                                    "aria-label": "Edit user {user.identifier}",
                                                     onclick: {
                                                         let user_id = user_id.clone();
                                                         move |_| editing_user_id.set(Some(user_id.clone()))
@@ -838,15 +839,25 @@ fn EditUserModal(
         .get(&user.id)
         .cloned()
         .unwrap_or_else(|| UserEditDraft::from_user(&user));
-    let is_oidc_user = user.identity_source == IdentitySource::OidcDerived;
-    let mut draft_role = use_signal(|| draft.role.clone());
+    let mut grants = use_signal(|| draft.grants.clone());
     let mut draft_enabled = use_signal(|| draft.enabled);
     let mut draft_password = use_signal(String::new);
-    let selected_environments = use_signal(|| draft.environments.clone());
+    let metadata_available = user.grant_sources.is_some();
+    let effective_role = user
+        .role
+        .map(|role| role_to_string(&Some(role)))
+        .unwrap_or_else(|| "None".to_string());
+    let effective_environments = environments_summary(&user.environments);
+    let role_value = grants
+        .read()
+        .role
+        .map(|role| role_to_string(&Some(role)))
+        .unwrap_or_default();
+    let grant_validation = grants.read().request(None, None).err();
 
     rsx! {
         div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
-            div { class: "modal", style: "width:min(560px,96vw);", onclick: move |evt| evt.stop_propagation(),
+            div { class: "modal", "data-testid": "edit-user-modal", style: "width:min(560px,96vw);", onclick: move |evt| evt.stop_propagation(),
                 div { class: "modal-head",
                     div {
                         h3 { style: "margin:0;font-size:15px;", "Edit user" }
@@ -860,9 +871,9 @@ fn EditUserModal(
                     }
                 }
                 div { class: "modal-body", style: "display:grid;gap:14px;",
-                    if is_oidc_user {
+                    if !metadata_available {
                         div { class: "sd-callout sd-callout-info", style: "font-size:12px;",
-                            "This user is OIDC-derived. Role and environment changes can be overwritten on the next login if group mappings still assign different access."
+                            "Grant source metadata is unavailable. Permission edits are disabled. You can still change account status or reset the password."
                         }
                     }
                     if let Some(err) = local_error.read().as_ref() {
@@ -870,25 +881,81 @@ fn EditUserModal(
                     }
                     div { class: "field", style: "margin:0;",
                         label { "Role" }
-                        select {
+                        div { "data-testid": "effective-role", class: "help", "Effective role (read-only): {effective_role}" }
+                        if let Some(sources) = user.grant_sources.as_ref() {
+                            div { "data-testid": "role-sources", class: "help",
+                                div { "Local roles: {roles_summary(&sources.local_roles)}" }
+                                div { "Identity provider roles: {roles_summary(&sources.oidc_roles)}" }
+                                div { "Unresolved legacy roles: {roles_summary(&sources.legacy_roles)}" }
+                            }
+                        }
+                        label {
+                            input { r#type: "checkbox", "data-testid": "edit-local-role", disabled: !metadata_available || *saving.read(), checked: grants.read().edit_role,
+                                onchange: move |evt| grants.write().edit_role = evt.checked() }
+                            "Edit local role override"
+                        }
+                        select { "aria-label": "Local role override", "data-testid": "local-role",
                             class: "input focus-ring",
-                            value: "{draft_role.read()}",
-                            onchange: move |evt| draft_role.set(evt.value()),
+                            disabled: !metadata_available || !grants.read().edit_role || *saving.read(),
+                            value: "{role_value}",
+                            onchange: move |evt| {
+                                let mut edit = grants.write();
+                                edit.role = match evt.value().as_str() { "Admin" => Some(Role::Admin), "Operator" => Some(Role::Operator), "Viewer" => Some(Role::Viewer), _ => None };
+                                edit.acknowledge_legacy_role = false;
+                            },
+                            option { value: "", "No local role" }
                             option { value: "Admin", "Admin" }
                             option { value: "Operator", "Operator" }
                             option { value: "Viewer", "Viewer" }
                         }
+                        div { class: "help", "Replaces local roles with one role. No local role removes only local roles and preserves unresolved legacy roles. Identity provider grants remain independent." }
+                        if user.grant_sources.as_ref().is_some_and(|sources| !sources.legacy_roles.is_empty()) {
+                            div { class: "sd-callout sd-callout-info", style: "font-size:12px;",
+                                "Legacy role ownership is unresolved. Replacing this category classifies the selected role as local and removes the previous unresolved legacy roles."
+                                label {
+                                    input { r#type: "checkbox", "data-testid": "confirm-legacy-role", checked: grants.read().acknowledge_legacy_role,
+                                        disabled: !grants.read().edit_role || grants.read().role.is_none() || *saving.read(),
+                                        onchange: move |evt| grants.write().acknowledge_legacy_role = evt.checked() }
+                                    "Replace unresolved legacy roles with the selected local role"
+                                }
+                            }
+                        }
                     }
                     div { class: "field", style: "margin:0;",
-                        EnvironmentChipPicker {
-                            title: "Environments".to_string(),
-                            selected_csv: selected_environments,
-                            available: environments.clone(),
+                        label { "Environments" }
+                        div { "data-testid": "effective-environments", class: "help", "Assigned environment memberships (read-only): {effective_environments}" }
+                        if user.role == Some(Role::Admin) {
+                            div { class: "help", "The Admin role allows browser access beyond assigned memberships. The source summaries and local controls below describe explicit memberships, not token wildcards." }
+                        }
+                        if let Some(sources) = user.grant_sources.as_ref() {
+                            div { "data-testid": "environment-sources", class: "help",
+                                div { "Local environments: {environments_summary(&sources.local_environments)}" }
+                                div { "Identity provider environments: {environments_summary(&sources.oidc_environments)}" }
+                                div { "Unresolved legacy environments: {environments_summary(&sources.legacy_environments)}" }
+                            }
+                        }
+                        label {
+                            input { r#type: "checkbox", "data-testid": "edit-local-environments", disabled: !metadata_available || *saving.read(), checked: grants.read().edit_environments,
+                                onchange: move |evt| grants.write().edit_environments = evt.checked() }
+                            "Edit local environment overrides"
+                        }
+                        LocalEnvironmentPicker { grants, available: environments.clone(), disabled: !metadata_available || !grants.read().edit_environments || *saving.read() }
+                        if user.grant_sources.as_ref().is_some_and(|sources| !sources.legacy_environments.is_empty()) {
+                            div { class: "sd-callout sd-callout-info", style: "font-size:12px;",
+                                "Legacy environment ownership is unresolved. Saving this category replaces local and unresolved legacy memberships with your selection. An empty selection removes those permissions. Identity provider memberships remain independent."
+                                label {
+                                    input { r#type: "checkbox", "data-testid": "confirm-legacy-environments", checked: grants.read().acknowledge_legacy_environments,
+                                        disabled: !grants.read().edit_environments || *saving.read(),
+                                        onchange: move |evt| grants.write().acknowledge_legacy_environments = evt.checked() }
+                                    "Replace unresolved legacy environments; remove memberships not selected"
+                                }
+                            }
                         }
                     }
                     div { class: "field", style: "margin:0;",
                         label { "Password reset" }
                         input {
+                            "aria-label": "Password reset",
                             class: "input focus-ring",
                             r#type: "password",
                             placeholder: "Leave blank to keep current password",
@@ -902,6 +969,7 @@ fn EditUserModal(
                             span { style: "display:block;font-size:12px;color:var(--cf-text-muted);", "Disabled users cannot access Crystal Forge." }
                         }
                         input {
+                            "data-testid": "user-enabled",
                             r#type: "checkbox",
                             checked: *draft_enabled.read(),
                             onchange: move |evt| draft_enabled.set(evt.checked())
@@ -909,18 +977,24 @@ fn EditUserModal(
                     }
                 }
                 div { class: "modal-foot",
+                    if let Some(message) = grant_validation {
+                        div { class: "help", role: "status", "{message}" }
+                    }
                     button { class: "btn focus-ring", onclick: move |_| on_close.call(()), "Cancel" }
                     button {
+                        "data-testid": "save-user",
                         class: "btn btn-primary focus-ring",
-                        disabled: *saving.read(),
+                        disabled: *saving.read() || grant_validation.is_some(),
                         onclick: {
                             let user_id = user.id.clone();
+                            let initial_enabled = user.enabled;
                             move |_| {
-                                let request = AdminUpdateUserRequest {
-                                    role: Some(parse_role(&draft_role.read())),
-                                    enabled: Some(*draft_enabled.read()),
-                                    environments: Some(parse_environments(&selected_environments.read())),
-                                    password: optional_value(draft_password.read().clone()),
+                                let request = match grants.read().request(
+                                    (*draft_enabled.read() != initial_enabled).then_some(*draft_enabled.read()),
+                                    optional_value(draft_password.read().clone()),
+                                ) {
+                                    Ok(request) => request,
+                                    Err(message) => { local_error.set(Some(message.to_string())); return; }
                                 };
                                 let user_id_for_request = user_id.clone();
                                 saving.set(true);
@@ -987,6 +1061,60 @@ fn EditUserModal(
                 }
             }
         }
+    }
+}
+
+#[component]
+fn LocalEnvironmentPicker(
+    mut grants: Signal<LocalGrantEdit>,
+    available: Vec<EnvironmentSummary>,
+    disabled: bool,
+) -> Element {
+    let choices: BTreeSet<String> = available
+        .iter()
+        .filter(|env| env.is_active)
+        .map(|env| env.name.clone())
+        .chain(
+            grants
+                .read()
+                .baseline
+                .iter()
+                .flat_map(|sources| sources.local_environments.iter().cloned()),
+        )
+        .chain(grants.read().environments.iter().cloned())
+        .collect();
+    rsx! {
+        div { "data-testid": "local-environments", style: "display:flex;flex-wrap:wrap;gap:6px;",
+            button { class: "focus-ring", "data-testid": "clear-local-environments", disabled,
+                style: environment_pill_style(grants.read().environments.is_empty(), "#60a5fa"),
+                onclick: move |_| {
+                    let mut edit = grants.write();
+                    edit.environments.clear();
+                    edit.acknowledge_legacy_environments = false;
+                },
+                "No local environments"
+            }
+            for name in choices {
+                {
+                    let selected = grants.read().environments.contains(&name);
+                    rsx! {
+                        button { class: "focus-ring", disabled, "aria-pressed": selected,
+                            style: environment_pill_style(selected, "#60a5fa"),
+                            onclick: {
+                                let name = name.clone();
+                                move |_| {
+                                    let mut edit = grants.write();
+                                    if !edit.environments.remove(&name) { edit.environments.insert(name.clone()); }
+                                    edit.acknowledge_legacy_environments = false;
+                                }
+                            },
+                            "{name}"
+                        }
+                    }
+                }
+            }
+        }
+        div { class: "help", "Select independent local memberships. No local environments clears this category; it does not copy identity provider access." }
     }
 }
 
@@ -2691,20 +2819,126 @@ fn datetime_local_to_rfc3339(value: &str) -> Option<String> {
 
 #[derive(Debug, Clone)]
 struct UserEditDraft {
-    role: String,
+    grants: LocalGrantEdit,
     enabled: bool,
-    environments: String,
-    password: String,
 }
 
 impl UserEditDraft {
     fn from_user(user: &AdminUserSummary) -> Self {
         Self {
-            role: role_to_string(&user.role),
+            grants: LocalGrantEdit::new(user.grant_sources.clone()),
             enabled: user.enabled,
-            environments: user.environments.join(", "),
-            password: String::new(),
         }
+    }
+}
+
+// The baseline contains only source metadata, never effective authority. Opt-in
+// alone is not a mutation: unchanged categories must remain absent from PATCH.
+#[derive(Debug, Clone)]
+struct LocalGrantEdit {
+    baseline: Option<AdminUserGrantSources>,
+    role: Option<Role>,
+    environments: BTreeSet<String>,
+    edit_role: bool,
+    edit_environments: bool,
+    acknowledge_legacy_role: bool,
+    acknowledge_legacy_environments: bool,
+}
+
+impl LocalGrantEdit {
+    fn new(baseline: Option<AdminUserGrantSources>) -> Self {
+        let role = baseline
+            .as_ref()
+            .and_then(|sources| primary_role(&sources.local_roles));
+        let environments = baseline
+            .as_ref()
+            .map(|sources| sources.local_environments.iter().cloned().collect())
+            .unwrap_or_default();
+        Self {
+            baseline,
+            role,
+            environments,
+            edit_role: false,
+            edit_environments: false,
+            acknowledge_legacy_role: false,
+            acknowledge_legacy_environments: false,
+        }
+    }
+
+    fn request(
+        &self,
+        enabled: Option<bool>,
+        password: Option<String>,
+    ) -> Result<AdminUpdateUserRequest, &'static str> {
+        let mut request = AdminUpdateUserRequest {
+            enabled,
+            password,
+            ..Default::default()
+        };
+        let Some(baseline) = &self.baseline else {
+            return if self.edit_role || self.edit_environments {
+                Err("Grant source metadata is unavailable. Permission edits are disabled.")
+            } else {
+                Ok(request)
+            };
+        };
+        let role_changed = self.role != primary_role(&baseline.local_roles);
+        let classify_role = !baseline.legacy_roles.is_empty()
+            && self.acknowledge_legacy_role
+            && self.role.is_some();
+        if self.edit_role && (role_changed || classify_role) {
+            if self.role.is_some()
+                && !baseline.legacy_roles.is_empty()
+                && !self.acknowledge_legacy_role
+            {
+                return Err("Confirm replacement of unresolved legacy roles before saving.");
+            }
+            request.role = self.role;
+            request.clear_local_role = self.role.is_none();
+        }
+        let baseline_environments: BTreeSet<_> =
+            baseline.local_environments.iter().cloned().collect();
+        let classify_environments =
+            !baseline.legacy_environments.is_empty() && self.acknowledge_legacy_environments;
+        if self.edit_environments
+            && (self.environments != baseline_environments || classify_environments)
+        {
+            if !baseline.legacy_environments.is_empty() && !self.acknowledge_legacy_environments {
+                return Err(
+                    "Confirm replacement or removal of unresolved legacy environments before saving.",
+                );
+            }
+            request.environments = Some(self.environments.iter().cloned().collect());
+        }
+        request.edit_local_grants =
+            request.role.is_some() || request.clear_local_role || request.environments.is_some();
+        Ok(request)
+    }
+}
+
+fn primary_role(roles: &[Role]) -> Option<Role> {
+    [Role::Admin, Role::Operator, Role::Viewer]
+        .into_iter()
+        .find(|role| roles.contains(role))
+}
+
+fn roles_summary(roles: &[Role]) -> String {
+    if roles.is_empty() {
+        "None".to_string()
+    } else {
+        roles
+            .iter()
+            .map(|role| role_to_string(&Some(*role)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn environments_summary(environments: &[String]) -> String {
+    if environments.is_empty() {
+        "None".to_string()
+    } else {
+        environments.join(", ")
     }
 }
 
@@ -2724,6 +2958,215 @@ async fn refresh_users(
             users_error.set(None);
         }
         Err(e) => users_error.set(Some(format!("Failed to load admin users: {e}"))),
+    }
+}
+
+#[cfg(test)]
+mod local_grant_edit_tests {
+    use super::*;
+    use serde_json::{json, to_value};
+
+    fn sources() -> AdminUserGrantSources {
+        AdminUserGrantSources {
+            local_roles: vec![],
+            local_environments: vec![],
+            oidc_roles: vec![Role::Operator],
+            oidc_environments: vec!["prod".into()],
+            legacy_roles: vec![],
+            legacy_environments: vec![],
+        }
+    }
+
+    fn user(grant_sources: Option<AdminUserGrantSources>) -> AdminUserSummary {
+        AdminUserSummary {
+            id: "oidc-user".into(),
+            identifier: "operator@example.invalid".into(),
+            identity_source: IdentitySource::OidcDerived,
+            role: Some(Role::Operator),
+            enabled: true,
+            environments: vec!["prod".into()],
+            grant_sources,
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn oidc_only_load_and_noop_never_copy_effective_grants() {
+        let draft = UserEditDraft::from_user(&user(Some(sources())));
+        assert_eq!(draft.grants.role, None);
+        assert!(draft.grants.environments.is_empty());
+        assert!(!draft.grants.edit_role && !draft.grants.edit_environments);
+        assert_eq!(
+            to_value(draft.grants.request(None, None).unwrap()).unwrap(),
+            json!({})
+        );
+        let mut edit = draft.grants;
+        edit.edit_role = true;
+        edit.edit_environments = true;
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn unrelated_account_edit_omits_all_grant_fields_for_mixed_sources() {
+        let mut source = sources();
+        source.local_roles = vec![Role::Viewer];
+        source.local_environments = vec!["staging".into()];
+        source.legacy_roles = vec![Role::Admin];
+        source.legacy_environments = vec!["legacy".into()];
+        let edit = UserEditDraft::from_user(&user(Some(source))).grants;
+        assert_eq!(edit.role, Some(Role::Viewer));
+        assert_eq!(edit.environments, BTreeSet::from(["staging".into()]));
+        assert_eq!(
+            to_value(edit.request(Some(false), Some("reset".into())).unwrap()).unwrap(),
+            json!({"enabled": false, "password": "reset"})
+        );
+    }
+
+    #[test]
+    fn local_role_replacement_and_deletion_are_independent_of_environments() {
+        let mut source = sources();
+        source.local_roles = vec![Role::Admin, Role::Viewer];
+        let mut edit = LocalGrantEdit::new(Some(source));
+        edit.edit_role = true;
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({})
+        );
+        edit.role = Some(Role::Viewer);
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"role":"Viewer", "edit_local_grants":true})
+        );
+        edit.role = None;
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"clear_local_role":true, "edit_local_grants":true})
+        );
+    }
+
+    #[test]
+    fn environment_changes_compare_sets_and_omit_unchanged_role() {
+        let mut source = sources();
+        source.local_roles = vec![Role::Viewer];
+        source.local_environments = vec!["staging".into(), "dev".into()];
+        let mut edit = LocalGrantEdit::new(Some(source));
+        edit.edit_environments = true;
+        edit.environments = BTreeSet::from(["dev".into(), "staging".into()]);
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({})
+        );
+        edit.environments = BTreeSet::from(["dev".into()]);
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"environments":["dev"], "edit_local_grants":true})
+        );
+        edit.environments.clear();
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"environments":[], "edit_local_grants":true})
+        );
+    }
+
+    #[test]
+    fn changing_values_without_opt_in_does_not_mutate_grants() {
+        let mut edit = LocalGrantEdit::new(Some(sources()));
+        edit.role = Some(Role::Admin);
+        edit.environments.insert("prod".into());
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn missing_metadata_fails_closed_but_allows_account_edits() {
+        let mut legacy_response = to_value(user(None)).unwrap();
+        legacy_response
+            .as_object_mut()
+            .unwrap()
+            .remove("grant_sources");
+        let loaded: AdminUserSummary = serde_json::from_value(legacy_response).unwrap();
+        assert!(loaded.grant_sources.is_none());
+        let mut edit = UserEditDraft::from_user(&loaded).grants;
+        assert_eq!(
+            to_value(edit.request(Some(false), None).unwrap()).unwrap(),
+            json!({"enabled":false})
+        );
+        edit.edit_role = true;
+        assert!(edit.request(None, None).is_err());
+        edit.edit_role = false;
+        edit.edit_environments = true;
+        assert!(edit.request(None, None).is_err());
+    }
+
+    #[test]
+    fn legacy_role_replacement_requires_ack_but_local_clear_preserves_legacy() {
+        let mut source = sources();
+        source.local_roles = vec![Role::Viewer];
+        source.legacy_roles = vec![Role::Admin];
+        let mut edit = LocalGrantEdit::new(Some(source));
+        edit.edit_role = true;
+        edit.role = Some(Role::Operator);
+        assert!(edit.request(None, None).is_err());
+        edit.acknowledge_legacy_role = true;
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"role":"Operator", "edit_local_grants":true})
+        );
+        edit.acknowledge_legacy_role = false;
+        edit.role = None;
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"clear_local_role":true, "edit_local_grants":true})
+        );
+    }
+
+    #[test]
+    fn unchanged_legacy_category_requires_explicit_confirmed_classification() {
+        let mut source = sources();
+        source.local_roles = vec![Role::Viewer];
+        source.legacy_roles = vec![Role::Admin];
+        source.legacy_environments = vec!["prod".into()];
+        let mut edit = LocalGrantEdit::new(Some(source));
+        edit.edit_role = true;
+        edit.edit_environments = true;
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({})
+        );
+        edit.acknowledge_legacy_role = true;
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"role":"Viewer", "edit_local_grants":true})
+        );
+        edit.acknowledge_legacy_role = false;
+        edit.acknowledge_legacy_environments = true;
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"environments":[], "edit_local_grants":true})
+        );
+        edit.acknowledge_legacy_environments = false;
+        edit.environments.insert("staging".into());
+        assert!(edit.request(None, None).is_err());
+        edit.acknowledge_legacy_environments = true;
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"environments":["staging"], "edit_local_grants":true})
+        );
+    }
+
+    #[test]
+    fn summaries_preserve_every_role_and_empty_sources_are_not_all() {
+        assert_eq!(
+            roles_summary(&[Role::Viewer, Role::Admin, Role::Operator]),
+            "Viewer, Admin, Operator"
+        );
+        assert_eq!(roles_summary(&[]), "None");
+        assert_eq!(environments_summary(&[]), "None");
     }
 }
 
