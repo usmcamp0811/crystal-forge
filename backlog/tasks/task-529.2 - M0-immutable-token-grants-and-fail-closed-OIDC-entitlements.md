@@ -199,3 +199,9 @@ module-policy, documentation and Access evidence is recorded above.
 Implementation checkpoint is being submitted as a DRAFT M0 MR to collect
 exact-head CI. Keep this task In Progress, not Review or Done, until the remaining
 verification is resolved. No milestone or full PAT/MCP feature is marked complete.
+
+Draft MR opened and verified: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/345
+(`TASK-529.2-agent-authorization` into `dev`). GitLab push options used the
+existing authorized SSH identity; no API token was requested or exposed.
+The MR page confirms draft status and the scope/evidence caveats. No pipeline
+result was available at creation. The MR is not merge-ready and was not merged.
