@@ -4869,7 +4869,7 @@ fn event_history_title(event_type: &str) -> &'static str {
     match event_type {
         "cf_deployment_started" => "Deployment started",
         "cf_deployment_succeeded" => "Deployed through Crystal Forge",
-        "cf_deployment_failed" => "Deploy failed to activate",
+        "cf_deployment_failed" => "Deployment failed",
         "local_rebuild_detected" => "nixos-rebuild switch on host",
         "system_reboot" => "System restarted",
         "agent_restart" => "Agent restarted",
@@ -4877,17 +4877,16 @@ fn event_history_title(event_type: &str) -> &'static str {
     }
 }
 
-/// Returns the agent-reported reason for a failed deployment event.
+/// Returns explicitly safe display diagnostics for a failed deployment event.
 ///
-/// The agent sends a redacted message to `/agent/deployment-failed`, and the
-/// server stores it as `metadata.failure_message`. Returns `None` for other
-/// event types and for a missing or blank message.
+/// Legacy `failure_message` metadata is not proof of redaction and is ignored.
+/// Returns `None` for other event types and for a missing or blank safe message.
 fn event_history_failure_message(event_type: &str, metadata: &serde_json::Value) -> Option<String> {
     if event_type != "cf_deployment_failed" {
         return None;
     }
     metadata
-        .get("failure_message")
+        .get("display_failure_message")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|message| !message.is_empty())
@@ -5381,7 +5380,10 @@ mod tests {
 
     #[test]
     fn event_history_failure_message_uses_agent_reason_for_failures_only() {
-        let metadata = serde_json::json!({ "failure_message": "  copy failed (DNS)  " });
+        let metadata = serde_json::json!({
+            "display_failure_message": "  copy failed (DNS)  ",
+            "failure_message": "legacy private diagnostic"
+        });
         assert_eq!(
             event_history_failure_message("cf_deployment_failed", &metadata).as_deref(),
             Some("copy failed (DNS)")
@@ -5393,13 +5395,24 @@ mod tests {
         assert_eq!(
             event_history_failure_message(
                 "cf_deployment_failed",
-                &serde_json::json!({ "failure_message": " " })
+                &serde_json::json!({ "display_failure_message": " ", "failure_message": "private" })
             ),
             None
         );
         assert_eq!(
             event_history_failure_message("cf_deployment_failed", &serde_json::Value::Null),
             None
+        );
+        assert_eq!(
+            event_history_failure_message(
+                "cf_deployment_failed",
+                &serde_json::json!({ "failure_message": "legacy private diagnostic" })
+            ),
+            None
+        );
+        assert_eq!(
+            event_history_title("cf_deployment_failed"),
+            "Deployment failed"
         );
     }
 

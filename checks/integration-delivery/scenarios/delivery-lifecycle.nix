@@ -136,7 +136,8 @@ in harness.mkScenario {
       # nixos-test-base disables switching. This lifecycle exercises the real
       # installed activation path on its existing service nodes.
       system.switch.enable = true;
-      environment.systemPackages = [pkgs.git];
+      environment.systemPackages = [pkgs.git pkgs.nodejs];
+      environment.etc."cf-it/failure-report.cjs".source = ../fixtures/failure-report.cjs;
       # The production automatic reserve is 4 GiB, equal to this entire VM.
       # Use its documented fixed-worker budget for one configuration instead.
       services.crystal-forge.server = {eval_workers = 1; eval_max_memory_mb = 1024;};
@@ -204,6 +205,7 @@ in harness.mkScenario {
       + builtins.readFile ./fragments/cache-acquisition.py + "\n"
      + builtins.readFile ./fragments/network-boundary.py + "\n"
      + builtins.readFile ./fragments/activation.py + "\n"
+      + builtins.readFile ./fragments/failure-detail.py + "\n"
       + builtins.readFile ./fragments/recovery.py + "\n"
       # Restarts establish new builder sessions. Run after consumers of the
       # earlier execution-session receipts, retaining those original assertions.
@@ -217,6 +219,9 @@ in harness.mkScenario {
     '';
   in {
     management-authority = ./fragments/management-authority.cjs;
+    failure-detail = pkgs.writeText "delivery-failure-detail.cjs" ''
+      exports.run = ctx => require("${./fragments/failure-detail.cjs}").run(ctx, require("${activation}"));
+    '';
     deploy-first = wrapper "deploy" "first";
     deploy-second = wrapper "deploy" "second";
     inspect-first = wrapper "inspect" "first";

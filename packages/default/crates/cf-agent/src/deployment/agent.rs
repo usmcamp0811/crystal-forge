@@ -98,6 +98,58 @@ struct DeploymentFailedReport<'a> {
     hostname: &'a str,
     target_store_path: &'a str,
     error: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_error: Option<&'a str>,
+}
+
+/// Marks an authenticated-cache copy message that is safe for remote display.
+///
+/// The caller must supply only the already-redacted copy failure message.
+#[derive(Debug)]
+pub(crate) struct AuthenticatedCacheCopyDisplayError(pub(crate) String);
+
+impl std::fmt::Display for AuthenticatedCacheCopyDisplayError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AuthenticatedCacheCopyDisplayError {}
+
+fn deployment_failure_display(error: &anyhow::Error) -> Option<&str> {
+    // SECURITY: Error text and outer anyhow contexts are not proof of redaction.
+    error
+        .downcast_ref::<AuthenticatedCacheCopyDisplayError>()
+        .map(|safe| safe.0.as_str())
+}
+
+#[cfg(test)]
+mod failure_reporting_tests {
+    use super::*;
+
+    #[test]
+    fn only_typed_copy_failures_supply_display_diagnostics() {
+        let raw = anyhow::anyhow!("Authenticated cache copy failed: private diagnostic");
+        assert_eq!(deployment_failure_display(&raw), None);
+
+        let safe = anyhow::Error::new(AuthenticatedCacheCopyDisplayError(
+            "copy failed (DNS)".into(),
+        ))
+        .context("private outer diagnostic");
+        assert_eq!(deployment_failure_display(&safe), Some("copy failed (DNS)"));
+    }
+
+    #[test]
+    fn unmarked_report_omits_display_error() {
+        let report = DeploymentFailedReport {
+            hostname: "test-host",
+            target_store_path: "/nix/store/test-target",
+            error: "Deployment failed (diagnostic details unavailable)",
+            display_error: None,
+        };
+        let payload = serde_json::to_value(report).unwrap();
+        assert!(payload.get("display_error").is_none());
+    }
 }
 
 impl AgentDeploymentManager {
@@ -214,7 +266,7 @@ impl AgentDeploymentManager {
             Err(e) => {
                 error!("Deployment failed: {:#}", e);
                 let error_message = format!("{:#}", e);
-                self.report_deployment_failed_best_effort(&desired_target, &error_message)
+                self.report_deployment_failed_best_effort(&desired_target, &e)
                     .await;
                 Ok((
                     DeploymentResult::Failed {
@@ -646,7 +698,7 @@ impl AgentDeploymentManager {
         Ok(())
     }
 
-    async fn report_deployment_failed_best_effort(&self, store_path: &str, error: &str) {
+    async fn report_deployment_failed_best_effort(&self, store_path: &str, error: &anyhow::Error) {
         if let Err(report_error) = self.report_deployment_failed(store_path, error).await {
             debug!(
                 target_store_path = %store_path,
@@ -656,14 +708,21 @@ impl AgentDeploymentManager {
         }
     }
 
-    async fn report_deployment_failed(&self, store_path: &str, error: &str) -> Result<()> {
+    async fn report_deployment_failed(
+        &self,
+        store_path: &str,
+        error: &anyhow::Error,
+    ) -> Result<()> {
         let cfg = CrystalForgeConfig::load()?;
         let client_cfg = &cfg.client;
         let hostname = hostname::get()?.to_string_lossy().into_owned();
+        let display_error = deployment_failure_display(error);
         let payload = DeploymentFailedReport {
             hostname: &hostname,
             target_store_path: store_path,
-            error,
+            // COMPATIBILITY: Older servers display `error` directly.
+            error: display_error.unwrap_or("Deployment failed (diagnostic details unavailable)"),
+            display_error,
         };
         let payload_json = serde_json::to_string(&payload)?;
 
@@ -938,12 +997,13 @@ fn classify_read_failure(stderr: &[u8]) -> &'static str {
         "the store path or its NAR is missing from the cache"
     } else if has(&["http error 429"]) {
         "the cache rate-limited the read (HTTP 429)"
-    } else if has(&[
-        "http error 500",
-        "http error 502",
-        "http error 503",
-        "http error 504",
-    ]) {
+    } else if text.match_indices("http error ").any(|(index, prefix)| {
+        text[index + prefix.len()..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|status| status.parse::<u16>().ok())
+            .is_some_and(|status| (500..=599).contains(&status))
+    }) {
         "the cache server returned a server error (HTTP 5xx)"
     } else if has(&["couldn't resolve host", "could not resolve host"]) {
         "DNS resolution of the cache host failed"
@@ -1024,16 +1084,15 @@ fn known_read_secrets(
 /// URLs with signed query parameters, and provider response text. This function
 /// keeps only lines that start with `error:`, masks every `secrets` value by
 /// exact match, removes URL user information, and masks every URL query string.
-/// Secrets shorter than four characters are not matched, so that masking does
-/// not destroy the message; Basic credentials that short are not supported
-/// protection. The output has at most [`REDACTED_DETAIL_MAX_LINES`] lines of
+/// Every nonempty secret is masked, even when that reduces readability. The
+/// output has at most [`REDACTED_DETAIL_MAX_LINES`] lines of
 /// [`REDACTED_DETAIL_MAX_LINE_CHARS`] characters.
 fn redact_nix_errors(stderr: &[u8], secrets: &[String]) -> String {
     let text = String::from_utf8_lossy(stderr);
     let mut secrets: Vec<&str> = secrets
         .iter()
-        .map(|secret| secret.trim_end_matches('/'))
-        .filter(|secret| secret.len() >= 4)
+        .map(String::as_str)
+        .filter(|secret| !secret.is_empty())
         .collect();
     // Longest first, so a URL is masked before a shorter value inside it.
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
@@ -1192,15 +1251,17 @@ async fn copy_authenticated_cache(
                         }
                     };
                     let detail = redact_nix_errors(&tail, &known_read_secrets(&cache, &read));
-                    Err(anyhow::anyhow!(
-                        "Authenticated cache copy failed ({}); {status}{}",
-                        classify_read_failure(&tail),
-                        if detail.is_empty() {
-                            String::new()
-                        } else {
-                            format!("; nix: {detail}")
-                        }
-                    ))
+                    Err(anyhow::Error::new(AuthenticatedCacheCopyDisplayError(
+                        format!(
+                            "Authenticated cache copy failed ({}); {status}{}",
+                            classify_read_failure(&tail),
+                            if detail.is_empty() {
+                                String::new()
+                            } else {
+                                format!("; nix: {detail}")
+                            }
+                        ),
+                    )))
                 }
             }
             Ok(Err(error)) => {
@@ -1451,6 +1512,46 @@ printf '%s' "${netrc%/*}" > FIXTURE/credentials
     }
 
     #[tokio::test]
+    async fn short_basic_credentials_are_redacted_before_marking_report_safe() {
+        for credential in ["x", "xy", "xyz"] {
+            let fixture = Fixture::new(&format!(
+                "#!/bin/sh\n\
+                 if test \"$1\" = --extra-experimental-features; then\n\
+                 printf '%s' '{{\"cf-netrc-authority\":{{\"value\":\"\"}}}}'; exit 0; fi\n\
+                 printf 'error: authentication rejected {credential}\\n' >&2\n\
+                 exit 1\n"
+            ));
+            let mut basic = cache(false);
+            basic.read_auth = CacheReadAuth::Basic {
+                username: credential.into(),
+                password: credential.into(),
+            };
+            let error = copy_authenticated_cache(
+                basic,
+                "/nix/store/output".into(),
+                false,
+                Duration::from_secs(5),
+                fixture.program(),
+            )
+            .await
+            .unwrap_err()
+            .context("outer diagnostic must not enter report");
+            let display = deployment_failure_display(&error).unwrap();
+            assert!(display.contains("nix: error: authentication rejected ****"));
+            let report = DeploymentFailedReport {
+                hostname: "probe",
+                target_store_path: "/nix/store/output",
+                error: display,
+                display_error: Some(display),
+            };
+            let payload = serde_json::to_value(report).unwrap();
+            assert_eq!(payload["display_error"], display);
+            assert!(!display.contains("outer diagnostic"));
+            assert!(!display.contains(&format!("rejected {credential}")));
+        }
+    }
+
+    #[tokio::test]
     async fn niks3_basic_read_unpatched_runtime_never_copies() {
         let fixture = Fixture::new(
             r#"#!/bin/sh
@@ -1600,6 +1701,40 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
         }
         let directory = std::fs::read_to_string(fixture.0.join("credentials")).unwrap();
         assert!(!std::path::Path::new(&directory).exists());
+    }
+
+    #[test]
+    fn short_credentials_are_masked_in_error_details() {
+        for credential in ["x", "xy", "xyz"] {
+            let detail = redact_nix_errors(
+                format!("error: authentication failed for {credential}").as_bytes(),
+                &[credential.to_string()],
+            );
+            assert!(!detail.contains(credential), "{detail}");
+            assert!(detail.contains("****"), "{detail}");
+        }
+        // Empty strings must not insert masking characters between every byte.
+        assert_eq!(
+            redact_nix_errors(b"error: failure", &[String::new()]),
+            "error: failure"
+        );
+    }
+
+    #[test]
+    fn all_http_server_error_statuses_are_classified() {
+        for status in 500..=599 {
+            assert!(
+                classify_read_failure(format!("HTTP error {status}").as_bytes())
+                    .contains("HTTP 5xx"),
+                "{status}"
+            );
+        }
+        for status in [499, 600, 5000] {
+            assert!(
+                !classify_read_failure(format!("HTTP error {status}").as_bytes())
+                    .contains("HTTP 5xx")
+            );
+        }
     }
 
     #[test]

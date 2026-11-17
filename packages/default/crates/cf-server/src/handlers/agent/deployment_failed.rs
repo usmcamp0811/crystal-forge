@@ -23,6 +23,9 @@ pub struct DeploymentFailedRequest {
     pub target_store_path: String,
     #[serde(default)]
     pub error: String,
+    /// Contains only diagnostics explicitly marked safe for display by the agent.
+    #[serde(default)]
+    pub display_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,10 +64,14 @@ pub async fn report(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let failure_message = truncate_failure_message(payload.error.trim());
-    if failure_message.is_empty() {
+    if payload.error.trim().is_empty() {
         return StatusCode::BAD_REQUEST.into_response();
     }
+    let display_failure_message = display_failure_message(payload.display_error.as_deref());
+    // SECURITY: Legacy `error` is untrusted diagnostic text, never banner text.
+    let failure_message = display_failure_message
+        .as_deref()
+        .unwrap_or("Deployment failed (diagnostic details unavailable)");
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -78,7 +85,7 @@ pub async fn report(
         &mut tx,
         agent_request.system.id,
         payload.target_store_path.trim(),
-        &failure_message,
+        failure_message,
     )
     .await
     {
@@ -108,7 +115,9 @@ pub async fn report(
             .into_response();
     };
 
-    if let Err(error) = insert_deployment_failed_event_tx(&mut tx, &pending, &failure_message).await
+    if let Err(error) =
+        insert_deployment_failed_event_tx(&mut tx, &pending, display_failure_message.as_deref())
+            .await
     {
         debug!(?error, "failed to insert deployment-failed event");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -129,6 +138,42 @@ pub async fn report(
         .into_response()
 }
 
-fn truncate_failure_message(message: &str) -> String {
-    message.chars().take(MAX_FAILURE_MESSAGE_LEN).collect()
+fn display_failure_message(message: Option<&str>) -> Option<String> {
+    message
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(|message| message.chars().take(MAX_FAILURE_MESSAGE_LEN).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_report_has_no_display_diagnostics() {
+        let payload: DeploymentFailedRequest = serde_json::from_value(serde_json::json!({
+            "error": "legacy private diagnostic"
+        }))
+        .unwrap();
+        assert_eq!(
+            display_failure_message(payload.display_error.as_deref()),
+            None
+        );
+    }
+
+    #[test]
+    fn display_diagnostics_are_trimmed_and_bounded() {
+        assert_eq!(
+            display_failure_message(Some("  copy failed  ")).as_deref(),
+            Some("copy failed")
+        );
+        assert_eq!(display_failure_message(Some(" \n ")), None);
+        assert_eq!(
+            display_failure_message(Some(&"é".repeat(2001)))
+                .unwrap()
+                .chars()
+                .count(),
+            2000
+        );
+    }
 }

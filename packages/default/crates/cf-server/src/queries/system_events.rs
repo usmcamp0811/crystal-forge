@@ -488,10 +488,14 @@ async fn clear_matching_manual_desired_target_tx(
     Ok(())
 }
 
+/// Records optional, explicitly safe agent diagnostics in failure event metadata.
+///
+/// # Errors
+/// Returns an error if the event cannot be inserted in the transaction.
 pub async fn insert_deployment_failed_event_tx(
     tx: &mut Transaction<'_, Postgres>,
     pending: &PendingSystemDeployment,
-    failure_message: &str,
+    display_failure_message: Option<&str>,
 ) -> Result<()> {
     let event = PendingSystemEvent {
         event_type: SystemEventType::CfDeploymentFailed,
@@ -509,7 +513,7 @@ pub async fn insert_deployment_failed_event_tx(
         metadata: json!({
             "target_store_path": pending.target_store_path,
             "pending_deployment_id": pending.id,
-            "failure_message": failure_message,
+            "display_failure_message": display_failure_message,
         }),
     };
 
@@ -542,6 +546,12 @@ pub async fn insert_deployment_started_event_tx(
     insert_system_event_tx(tx, pending.system_id, pending.id, Utc::now(), &event).await
 }
 
+/// Returns current deployment progress with only explicitly safe failure text.
+///
+/// Legacy pending-row diagnostics are replaced with a neutral fallback.
+///
+/// # Errors
+/// Returns an error if deployment progress cannot be queried.
 pub async fn get_system_deployment_progress_row(
     pool: &PgPool,
     system_id: Uuid,
@@ -559,11 +569,24 @@ pub async fn get_system_deployment_progress_row(
             psd.applying_at,
             psd.completed_at,
             psd.failed_at,
-            psd.failure_message,
+            -- SECURITY: Existing pending rows can contain raw legacy diagnostics.
+            CASE WHEN psd.status = 'failed' THEN COALESCE(
+                NULLIF(BTRIM(failure_event.metadata->>'display_failure_message'), ''),
+                'Deployment failed (diagnostic details unavailable)'
+            ) END AS failure_message,
             COALESCE(requested.git_commit_hash, by_output.git_commit_hash) AS target_commit,
             NULLIF(psd.metadata->>'target_generation', '')::bigint AS target_generation
         FROM pending_system_deployments psd
         LEFT JOIN systems s ON s.id = psd.system_id
+        LEFT JOIN LATERAL (
+          SELECT se.metadata
+          FROM system_events se
+          WHERE se.system_id = psd.system_id
+            AND se.deployment_id = psd.id
+            AND se.event_type = 'cf_deployment_failed'
+          ORDER BY se.occurred_at DESC, se.id DESC
+          LIMIT 1
+        ) failure_event ON TRUE
         -- INVARIANT: One store path can be the output of many commits when
         -- newer commits do not change the configuration. The commit that the
         -- request named wins; otherwise the newest commit with that output.
@@ -998,7 +1021,11 @@ pub async fn list_system_event_history_rows(
             se.desired_target_id,
             se.source,
             se.actor,
-            se.metadata,
+            -- SECURITY: Do not return raw legacy diagnostics in API metadata.
+            CASE WHEN se.event_type = 'cf_deployment_failed'
+                THEN se.metadata - 'failure_message'
+                ELSE se.metadata
+            END AS metadata,
             COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname) AS system_configuration_name,
             c.git_commit_hash AS commit_hash,
             f.name AS flake_name,

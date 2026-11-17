@@ -1951,9 +1951,9 @@ pub async fn list_system_agent_event_rows(
                 CASE se.event_type
                     WHEN 'cf_deployment_started'  THEN 'Deployment started — applying new configuration'
                     WHEN 'cf_deployment_succeeded' THEN 'Deployment activated successfully'
-                    -- The agent-reported reason is redacted by the agent before upload.
+                    -- SECURITY: Legacy failure_message is not safe for display.
                     WHEN 'cf_deployment_failed'    THEN COALESCE(
-                        'Deployment failed: ' || NULLIF(BTRIM(se.metadata->>'failure_message'), ''),
+                        'Deployment failed: ' || NULLIF(BTRIM(se.metadata->>'display_failure_message'), ''),
                         'Deployment failed'
                     )
                     ELSE se.event_type

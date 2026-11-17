@@ -930,6 +930,8 @@ the agent logs or reports the detail, it removes secrets:
 - It replaces each value that the agent gave to Nix for this read with `****`.
   These values are the configured and prepared cache URLs, the Basic username
   and password, and each credential file path and its parent directory.
+  All nonempty credentials are masked, including one-character credentials.
+  Readability is secondary to masking secrets.
 - It removes user information (`user:password@`) from every URL.
 - It replaces every URL query string with `?****`. This removes signed
   redirect parameters that the agent does not know.
@@ -939,8 +941,25 @@ body on separate lines, so provider response text is not kept. Public store
 path names can appear in the detail. Timeout, cancellation, `require-sigs`, and
 credential cleanup are unchanged.
 
-The server stores the reported message. The system History tab shows it as the
-title of the failed deployment, and the Logs tab shows it in an `error` line.
+Only a typed, redacted authenticated-cache copy error supplies `display_error`
+in the signed `/agent/deployment-failed` report. Outer error contexts are not
+included. For all other errors, the agent sends neutral text instead of raw
+diagnostics, even in the legacy `error` field.
+
+The server stores `display_error` as event metadata `display_failure_message`.
+History and Logs read only this field. They do not display legacy
+`failure_message` values, because older agents could send raw stderr from other
+cache paths. The History API also removes that legacy metadata field from its
+response. A missing or blank display message gives `Deployment failed`; the
+progress banner gives `Deployment failed (diagnostic details unavailable)`.
+The progress API reads the matching failure event, not the legacy pending-row
+message. New reports without explicit display text store only neutral text.
+
+This additive contract permits older agents to report failure, but suppresses
+their diagnostic text. Rich copy diagnostics require an updated agent. It is
+not general server-side secret detection: authenticated agents are responsible
+for redaction before setting `display_error`. The non-Niks3 local journal path
+remains owned by TASK-507; its raw text cannot enter these display surfaces.
 
 | Reason | Meaning | Check first |
 | --- | --- | --- |
