@@ -1,16 +1,13 @@
 //! Heartbeat countdown ring/spinner component.
 //!
 //! During an active deployment the spinner borrows the same ring instead of
-//! swapping in a different widget.  Each deploy stage has an expected duration
-//! (based on the agent's pull cadence, not the fleet-wide heartbeat interval),
-//! so the ring drains across that stage and the label counts down to the next
-//! transition — exactly matching the updated design reference.
-//!
-//! Stage timing (mirrors JS DEPLOY_STAGE_*_MS constants):
-//!   queued    0 → 15 s  (agent checks in on its next heartbeat)
-//!   picked_up 15 → 17.2 s
-//!   applying  17.2 s onward (unknown end — ring reverts to normal HB countdown)
-//!   activated — ring fills solid green
+//! swapping in a different widget. Deployments are pull-based: the agent picks
+//! up a queued command on its next heartbeat. While the deployment is queued,
+//! the ring and label therefore count down to that heartbeat, from the same
+//! real `last_seen` + interval data as the idle countdown. After pickup the
+//! label shows time elapsed since the deployment was queued. The spinner never
+//! advances or predicts stages from a frontend timer; stage changes come only
+//! from the server progress record.
 //!
 //! # Shared clock
 //!
@@ -25,35 +22,6 @@ use crate::hooks::visibility;
 use dioxus::prelude::*;
 use std::cell::Cell;
 use std::rc::Rc;
-
-// Stage timing in seconds (mirroring the JS DEPLOY_STAGE_*_MS / 1000).
-const STAGE_START: &[(&str, f64)] = &[
-    ("queued", 0.0),
-    ("picked_up", 15.0),
-    ("applying", 17.2),
-    ("activated", 20.6),
-];
-const STAGE_END: &[(&str, f64)] = &[
-    ("queued", 15.0),
-    ("picked_up", 17.2),
-    ("applying", 20.6),
-    ("activated", 24.3),
-];
-
-fn stage_start(stage: &str) -> f64 {
-    STAGE_START
-        .iter()
-        .find(|(s, _)| *s == stage)
-        .map(|(_, v)| *v)
-        .unwrap_or(0.0)
-}
-fn stage_end(stage: &str) -> f64 {
-    STAGE_END
-        .iter()
-        .find(|(s, _)| *s == stage)
-        .map(|(_, v)| *v)
-        .unwrap_or(stage_start(stage))
-}
 
 /// Counts the spinners that need the shared clock.
 ///
@@ -192,31 +160,12 @@ pub(crate) fn heartbeat_display(input: &HeartbeatInput<'_>, now: f64) -> Heartbe
     let applying = stage == "applying";
     let deploying = !stage.is_empty() && !activated && !applying;
 
-    // Elapsed seconds since deploy was first queued.
+    // Elapsed seconds since the deployment was queued (server issued_at).
     let deploy_elapsed_secs = input
         .deploy_started_at_ms
         .map(|ms| (now - ms / 1000.0).max(0.0))
         .unwrap_or(0.0);
-
-    // Per-stage countdown (queued / picked_up).
-    let (stage_progress, stage_remain_sec) = if deploying {
-        let s_start = stage_start(stage);
-        let s_end = stage_end(stage);
-        let dur = (s_end - s_start).max(0.001);
-        let elapsed_in_stage = (deploy_elapsed_secs - s_start).max(0.0);
-        let prog = (elapsed_in_stage / dur).clamp(0.0, 1.0);
-        let remain = (dur - elapsed_in_stage).max(0.0);
-        (prog, remain)
-    } else {
-        (0.0, 0.0)
-    };
-
-    // Elapsed inside the applying phase (counts UP).
-    let applying_elapsed_sec = if applying {
-        (deploy_elapsed_secs - stage_start("applying")).max(0.0)
-    } else {
-        0.0
-    };
+    let queued = stage == "queued";
 
     // ── visual ─────────────────────────────────────────────────────────────
     let color = if activated {
@@ -238,21 +187,17 @@ pub(crate) fn heartbeat_display(input: &HeartbeatInput<'_>, now: f64) -> Heartbe
 
     // Ring offset:
     //   activated  → 0 (full ring, green)
-    //   deploying  → drains as stage_progress goes 0→1
+    //   queued     → heartbeat countdown: pickup happens on the next heartbeat
+    //   picked_up  → full ring (the agent has the command)
     //   applying   → normal HB countdown
     //   idle       → normal HB countdown (fills when overdue)
-    let dash_offset = if activated {
-        0.0
-    } else if deploying {
-        circumference * stage_progress
-    } else if overdue {
+    let dash_offset = if activated || overdue || (deploying && !queued) {
         0.0
     } else {
         circumference * (1.0 - progress)
     };
 
-    // No smooth transition during active deploy stages (mirrors JS design).
-    let transition = if overdue || deploying {
+    let transition = if overdue || (deploying && !queued) {
         "none"
     } else {
         "stroke-dashoffset 0.8s linear, stroke 0.3s"
@@ -261,10 +206,12 @@ pub(crate) fn heartbeat_display(input: &HeartbeatInput<'_>, now: f64) -> Heartbe
     // ── labels ──────────────────────────────────────────────────────────────
     let label = if activated {
         "activated".to_string()
-    } else if stage == "queued" {
-        format!("picks up in {}", fmt_duration(stage_remain_sec))
+    } else if queued && overdue {
+        format!("pickup {} late", fmt_duration(late_by))
+    } else if queued {
+        format!("picks up in {}", fmt_duration(remaining))
     } else if stage == "picked_up" {
-        format!("applying in {}", fmt_duration(stage_remain_sec))
+        "picked up".to_string()
     } else if overdue {
         format!("{} late", fmt_duration(late_by))
     } else {
@@ -273,10 +220,8 @@ pub(crate) fn heartbeat_display(input: &HeartbeatInput<'_>, now: f64) -> Heartbe
 
     let sub = if activated {
         "generation live".to_string()
-    } else if applying {
-        format!("applying · {} elapsed", fmt_duration(applying_elapsed_sec))
-    } else if deploying {
-        "deploy in progress".to_string()
+    } else if deploying || applying {
+        format!("deploy queued {} ago", fmt_duration(deploy_elapsed_secs))
     } else {
         format!("every {}", fmt_duration(interval))
     };
@@ -518,8 +463,9 @@ mod tests {
     }
 
     #[test]
-    fn deploy_stages_keep_their_countdowns() {
+    fn deploy_stages_use_real_heartbeat_and_queue_time() {
         let started_ms = NOW * 1000.0;
+        // Next heartbeat 25 s after the anchor; deployment queued at the anchor.
         let at = |stage: &'static str, seconds: f64| {
             heartbeat_display(
                 &HeartbeatInput {
@@ -530,16 +476,16 @@ mod tests {
                 NOW + seconds,
             )
         };
+        // Queued: pickup happens on the next heartbeat, not on a fixed timer.
         let queued = at("queued", 5.0);
-        assert_eq!(queued.label, "picks up in 10s");
-        assert_eq!(queued.sub, "deploy in progress");
+        assert_eq!(queued.label, "picks up in 20s");
+        assert_eq!(queued.sub, "deploy queued 5s ago");
         assert_eq!(queued.color, "var(--cf-brand-purple)");
-        assert_eq!(queued.transition, "none");
-        assert_eq!(at("picked_up", 16.0).label, "applying in 1s");
+        assert_eq!(at("queued", 40.0).label, "pickup 15s late");
+        // Picked up: no predicted countdown.
+        assert_eq!(at("picked_up", 26.0).label, "picked up");
         let applying = at("applying", 27.2);
-        assert_eq!(applying.sub, "applying · 10s elapsed");
-        // Applying reverts to the heartbeat countdown label: 27.2 s elapsed
-        // against 25 s remaining is 2.2 s late, shown rounded.
+        assert_eq!(applying.sub, "deploy queued 27s ago");
         assert_eq!(applying.label, "2s late");
         let activated = at("activated", 30.0);
         assert_eq!(activated.label, "activated");

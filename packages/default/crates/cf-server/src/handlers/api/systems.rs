@@ -4518,6 +4518,52 @@ pub async fn get_system_commits(
     (StatusCode::OK, Json(response)).into_response()
 }
 
+/// Returns the position of a system in the tracked branch history of its flake.
+///
+/// `GET /api/v1/systems/:id/flake-position` uses the same authorization as
+/// [`get_system_commits`]: a viewer or higher role, plus environment access to
+/// the system. An inaccessible system returns 404 so that the response does not
+/// reveal that the system exists. The handler does not mutate state.
+pub async fn get_system_flake_position(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let Ok(environment_memberships) = load_membership_environment_ids(&pool, user_id).await else {
+        return internal_error("Failed to load environment memberships");
+    };
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    // SECURITY: Administrators can access every environment, so peer
+    // hostnames are not filtered for them. Every other role sees only peers in
+    // its member environments.
+    let peer_visibility_user = (!matches!(caller_role, Role::Admin)).then_some(user_id);
+    match crate::queries::flake_position::fetch_system_flake_position(
+        &pool,
+        system_id,
+        peer_visibility_user,
+    )
+    .await
+    {
+        Ok(Some(response)) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(None) => not_found(),
+        Err(_) => internal_error("Failed to load system flake position"),
+    }
+}
+
 pub async fn get_system_generations(
     State(pool): State<PgPool>,
     headers: HeaderMap,

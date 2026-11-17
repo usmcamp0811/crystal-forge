@@ -33,6 +33,7 @@ pub mod evaluation_inventory;
 pub(crate) mod evaluation_native_outcomes;
 pub mod evaluation_snapshots;
 pub mod flake_credentials;
+pub mod flake_position;
 pub mod flakes;
 pub mod framework_requirements;
 pub mod guest_observations;

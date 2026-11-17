@@ -4224,6 +4224,115 @@ pub struct CommitInfo {
     pub deployed_here: bool,
 }
 
+/// Describes where one system is in the tracked branch history of its flake.
+///
+/// The response is observational. It does not grant deployment, rollback, or
+/// policy authority. `GET /api/v1/systems/:id/flake-position` returns it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemFlakePositionResponse {
+    /// Registered flake, or `None` when the system has no active flake.
+    pub flake_id: Option<i32>,
+    /// Registered flake name.
+    pub flake_name: Option<String>,
+    /// Tracked branch name. The server uses `main` when the flake has none.
+    pub branch: Option<String>,
+    /// Source of the commit order.
+    pub ordering: FlakePositionOrdering,
+    /// Branch commits ordered from HEAD (`position` 0) to older commits.
+    ///
+    /// The list has at least `FLAKE_POSITION_MIN_COMMITS` entries when the
+    /// branch has them. It extends to two commits after the running commit and
+    /// never exceeds `FLAKE_POSITION_MAX_COMMITS` entries.
+    pub commits: Vec<FlakePositionCommit>,
+    /// Full SHA of the observed running commit, when the server can map it.
+    pub running_commit: Option<String>,
+    /// Position of `running_commit` in `commits`. `None` when `unknown_reason`
+    /// is set.
+    pub running_position: Option<i64>,
+    /// Reason the running position is unavailable.
+    pub unknown_reason: Option<FlakePositionUnknownReason>,
+    /// Position of the newest returned commit that the system has run, by
+    /// `system_states` history. The lane marks it "last tracked" when the
+    /// running position is unknown.
+    pub last_tracked_position: Option<i64>,
+}
+
+/// Identifies how [`SystemFlakePositionResponse::commits`] is ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlakePositionOrdering {
+    /// Order of the last successful branch snapshot (`flake_branch_commit_snapshot`).
+    BranchSnapshot,
+    /// Fallback order by commit timestamp, newest first, used before the first
+    /// branch snapshot exists.
+    CommitTimestamp,
+}
+
+/// Explains why a system has no running position on its tracked branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlakePositionUnknownReason {
+    /// The system has no active flake, or the flake has no tracked commits.
+    NoHistory,
+    /// The agent has not reported a running store path.
+    NotObserved,
+    /// The running store path maps to no tracked commit, for example after a
+    /// local `nixos-rebuild`.
+    Untracked,
+    /// The running commit is tracked but is not on the tracked branch.
+    OffBranch,
+    /// The running commit is deeper than the bounded branch window.
+    BeyondWindow,
+}
+
+/// Describes one branch commit in a flake-position lane.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakePositionCommit {
+    /// Dense branch index. 0 is HEAD; each step is one older commit.
+    pub position: i64,
+    /// Full commit SHA.
+    pub sha: String,
+    /// Commit message.
+    pub message: String,
+    /// Commit author.
+    pub author: String,
+    /// Commit timestamp.
+    pub committed_at: DateTime<Utc>,
+    /// Build state of this system's configuration at this commit.
+    pub build_state: FlakePositionBuildState,
+    /// Hostnames of other active systems that run this commit and that the
+    /// caller can access, sorted ascending.
+    pub peers: Vec<String>,
+}
+
+/// Build and publication state of one system configuration at one commit.
+///
+/// The server derives the state from `build_jobs` of the `nixos` derivation
+/// whose name is the system configuration name, and from `cache_push_jobs`.
+/// `ready` means deployable as far as build and publication go: a build job
+/// succeeded and a completed cache push exists for the derivation output, the
+/// same evidence `view_system_deployment_status` requires. A build that
+/// succeeded without that cache push is `unpublished`. This is the state of
+/// builds stuck in pending publication (TASK-527). Otherwise a queued or
+/// running job gives `building`, a failed job gives `failed`, and a commit
+/// without a build job gives `not_built`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlakePositionBuildState {
+    /// A build job is queued or running and none has succeeded.
+    Building,
+    /// A build job succeeded and the output is confirmed in the deployment
+    /// cache.
+    Ready,
+    /// A build job succeeded, but no completed cache push for the output is
+    /// recorded.
+    Unpublished,
+    /// The last finished build jobs failed and none succeeded.
+    Failed,
+    /// No build job exists.
+    NotBuilt,
+}
+
 /// Response containing available generations for rollback.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemGenerationsResponse {

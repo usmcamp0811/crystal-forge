@@ -2,16 +2,17 @@ use crate::api::models::SystemDeploymentProgress;
 use crate::components::{Icon, IconName};
 use dioxus::prelude::*;
 
-const DEPLOY_STAGES: [&str; 4] = ["queued", "picked_up", "applying", "activated"];
+/// Deployment stages in display order, shared by the banner and the flake-position lane.
+pub(crate) const DEPLOY_STAGES: [&str; 4] = ["queued", "picked_up", "applying", "activated"];
 
-fn stage_index(stage: &str) -> usize {
+pub(crate) fn stage_index(stage: &str) -> usize {
     DEPLOY_STAGES
         .iter()
         .position(|candidate| *candidate == stage)
         .unwrap_or(0)
 }
 
-fn stage_label(stage: &str, is_rollback: bool) -> &'static str {
+pub(crate) fn stage_label(stage: &str, is_rollback: bool) -> &'static str {
     match stage {
         "queued" => "Queued",
         "picked_up" => "Picked up",
@@ -23,7 +24,7 @@ fn stage_label(stage: &str, is_rollback: bool) -> &'static str {
     }
 }
 
-fn stage_subtext(
+pub(crate) fn stage_subtext(
     stage: &str,
     is_rollback: bool,
     hostname: &str,

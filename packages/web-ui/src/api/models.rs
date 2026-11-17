@@ -5357,6 +5357,98 @@ pub struct CommitInfo {
     pub deployed_here: bool,
 }
 
+/// Position of one system in the tracked branch history of its flake.
+///
+/// Mirrors the server `SystemFlakePositionResponse` returned by
+/// `GET /api/v1/systems/:id/flake-position`. The data is observational and
+/// grants no deployment authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemFlakePosition {
+    /// Registered flake, when the system has an active flake.
+    pub flake_id: Option<i32>,
+    /// Registered flake name.
+    pub flake_name: Option<String>,
+    /// Tracked branch name.
+    pub branch: Option<String>,
+    /// Source of the commit order.
+    pub ordering: FlakePositionOrdering,
+    /// Branch commits from HEAD (`position` 0) to older commits.
+    pub commits: Vec<FlakePositionCommit>,
+    /// Full SHA of the observed running commit, when mapped.
+    pub running_commit: Option<String>,
+    /// Index of the running commit in `commits`, when known.
+    pub running_position: Option<i64>,
+    /// Reason the running position is unavailable.
+    pub unknown_reason: Option<FlakePositionUnknownReason>,
+    /// Newest returned commit that the system has run, when known.
+    #[serde(default)]
+    pub last_tracked_position: Option<i64>,
+}
+
+/// Source of the flake-position commit order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlakePositionOrdering {
+    /// Order of the last branch snapshot.
+    BranchSnapshot,
+    /// Timestamp fallback before the first branch snapshot.
+    CommitTimestamp,
+}
+
+/// Reason a system has no running position on its tracked branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlakePositionUnknownReason {
+    /// No active flake or no tracked commits.
+    NoHistory,
+    /// No running store path has been reported.
+    NotObserved,
+    /// The running store path maps to no tracked commit.
+    Untracked,
+    /// The running commit is not on the tracked branch.
+    OffBranch,
+    /// The running commit is deeper than the bounded branch window.
+    BeyondWindow,
+}
+
+/// One branch commit in a flake-position lane.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakePositionCommit {
+    /// Dense branch index; 0 is HEAD.
+    pub position: i64,
+    /// Full commit SHA.
+    pub sha: String,
+    /// Commit message.
+    pub message: String,
+    /// Commit author.
+    pub author: String,
+    /// Commit timestamp.
+    pub committed_at: DateTime<Utc>,
+    /// Build state of this system's configuration at this commit.
+    pub build_state: FlakePositionBuildState,
+    /// Other accessible systems that run this commit.
+    #[serde(default)]
+    pub peers: Vec<String>,
+}
+
+/// Server-derived build state of one system configuration at one commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlakePositionBuildState {
+    /// A build job is queued or running and none has succeeded.
+    Building,
+    /// A build job succeeded and the output is confirmed in the deployment
+    /// cache. The commit is deployable as far as build and publication go.
+    Ready,
+    /// A build job succeeded, but a completed cache push for its output is not
+    /// recorded. A deployment of this commit can wait or fail.
+    Unpublished,
+    /// Build jobs failed and none succeeded.
+    Failed,
+    /// No build job exists.
+    NotBuilt,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemGenerationsResponse {
     pub generations: Vec<SystemGeneration>,

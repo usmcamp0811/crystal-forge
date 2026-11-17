@@ -3,7 +3,8 @@ id: TASK-453
 title: Prevent silent and stranded deployment failures across the agent lifecycle
 status: To Do
 assignee: []
-created_date: '2026-08-30 14:25'
+created_date: 2026-08-30 14:25
+updated_date: '2026-11-16T04:02:00Z'
 labels:
   - deployment
   - agent
@@ -110,3 +111,11 @@ High. This task changes agent/server deployment coordination, durable state tran
 - [ ] #14 Integration verification proves that every exercised deployment attempt reaches a durable success or explained failure/timeout state and that secrets are absent from persisted diagnostics.
 - [ ] #15 Deployment lifecycle documentation defines state meanings, valid transitions, timeout/retry behavior, idempotency, correlation, redaction, and legacy-agent compatibility.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Owner report 2026-11-16 (found while reviewing TASK-525.1 on webb): auto_latest issued a deployment of 7103359 whose output equals the store path webb already runs (07b5462 and 7103359 build the same closure). The agent skips it as AlreadyOnTarget (cf-agent/src/deployment/agent.rs, Already on target) and reports nothing; the server marks success only when the reported store path changes (queries/system_events.rs, generation_or_store_changed). The row stays picked_up until the 2h expiry, so the Systems slide-out banner and the Deploy tab lane show Deployment in progress while the Systems list shows Up to Date. This is AC #10.
+
+AC #10 implemented in TASK-525.1 (MR !343, commit 90a7eee9) at the owner request; other TASK-453 criteria remain open.
+<!-- SECTION:NOTES:END -->

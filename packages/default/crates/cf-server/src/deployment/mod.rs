@@ -476,6 +476,38 @@ impl DeploymentPolicyManager {
                 continue;
             }
 
+            // A completed deployment leaves no pending row, so the check above
+            // alone re-issued the running path every cycle. The host already
+            // runs the target when its latest current observation reports
+            // that store path; issuing it again would only create a
+            // deployment that the agent skips as already on target.
+            if system.desired_target.as_deref() == Some(store_path.as_str()) {
+                let running: Option<Option<String>> = sqlx::query_scalar(
+                    "SELECT NULLIF(BTRIM(state.store_path), '')
+                     FROM view_agent_current_system_states state
+                     WHERE state.hostname = $1
+                     ORDER BY state.timestamp DESC, state.id DESC
+                     LIMIT 1",
+                )
+                .bind(&system.hostname)
+                .fetch_optional(&self.pool)
+                .await
+                .unwrap_or_else(|error| {
+                    warn!(
+                        "Failed to read current state for {}: {error:#}",
+                        system.hostname
+                    );
+                    None
+                });
+                if running.flatten().as_deref() == Some(store_path.as_str()) {
+                    debug!(
+                        "System {} already runs newest deployable target",
+                        system.hostname
+                    );
+                    continue;
+                }
+            }
+
             let decision = self
                 .evaluate_advanced_policy_gates(
                     system,
