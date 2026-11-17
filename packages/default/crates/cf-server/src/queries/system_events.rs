@@ -560,19 +560,38 @@ pub async fn get_system_deployment_progress_row(
             psd.completed_at,
             psd.failed_at,
             psd.failure_message,
-            c.git_commit_hash AS target_commit,
+            COALESCE(requested.git_commit_hash, by_output.git_commit_hash) AS target_commit,
             NULLIF(psd.metadata->>'target_generation', '')::bigint AS target_generation
         FROM pending_system_deployments psd
         LEFT JOIN systems s ON s.id = psd.system_id
-        LEFT JOIN derivations d
-          ON (d.store_path = psd.target_store_path OR d.expected_store_path = psd.target_store_path)
-          AND d.derivation_type = 'nixos'
-          AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
-        LEFT JOIN commits c ON c.id = d.commit_id
+        -- INVARIANT: One store path can be the output of many commits when
+        -- newer commits do not change the configuration. The commit that the
+        -- request named wins; otherwise the newest commit with that output.
+        -- An unordered join here labeled the deployment with an arbitrary
+        -- commit.
+        LEFT JOIN commits requested ON requested.id = psd.requested_commit_id
+        LEFT JOIN LATERAL (
+          SELECT c.git_commit_hash
+          FROM derivations d
+          JOIN commits c ON c.id = d.commit_id
+          -- Branch order decides "newest" when a snapshot exists; commit
+          -- timestamps can disagree with branch order.
+          LEFT JOIN flake_branch_commit_snapshot b
+            ON b.flake_id = c.flake_id AND b.commit_id = c.id
+          WHERE (d.store_path = psd.target_store_path OR d.expected_store_path = psd.target_store_path)
+            AND d.derivation_type = 'nixos'
+            AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
+            AND c.flake_id = s.flake_id
+          ORDER BY b.position ASC NULLS LAST, c.commit_timestamp DESC, c.id DESC
+          LIMIT 1
+        ) by_output ON TRUE
         WHERE psd.system_id = $1
           AND (
             (psd.status = 'pending' AND psd.expires_at > NOW())
-            OR (psd.status IN ('succeeded', 'failed') AND psd.completed_at > NOW() - INTERVAL '2 minutes')
+            -- A success is shown briefly (30 s, long enough for the operator to see
+            -- Activated). A failure stays 2 min so that the message can be read.
+            OR (psd.status = 'succeeded' AND psd.completed_at > NOW() - INTERVAL '30 seconds')
+            OR (psd.status = 'failed' AND psd.completed_at > NOW() - INTERVAL '2 minutes')
           )
         ORDER BY
           CASE WHEN psd.status = 'pending' THEN 0 ELSE 1 END,
@@ -901,6 +920,51 @@ pub async fn record_report_events_tx(
                 "dedupe_semantics": "coalesced by boot_id and store path until durable agent instance identity is available"
             }),
         });
+    }
+
+    // An already-current target completes on the next report (TASK-453 AC #10).
+    // The agent skips a target equal to /run/current-system and reports no
+    // progress, and the branch above completes deployments only when the store
+    // path changes. Without this branch, a deployment issued for the path the
+    // host already runs (for example, auto_latest choosing a newer commit with
+    // an identical closure) stays `picked_up` until it expires.
+    //
+    // SECURITY: The evidence is the same signed agent report that completes a
+    // changed-path deployment. Only a still-`pending` row with exactly the
+    // reported store path, issued at or before the report, is completed;
+    // expired rows are not revived.
+    if !generation_or_store_changed {
+        if let Some(pending) = find_matching_reported_deployment_tx(
+            tx,
+            previous.system_id,
+            payload.store_path.as_deref(),
+            occurred_at,
+        )
+        .await?
+        .filter(|pending| pending.status == "pending")
+        {
+            mark_pending_deployment_succeeded_tx(tx, pending.id).await?;
+            events.push(PendingSystemEvent {
+                event_type: SystemEventType::CfDeploymentSucceeded,
+                dedupe_key: format!("cf_deployment_succeeded:{}", pending.id),
+                previous_generation,
+                new_generation,
+                previous_store_path: previous_store_path.clone(),
+                new_store_path: new_store_path.clone(),
+                previous_boot_id: previous.boot_id.clone(),
+                new_boot_id: payload.boot_id.clone(),
+                deployment_id: Some(pending.id),
+                desired_target_id: Some(pending.id),
+                source: "pending_desired_target",
+                actor: Some("crystal-forge"),
+                metadata: json!({
+                    "change_reason": payload.change_reason.as_str(),
+                    "target_store_path": pending.target_store_path,
+                    "pending_source": pending.source,
+                    "already_current": true,
+                }),
+            });
+        }
     }
 
     for event in &events {

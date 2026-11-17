@@ -27,15 +27,16 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 
 use crate::api::client::{
-    ApiClientError, fetch_compliance_system_evidence, fetch_flake_timeline_for_tray,
-    fetch_system_assignments, fetch_system_compliance_bundles,
+    ApiClientError, fetch_commit_diff, fetch_compliance_system_evidence,
+    fetch_flake_timeline_for_tray, fetch_system_assignments, fetch_system_compliance_bundles,
     fetch_system_cve_inventory_candidates, fetch_system_cve_inventory_for_target,
     fetch_system_cve_scan_eligibility, fetch_system_evaluated_options,
     fetch_system_evaluation_module_sources, fetch_system_evaluation_summary,
-    fetch_system_hardening_inventory_for_target, fetch_system_hardening_justifications,
-    fetch_system_hardening_scan_eligibility, get_system_deployment_progress,
-    queue_system_config_inspection, request_system_generation_rollback, request_system_rollback,
-    request_system_sync, save_system_hardening_justification, trigger_system_hardening_scan,
+    fetch_system_flake_position, fetch_system_hardening_inventory_for_target,
+    fetch_system_hardening_justifications, fetch_system_hardening_scan_eligibility,
+    get_system_deployment_progress, queue_system_config_inspection,
+    request_system_generation_rollback, request_system_rollback, request_system_sync,
+    save_system_hardening_justification, trigger_system_hardening_scan,
     verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
@@ -43,7 +44,8 @@ use crate::api::models::{
     CveScanEligibilityResponse, DeploySystemRequest, DeploymentLogEntry, DeploymentStatus,
     EvaluatedOption, EvaluatedOptionFilter, EvaluatedOptionRow, EvaluatedOptionsPage,
     EvaluatedOptionsRequest, EvaluationDrift, EvaluationModuleSourcesPage, EvaluationModuleSummary,
-    FlakeSummary, HardeningJustificationResponse, HardeningScanEligibilityResponse,
+    FlakePositionBuildState, FlakePositionCommit, FlakePositionUnknownReason, FlakeSummary,
+    HardeningJustificationResponse, HardeningScanEligibilityResponse,
     HardeningServiceResultResponse, HealthStatus, LogLevel, ManualDeploymentAction,
     ManualDeploymentConversionState, ManualDeploymentPolicyState, ManualDeploymentRequestState,
     OptionChangeKind, OptionDefinitionProvenance, OptionInventoryState, SafeOptionValue,
@@ -52,7 +54,7 @@ use crate::api::models::{
     SystemComplianceBundle, SystemCveCurrentAuthorityState, SystemCveEvidenceRepresentation,
     SystemCveInventoryAuthority, SystemCveInventoryCandidate, SystemCveInventoryPageResponse,
     SystemCveInventorySelection, SystemCveRunningTarget, SystemDeploymentProgress, SystemDetail,
-    SystemGeneration, SystemHardeningInventoryAttemptResponse,
+    SystemFlakePosition, SystemGeneration, SystemHardeningInventoryAttemptResponse,
     SystemHardeningInventorySourceResponse, SystemHistoryEntry, SystemRollbackGenerationRequest,
     SystemRollbackRequest, TrackedFlakeIdentity, TypedOptionDiff, VerifyGenerationClosureRequest,
 };
@@ -70,6 +72,10 @@ use crate::components::poam::{
     AssignmentVersionCandidate, FindingPoamEvent, PoamDetailHost, PoamFilter, SystemPoamSection,
 };
 use crate::components::system::config_explorer::ConfigExplorer;
+use crate::components::system::deploy_target_picker::DeployTargetPicker;
+use crate::components::system::flake_position::{
+    FlakePositionCard, FlakePositionNotice, LaneModel, LaneUnknown, can_draw_deployment,
+};
 use crate::components::system::{
     AutoLatestDeployEvent, AutoLatestDeployPrompt, AutoLatestDeployState, EditSystemModal,
     PendingDeployBanner, deployment_request_for_target, deployment_state_label, environment_style,
@@ -964,6 +970,38 @@ impl Tab {
     }
 }
 
+/// State of the per-system flake-position read.
+///
+/// The Deploy tab shows server branch data only for `Ready`. `Loading` and
+/// `Unavailable` show an explicit notice: derived fallback data must not look
+/// like authoritative branch position, peers, or build state.
+#[derive(Clone, Debug, PartialEq)]
+enum FlakePositionRead {
+    Loading,
+    Ready(SystemFlakePosition),
+    Unavailable,
+}
+
+/// Returns whether the deployment-status read shows an active or recently
+/// finished deployment.
+///
+/// `read` is the resource value: `None` while the first request is pending,
+/// `Some(None)` when the server reports no deployment, and `Some(Some(_))`
+/// when it returns a record. History and flake-position polling run only for
+/// `Some(Some(_))`, so an idle page does not poll.
+fn deployment_is_active(read: Option<&Option<SystemDeploymentProgress>>) -> bool {
+    matches!(read, Some(Some(_)))
+}
+
+/// Returns a value that changes when a deployment starts, changes stage, or
+/// ends. Resources that must re-read at those moments depend on it.
+fn deployment_state_key(read: Option<&Option<SystemDeploymentProgress>>) -> Option<(Uuid, String)> {
+    match read {
+        Some(Some(progress)) => Some((progress.id, progress.stage.clone())),
+        _ => None,
+    }
+}
+
 fn navigate_system_detail_tab(
     mut active_tab: Signal<Tab>,
     mut navigation_state: Signal<SystemDetailNavigation>,
@@ -1540,6 +1578,9 @@ pub fn SystemDetailView(
     });
 
     let mut deployment_progress_poll_tick = use_signal(|| 0_u64);
+    // Deployment the operator dismissed with the X. The server keeps returning a
+    // finished record for a short window, so a dismissal must be remembered here.
+    let mut dismissed_deployment: Signal<Option<Uuid>> = use_signal(|| None);
     let id_for_deployment_progress = id.clone();
     let deployment_progress_tick_for_resource = deployment_progress_poll_tick.clone();
     let deployment_progress_resource = use_resource(move || {
@@ -1581,7 +1622,7 @@ pub fn SystemDetailView(
                 #[cfg(target_arch = "wasm32")]
                 {
                     crate::hooks::visibility::visible_tick(4000).await;
-                    if dep_resource.read_unchecked().is_some() {
+                    if deployment_is_active(dep_resource.read_unchecked().as_ref()) {
                         tick.set(tick() + 1);
                     }
                 }
@@ -1659,6 +1700,25 @@ pub fn SystemDetailView(
             };
 
             fetch_system_commits_via_api(system_id).await.ok()
+        }
+    });
+
+    // The lane re-reads its position when a deployment starts, changes stage, or
+    // ends, so the host pin moves to the target after activation.
+    //
+    // CONCURRENCY: The status resource republishes a value on every 4-second
+    // poll, even when nothing changed, so reading it directly would re-run this
+    // read every poll. A memo notifies only when its value changes (PartialEq),
+    // which keeps an idle page from polling this endpoint.
+    let deployment_key =
+        use_memo(move || deployment_state_key(deployment_progress_resource.read().as_ref()));
+    let id_for_flake_position = id.clone();
+    let flake_position_resource = use_resource(move || {
+        let _ = deployment_key();
+        let id = id_for_flake_position.clone();
+        async move {
+            let system_id = Uuid::parse_str(&id).ok()?;
+            fetch_system_flake_position(&system_id).await.ok()
         }
     });
 
@@ -1849,9 +1909,16 @@ pub fn SystemDetailView(
     let deployment_progress = deployment_progress_resource
         .read_unchecked()
         .clone()
-        .flatten();
+        .flatten()
+        .filter(|progress| *dismissed_deployment.read() != Some(progress.id));
+    let current_deployment_id = deployment_progress.as_ref().map(|progress| progress.id);
     let history_commit_history = map_history_entries_to_commit_history(&history_entries);
     let commits_response = commits_resource.read_unchecked().clone().flatten();
+    let flake_position = match flake_position_resource.read_unchecked().clone() {
+        None => FlakePositionRead::Loading,
+        Some(None) => FlakePositionRead::Unavailable,
+        Some(Some(position)) => FlakePositionRead::Ready(position),
+    };
     let observational_current_commit = commits_response
         .as_ref()
         .and_then(|response| response.current_commit.clone());
@@ -2365,7 +2432,9 @@ pub fn SystemDetailView(
                 }
             }
 
-            if let Some(progress) = deployment_progress.clone() {
+            // The Deploy tab draws deployment progress in the flake-position lane
+            // (design dev commit bd8d068d), so the banner is hidden there.
+            if let Some(progress) = deployment_progress.clone().filter(|_| *active_tab.read() != Tab::Deploy) {
                 PendingDeployBanner {
                     progress,
                     hostname: system.hostname.clone(),
@@ -2374,7 +2443,7 @@ pub fn SystemDetailView(
                         system.effective_heartbeat_interval_secs as f64
                             - now.signed_duration_since(dt).num_seconds() as f64
                     }),
-                    on_dismiss: move |_| deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1),
+                    on_dismiss: move |_| dismissed_deployment.set(current_deployment_id),
                     on_view_logs: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::Logs, true),
                 }
             }
@@ -2472,6 +2541,15 @@ pub fn SystemDetailView(
                         DeployTab {
                             system: system.clone(),
                             commits: deploy_commit_history.clone(),
+                            flake_position: flake_position.clone(),
+                            deployment_progress: deployment_progress.clone(),
+                            heartbeat_next_in_secs: system.last_seen.map(|dt| {
+                                system.effective_heartbeat_interval_secs as f64
+                                    - now.signed_duration_since(dt).num_seconds() as f64
+                            }),
+                            on_view_logs: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::Logs, true),
+                            on_view_history: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::History, true),
+                            on_dismiss_deploy: move |_| dismissed_deployment.set(current_deployment_id),
                             generations: generations_result.generations.clone(),
                             current_generation: generations_result.current_generation,
                             initial_generation: navigation_state.read().deploy_generation,
@@ -4775,10 +4853,61 @@ fn OverviewTab(
     }
 }
 
+/// Builds a lane from the `/systems/:id/commits` history.
+///
+/// COMPATIBILITY: This fallback applies when the flake-position read fails,
+/// for example against a server without that endpoint. The history is ordered
+/// by commit timestamp, carries no peers, and reports no build state.
+fn lane_from_commit_history(commits: &[SystemCommitHistory], flake_name: &str) -> LaneModel {
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<&SystemCommitHistory> = commits
+        .iter()
+        .filter(|commit| seen.insert(commit.hash.clone()))
+        .collect();
+    let current = unique.iter().position(|commit| commit.is_current);
+    let commits: Vec<FlakePositionCommit> = unique
+        .into_iter()
+        .enumerate()
+        .map(|(index, commit)| FlakePositionCommit {
+            position: index as i64,
+            sha: commit.hash.clone(),
+            message: commit.message.clone(),
+            author: commit.author.clone(),
+            committed_at: commit.committed_at,
+            build_state: FlakePositionBuildState::NotBuilt,
+            peers: Vec::new(),
+        })
+        .collect();
+    LaneModel {
+        flake_name: flake_name.to_string(),
+        branch: "main".to_string(),
+        unknown: if commits.is_empty() {
+            Some(LaneUnknown::Server(FlakePositionUnknownReason::NoHistory))
+        } else if current.is_none() {
+            Some(LaneUnknown::Server(FlakePositionUnknownReason::Untracked))
+        } else {
+            None
+        },
+        at: current,
+        commits,
+        last_tracked: None,
+    }
+}
+
+/// Deploy tab for managed systems (design: dev commit `bd8d068d`).
+///
+/// The tab shows the flake-position lane above a two-column grid: the
+/// "Deploy target" picker on the left and the deployment or rollback plan on
+/// the right. The lane and the picker read the same branch-ordered history
+/// from `flake_position`. When that read is unavailable, both fall back to the
+/// `/systems/:id/commits` list so deploy actions keep working.
 #[component]
 fn DeployTab(
     system: SystemDetail,
     commits: Vec<SystemCommitHistory>,
+    flake_position: FlakePositionRead,
+    deployment_progress: Option<SystemDeploymentProgress>,
+    heartbeat_next_in_secs: Option<f64>,
     generations: Vec<SystemGeneration>,
     current_generation: Option<i32>,
     initial_generation: Option<i32>,
@@ -4790,6 +4919,9 @@ fn DeployTab(
     on_open_flake_commit: EventHandler<FlakeCommitPeekTarget>,
     on_deploy_commit: EventHandler<DeploySystemRequest>,
     on_deploy_generation: EventHandler<SystemGeneration>,
+    on_view_logs: EventHandler<()>,
+    on_view_history: EventHandler<()>,
+    on_dismiss_deploy: EventHandler<()>,
 ) -> Element {
     let flake_name = system
         .flake
@@ -4798,11 +4930,56 @@ fn DeployTab(
         .unwrap_or_else(|| "unknown".to_string());
     let flake_summary = system.flake.clone();
 
-    let default_commit = commits
+    // INVARIANT: The lane, the picker, and the plan panel use one commit list,
+    // so a commit selected in one of them exists in the others.
+    //
+    // Only a successful read is authoritative for branch position, peers, and
+    // build state (including a `no_history` answer). While the read is loading
+    // or after it failed, the picker still lists the `/commits` history so the
+    // operator can pick a target, but the card says that branch data is not
+    // available and the picker shows no running-commit, ahead, or build claims.
+    let position_ready = matches!(flake_position, FlakePositionRead::Ready(_));
+    let lane = match &flake_position {
+        FlakePositionRead::Ready(position) => LaneModel::managed(position),
+        _ => lane_from_commit_history(&commits, &flake_name),
+    };
+    let lane_commits = lane.commits.clone();
+    let running_index = lane.at;
+    let picker_running = if position_ready { running_index } else { None };
+    // The progress banner is the fallback whenever the lane cannot draw the
+    // deployment: unknown position, an unplaceable target, or an unavailable
+    // read. Without it the deployment and its failure message would vanish.
+    let lane_draws_deployment = position_ready
+        && deployment_progress
+            .as_ref()
+            .is_some_and(|progress| can_draw_deployment(&lane, progress));
+    let displayed_commits: Vec<SystemCommitHistory> = lane_commits
         .iter()
-        .find(|c| c.is_current)
-        .map(|c| c.hash.clone())
-        .or_else(|| commits.first().map(|c| c.hash.clone()))
+        .enumerate()
+        .map(|(index, commit)| {
+            let original = commits.iter().find(|c| c.hash == commit.sha);
+            SystemCommitHistory {
+                hash: commit.sha.clone(),
+                message: commit.message.clone(),
+                author: commit.author.clone(),
+                committed_at: commit.committed_at,
+                was_deployed: running_index == Some(index),
+                deployed_at: None,
+                is_current: running_index == Some(index),
+                is_ready_to_deploy: running_index != Some(index),
+                build_status: None,
+                diff_summary: original.and_then(|c| c.diff_summary.clone()),
+                flake_repo_url: None,
+                config_identity: None,
+                config_inspectable: original.is_some_and(|c| c.config_inspectable),
+            }
+        })
+        .collect();
+
+    let default_commit = running_index
+        .and_then(|index| lane_commits.get(index))
+        .or_else(|| lane_commits.first())
+        .map(|c| c.sha.clone())
         .unwrap_or_default();
 
     let default_generation = generations
@@ -4822,7 +4999,10 @@ fn DeployTab(
             "commit".to_string()
         }
     });
-    let mut selected_commit = use_signal(|| default_commit);
+    // `None` means "no explicit choice": the selection follows the running
+    // commit, which can change when the flake-position read completes.
+    let mut selected_commit: Signal<Option<String>> = use_signal(|| None);
+    let effective_commit = selected_commit().unwrap_or_else(|| default_commit.clone());
     let mut selected_generation: Signal<Option<i32>> = use_signal(|| initial_selected_generation);
     let mut show_diff = use_signal(|| false);
     let mut verify_notice = use_signal(|| None::<String>);
@@ -4842,21 +5022,11 @@ fn DeployTab(
         });
     }
 
-    let displayed_commits = {
-        use std::collections::HashSet;
-
-        let mut seen_hashes: HashSet<String> = HashSet::new();
-        commits
-            .iter()
-            .filter(|commit| seen_hashes.insert(commit.hash.clone()))
-            .cloned()
-            .collect::<Vec<_>>()
-    };
     let deploy_notice_value = deploy_notice.read().clone();
 
     let selected_commit_data = displayed_commits
         .iter()
-        .find(|c| c.hash == *selected_commit.read())
+        .find(|c| c.hash == effective_commit)
         .cloned()
         .or_else(|| displayed_commits.first().cloned());
 
@@ -4867,11 +5037,43 @@ fn DeployTab(
             default_generation.and_then(|g| generations.iter().find(|x| x.generation == g).cloned())
         });
 
+    // "Show diff" reads the same per-commit diff as the Flakes view
+    // (`GET /flakes/:id/commits/:sha/diff`): the selected commit against its
+    // parent. The server has no per-system diff, so this is not a diff of the
+    // running configuration against the target. The read runs only while the
+    // diff is open.
+    let diff_flake_id = system.flake.as_ref().map(|flake| flake.id);
+    let diff_request = (show_diff() && mode() == "commit")
+        .then(|| diff_flake_id.zip(selected_commit_data.as_ref().map(|c| c.hash.clone())))
+        .flatten();
+    let commit_diff = use_resource(use_reactive((&diff_request,), |(request,)| async move {
+        let (flake_id, sha) = request?;
+        Some(
+            fetch_commit_diff(flake_id, &sha)
+                .await
+                .map(|response| response.diff)
+                .map_err(|error| error.to_string()),
+        )
+    }));
+
+    // The lane highlights the commit behind the current selection: the
+    // selected commit, or the commit of the selected generation.
+    let lane_pick = if mode() == "generation" {
+        selected_generation_data
+            .as_ref()
+            .and_then(|generation| generation.commit_hash.clone())
+    } else {
+        selected_commit_data
+            .as_ref()
+            .map(|commit| commit.hash.clone())
+    };
+
     // Pre-compute values for the plan panel (outside rsx! to avoid borrow issues)
-    let from_commit = system
-        .flake
-        .as_ref()
-        .and_then(|f| f.latest_commit.clone())
+    // "From" is the commit the host runs (design `bd8d068d`), not the newest
+    // commit of the flake.
+    let from_commit = running_index
+        .and_then(|index| lane_commits.get(index))
+        .map(|commit| commit.sha.clone())
         .unwrap_or_else(|| "unknown".to_string());
     let from_short = from_commit.chars().take(7).collect::<String>();
 
@@ -4886,248 +5088,137 @@ fn DeployTab(
     let is_auto_latest = policy_name == "auto_latest";
     let retry_request_for_button = retry_request.clone();
     let retry_request_for_prompt = retry_request.clone();
+    let gate_policy_commit = policy_name.clone();
+    let gate_policy_generation = policy_name.clone();
+    let cve_critical = system.cve_counts.critical;
+
+    let open_sha = {
+        let flake_summary = flake_summary.clone();
+        let lane_commits = lane_commits.clone();
+        move |sha: String| {
+            let Some(flake) = flake_summary.clone() else {
+                return;
+            };
+            let commit = lane_commits.iter().find(|c| c.sha == sha);
+            on_open_flake_commit.call(FlakeCommitPeekTarget {
+                flake,
+                meta: CommitFocusMeta {
+                    msg: commit.map(|c| c.message.clone()),
+                    author: commit.map(|c| c.author.clone()),
+                    at: commit.map(|c| c.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()),
+                },
+                sha,
+            });
+        }
+    };
+    let open_sha_for_lane = open_sha.clone();
+    let open_sha_for_picker = open_sha.clone();
+    let generations_for_pick = generations.clone();
+    let capture_flake = flake_summary.clone();
 
     rsx! {
         div {
             style: "display:flex;flex-direction:column;gap:14px;",
 
-        // Deploy gate panel — policy evaluation for the selected target.
-        DeployGatePanel {
-            deployment_policy: policy_name.clone(),
-            cve_critical: system.cve_counts.critical,
+        if !lane_draws_deployment {
+            if let Some(progress) = deployment_progress.clone() {
+                PendingDeployBanner {
+                    progress,
+                    hostname: system.hostname.clone(),
+                    heartbeat_interval_secs: system.effective_heartbeat_interval_secs as i64,
+                    heartbeat_next_in_secs,
+                    on_dismiss: move |_| on_dismiss_deploy.call(()),
+                    on_view_logs: move |_| on_view_logs.call(()),
+                }
+            }
+        }
+
+        if position_ready {
+        FlakePositionCard {
+            lane: lane.clone(),
+            hostname: system.hostname.clone(),
+            verb: "running".to_string(),
+            configuration_name: system
+                .system_configuration_name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| system.hostname.clone()),
+            store_path: system.current_store_path.clone(),
+            heartbeat_interval_secs: system.effective_heartbeat_interval_secs as i64,
+            heartbeat_next_in_secs,
+            pick: lane_pick,
+            on_pick: move |commit: FlakePositionCommit| {
+                verify_notice.set(None);
+                on_clear_deploy_notice.call(());
+                // In Generations mode a lane commit that matches a generation
+                // selects that generation; any other commit switches to
+                // Commits mode, as in the design.
+                if mode() == "generation" {
+                    if let Some(generation) = generations_for_pick
+                        .iter()
+                        .find(|g| g.commit_hash.as_deref() == Some(commit.sha.as_str()))
+                    {
+                        selected_generation.set(Some(generation.generation));
+                        return;
+                    }
+                }
+                mode.set("commit".to_string());
+                show_diff.set(false);
+                selected_commit.set(Some(commit.sha));
+            },
+            deploy: deployment_progress.clone(),
+            on_view_logs: move |_| on_view_logs.call(()),
+            on_dismiss_deploy: move |_| on_dismiss_deploy.call(()),
+            on_open_commit: move |commit: FlakePositionCommit| open_sha_for_lane(commit.sha),
+            on_view_history: move |_| on_view_history.call(()),
+            on_capture: move |_| {
+                if let Some(flake) = capture_flake.clone() {
+                    on_open_flake_commit.call(FlakeCommitPeekTarget {
+                        flake,
+                        sha: String::new(),
+                        meta: CommitFocusMeta::default(),
+                    });
+                }
+            },
+        }
+        } else {
+            FlakePositionNotice {
+                loading: matches!(flake_position, FlakePositionRead::Loading),
+                hostname: system.hostname.clone(),
+                hint: "The targets below come from the commit list, ordered by commit time. They carry no branch position, host, or build information.".to_string(),
+            }
         }
 
         div {
             class: "sd-grid sd-grid-deploy",
 
-            // ── Left panel: commit and generation selector ────────────────────────────────
-            section {
-                class: "card sd-card",
-                div {
-                    class: "sd-card-head",
-                    style: "flex-direction: column; align-items: stretch; gap: 12px;",
-                    div {
-                        style: "display: flex; align-items: center; justify-content: space-between; gap: 12px;",
-                        h2 { "Select target" }
-                        span { class: "sd-card-meta mono", "{flake_name}" }
-                    }
-                    div {
-                        class: "seg",
-                        style: "align-self: flex-start;",
-                        button {
-                            class: if mode() == "commit" { "active" } else { "" },
-                            onclick: move |_| {
-                                mode.set("commit".to_string());
-                                show_diff.set(false);
-                                verify_notice.set(None);
-                                on_clear_deploy_notice.call(());
-                            },
-                            svg {
-                                class: "w-3 h-3",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "2",
-                                view_box: "0 0 24 24",
-                                path { d: "M7 7h10M7 12h10M7 17h10M4 7h.01M4 12h.01M4 17h.01" }
-                            }
-                            " New commit"
-                        }
-                        button {
-                            class: if mode() == "generation" { "active" } else { "" },
-                            onclick: move |_| {
-                                mode.set("generation".to_string());
-                                show_diff.set(false);
-                                verify_notice.set(None);
-                                on_clear_deploy_notice.call(());
-                            },
-                            svg {
-                                class: "w-3 h-3",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "2",
-                                view_box: "0 0 24 24",
-                                path { d: "M3 12a9 9 0 1018 0 9 9 0 10-18 0m9-5v5l3 3" }
-                            }
-                            " Previous generation"
-                        }
-                    }
-                }
-
-                if mode() == "commit" {
-                    div {
-                        class: "sd-commit-list",
-                        if displayed_commits.is_empty() {
-                            div {
-                                style: "padding: 16px; color: var(--cf-text-muted); font-size: 13px;",
-                                "No commits available."
-                            }
-                        }
-                        for commit in displayed_commits.iter().cloned() {
-                            {
-                                let is_selected = selected_commit() == commit.hash;
-                                let item_class = if is_selected {
-                                    "sd-commit-item selected focus-ring"
-                                } else {
-                                    "sd-commit-item focus-ring"
-                                };
-                                let commit_hash_for_key = commit.hash.clone();
-                                let commit_hash_for_select = commit.hash.clone();
-                                let commit_hash_for_title = commit.hash.clone();
-                                let short_hash = commit.hash.chars().take(7).collect::<String>();
-                                let commit_message = commit.message.clone();
-                                let commit_message_for_click = commit_message.clone();
-                                let commit_author = commit.author.clone();
-                                let commit_author_for_click = commit_author.clone();
-                                let when_text = {
-                                    let now = chrono::Utc::now();
-                                    let d = now.signed_duration_since(commit.committed_at);
-                                    if d.num_minutes() < 1 {
-                                        "just now".to_string()
-                                    } else if d.num_hours() < 1 {
-                                        format!("{}m ago", d.num_minutes())
-                                    } else if d.num_days() < 1 {
-                                        format!("{}h ago", d.num_hours())
-                                    } else {
-                                        format!("{}d ago", d.num_days())
-                                    }
-                                };
-                                let when_text_for_click = when_text.clone();
-                                let flake_summary_for_click = flake_summary.clone();
-                                rsx! {
-                                    button {
-                                        key: "{commit_hash_for_key}",
-                                        class: "{item_class}",
-                                        onclick: move |_| {
-                                            selected_commit.set(commit_hash_for_select.clone());
-                                            verify_notice.set(None);
-                                            on_clear_deploy_notice.call(());
-                                        },
-                                        span {
-                                            class: "mono sd-commit-sha sd-commit-sha-link",
-                                            title: "Open {commit_hash_for_title} in Flakes",
-                                                onclick: move |evt| {
-                                                    evt.stop_propagation();
-                                                    if let Some(flake) = flake_summary_for_click.clone() {
-                                                    on_open_flake_commit.call(FlakeCommitPeekTarget {
-                                                        flake,
-                                                        sha: commit_hash_for_title.clone(),
-                                                        meta: CommitFocusMeta {
-                                                            msg: Some(commit_message_for_click.clone()),
-                                                            author: Some(commit_author_for_click.clone()),
-                                                            at: Some(when_text_for_click.clone()),
-                                                        },
-                                                    });
-                                                }
-                                            },
-                                            Icon { name: IconName::Git, size: 10 }
-                                            " {short_hash}"
-                                        }
-                                        span {
-                                            class: "sd-commit-msg",
-                                            title: "{commit_message}",
-                                            "{commit_message}"
-                                        }
-                                        span {
-                                            class: "sd-commit-meta mono",
-                                            title: "{commit_author}",
-                                            "{commit_author}"
-                                        }
-                                        span { class: "sd-commit-meta", "{when_text}" }
-                                        if commit.is_current {
-                                            span { class: "chip chip-info", "deployed" }
-                                        } else {
-                                            span { class: "chip chip-healthy", "cached" }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    div {
-                        class: "sd-commit-list",
-                        if generations.is_empty() {
-                            div {
-                                style: "padding: 16px; color: var(--cf-text-muted); font-size: 13px;",
-                                "No historical generations available."
-                            }
-                        }
-                        for generation in generations.iter().cloned() {
-                            {
-                                let is_selected = *selected_generation.read() == Some(generation.generation);
-                                let item_class = if is_selected {
-                                    "sd-commit-item selected focus-ring"
-                                } else {
-                                    "sd-commit-item focus-ring"
-                                };
-                                let gen_num = generation.generation;
-                                let gen_label = format!("#{}", gen_num);
-                                let commit_short = generation
-                                    .commit_hash
-                                    .as_ref()
-                                    .map(|c| c.chars().take(7).collect::<String>());
-                                let generation_commit_hash = generation.commit_hash.clone();
-                                let when_text = {
-                                    let now = chrono::Utc::now();
-                                    let d = now.signed_duration_since(generation.timestamp);
-                                    if d.num_minutes() < 1 {
-                                        "just now".to_string()
-                                    } else if d.num_hours() < 1 {
-                                        format!("{}m ago", d.num_minutes())
-                                    } else if d.num_days() < 1 {
-                                        format!("{}h ago", d.num_hours())
-                                    } else {
-                                        format!("{}d ago", d.num_days())
-                                    }
-                                };
-                                let when_text_for_click = when_text.clone();
-                                let flake_summary_for_click = flake_summary.clone();
-                                rsx! {
-                                    button {
-                                        key: "gen-{gen_num}",
-                                        class: "{item_class}",
-                                        onclick: move |_| {
-                                            selected_generation.set(Some(gen_num));
-                                            verify_notice.set(None);
-                                            on_clear_deploy_notice.call(());
-                                        },
-                                        span { class: "mono sd-commit-sha sd-generation-number", "{gen_label}" }
-                                        span { class: "sd-commit-msg", "generation rollback" }
-                                        if let Some(short) = commit_short {
-                                            span {
-                                                class: "sd-commit-meta mono sd-commit-sha-link",
-                                                onclick: move |evt| {
-                                                    evt.stop_propagation();
-                                                    if let (Some(flake), Some(sha)) = (flake_summary_for_click.clone(), generation_commit_hash.clone()) {
-                                                        on_open_flake_commit.call(FlakeCommitPeekTarget {
-                                                            flake,
-                                                            sha,
-                                                            meta: CommitFocusMeta {
-                                                                msg: Some("(generated commit)".to_string()),
-                                                                author: None,
-                                                                at: Some(when_text_for_click.clone()),
-                                                            },
-                                                        });
-                                                    }
-                                                },
-                                                Icon { name: IconName::Git, size: 10 }
-                                                " {short}"
-                                            }
-                                        } else {
-                                            span { class: "sd-commit-meta mono", "unknown / not in CF" }
-                                        }
-                                        span { class: "sd-commit-meta", "{when_text}" }
-                                        if generation.is_current {
-                                            span { class: "chip chip-healthy", "active" }
-                                        } else {
-                                            span { class: "chip chip-unknown", "rollback" }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            DeployTargetPicker {
+                hostname: system.hostname.clone(),
+                flake_name: flake_name.clone(),
+                commits: lane_commits.clone(),
+                running: picker_running,
+                degraded: !position_ready,
+                generations: generations.clone(),
+                generation_mode: mode() == "generation",
+                selected_commit: effective_commit.clone(),
+                selected_generation: selected_generation(),
+                on_mode: move |generation: bool| {
+                    mode.set(if generation { "generation" } else { "commit" }.to_string());
+                    show_diff.set(false);
+                    verify_notice.set(None);
+                    on_clear_deploy_notice.call(());
+                },
+                on_select_commit: move |sha: String| {
+                    selected_commit.set(Some(sha));
+                    verify_notice.set(None);
+                    on_clear_deploy_notice.call(());
+                },
+                on_select_generation: move |generation: i32| {
+                    selected_generation.set(Some(generation));
+                    verify_notice.set(None);
+                    on_clear_deploy_notice.call(());
+                },
+                on_open_sha: move |sha: String| open_sha_for_picker(sha),
             }
 
             // ── Right panel: deployment plan ───────────────────────────────
@@ -5262,6 +5353,11 @@ fn DeployTab(
                                 }
                             }
 
+                            DeployGatePanel {
+                                deployment_policy: gate_policy_generation.clone(),
+                                cve_critical,
+                            }
+
                             div {
                                 class: "sd-deploy-actions",
                                 button {
@@ -5341,9 +5437,7 @@ fn DeployTab(
                         }
                     } else if let Some(commit) = selected_commit_data {
                         let to_short = commit.hash.chars().take(7).collect::<String>();
-                        let diff_text = commit.diff_summary.clone().unwrap_or_else(|| {
-                            "--- a/nixos/modules/services/nginx.nix\n+++ b/nixos/modules/services/nginx.nix\n@@ -14,7 +14,7 @@\n  services.nginx = {\n    enable = true;\n-   recommendedTlsSettings = false;\n+   recommendedTlsSettings = true;".to_string()
-                        });
+                        let diff_state = commit_diff.read().clone().flatten();
                         let deploy_label = if allow_mutations {
                             format!("Deploy {}", to_short)
                         } else {
@@ -5410,9 +5504,27 @@ fn DeployTab(
                             }
 
                             if show_diff() {
-                                pre {
-                                    class: "sd-diff",
-                                    "{diff_text}"
+                                div { class: "sd-diff-head", "data-testid": "deploy-plan-diff",
+                                    "Changes in "
+                                    span { class: "mono", "{to_short}" }
+                                    " against its parent commit"
+                                }
+                                match diff_state {
+                                    None => rsx! {
+                                        div { class: "sd-diff-note", role: "status", "Loading diff…" }
+                                    },
+                                    Some(Err(error)) => rsx! {
+                                        div { class: "sd-callout sd-callout-danger",
+                                            Icon { name: IconName::Warn, size: 13 }
+                                            div { "Diff unavailable: {error}" }
+                                        }
+                                    },
+                                    Some(Ok(diff)) if diff.trim().is_empty() => rsx! {
+                                        div { class: "sd-diff-note", "This commit has no file changes." }
+                                    },
+                                    Some(Ok(diff)) => rsx! {
+                                        div { class: "sd-diff", DiffViewer { diff } }
+                                    },
                                 }
                             }
 
@@ -5424,6 +5536,11 @@ fn DeployTab(
                                     strong { class: "mono", "{policy_for_callout}" }
                                     " will run before deploy. No agent disconnect expected."
                                 }
+                            }
+
+                            DeployGatePanel {
+                                deployment_policy: gate_policy_commit.clone(),
+                                cve_critical,
                             }
 
                             div {
@@ -5595,54 +5712,39 @@ fn DeployGatePanel(deployment_policy: String, cve_critical: i64) -> Element {
         ),
     ];
 
+    // Compact layout from dev commit bd8d068d (`DeployGatePanel compact`): the
+    // gate renders inside the plan panel, above the deploy actions.
     rsx! {
-        section {
-            class: "card sd-card",
-            style: "display:flex;flex-direction:column;gap:14px;",
-            div {
-                class: "sd-card-head",
-                div {
-                    style: "display:flex;align-items:center;gap:10px;",
-                    h2 { "Deploy gate" }
-                    span { class: "{overall_class}", "{overall_label}" }
-                }
-                span {
-                    class: "sd-card-meta",
+        div { class: "dg-compact", "data-testid": "deploy-gate",
+            div { class: "dg-compact-head",
+                h3 { "Deploy gate" }
+                span { class: "{overall_class}", "{overall_label}" }
+                span { class: "sd-card-meta",
                     "policy: "
                     span { class: "mono", "{deployment_policy}" }
                 }
             }
-
             if overall == "block" {
-                div {
-                    class: "sd-callout sd-callout-danger",
-                    Icon { name: IconName::Warn, size: 13 }
-                    div { style: "font-size:12px;", strong { "Deployment blocked by policy. " } "Resolve the blocking rules below before proceeding." }
-                }
-            } else if overall == "pending" {
-                div {
-                    class: "sd-callout sd-callout-info",
-                    Icon { name: IconName::Shield, size: 13 }
-                    div { style: "font-size:12px;", strong { "Waiting on policy gates. " } "See the cards below for required next actions." }
+                div { class: "sd-callout sd-callout-danger",
+                    Icon { name: IconName::X, size: 13 }
+                    div { style: "font-size:12px;",
+                        strong { "Blocked by policy." }
+                        " Resolve the blocking rules before deploying."
+                    }
                 }
             }
-
-            div {
-                style: "display:grid;grid-template-columns:repeat(auto-fill, minmax(280px,1fr));gap:10px;",
-                for (rule, status_class, _status_label, reason, next) in rules {
-                    div {
-                        style: "padding:12px 14px;border:1px solid var(--cf-divider);border-radius:10px;background:var(--cf-card-bg);display:flex;flex-direction:column;gap:8px;",
-                        div {
-                            style: "display:flex;align-items:center;justify-content:space-between;gap:8px;",
-                            span { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "{rule}" }
-                            span { class: "{status_class}", style: "font-size:10px;", "{_status_label}" }
-                        }
-                        div { style: "font-size:11px;color:var(--cf-text-secondary);line-height:1.5;", "{reason}" }
-                        if let Some(next_text) = next {
-                            div {
-                                style: "font-size:11px;color:var(--cf-text-muted);border-top:1px solid var(--cf-divider);padding-top:6px;margin-top:2px;",
-                                strong { style: "color:var(--cf-text-secondary);", "Next: " }
-                                "{next_text}"
+            div { class: "dg-rules",
+                for (rule, status_class, status_label, reason, next) in rules {
+                    div { class: "dg-rule",
+                        span { class: "dg-rule-name", "{rule}" }
+                        span { class: "{status_class}", "{status_label}" }
+                        if status_label != "pass" {
+                            span { class: "dg-rule-reason", "{reason}" }
+                            if let Some(next_text) = next {
+                                span { class: "dg-rule-next",
+                                    strong { "Next:" }
+                                    " {next_text}"
+                                }
                             }
                         }
                     }
@@ -12495,6 +12597,47 @@ mod tests {
         }
     }
 
+    fn progress(stage: &str) -> crate::api::models::SystemDeploymentProgress {
+        crate::api::models::SystemDeploymentProgress {
+            id: uuid::Uuid::from_u128(7),
+            stage: stage.to_string(),
+            kind: "deploy".to_string(),
+            target_store_path: "/nix/store/x".to_string(),
+            target_commit: None,
+            target_generation: None,
+            source: "manual".to_string(),
+            issued_at: chrono::Utc::now(),
+            delivered_at: None,
+            applying_at: None,
+            completed_at: None,
+            failed_at: None,
+            failure_message: None,
+        }
+    }
+
+    #[test]
+    fn idle_page_does_not_poll() {
+        // The first request is pending: nothing to poll yet.
+        assert!(!super::deployment_is_active(None));
+        // The server answered "no deployment": the resource is Some(None).
+        // This is the regression: it used to count as active.
+        assert!(!super::deployment_is_active(Some(&None)));
+        // A record, including a finished one inside the display window, polls.
+        assert!(super::deployment_is_active(Some(&Some(progress("queued")))));
+        assert!(super::deployment_is_active(Some(&Some(progress(
+            "activated"
+        )))));
+    }
+
+    #[test]
+    fn deployment_key_changes_on_stage_and_clears_when_idle() {
+        let queued = super::deployment_state_key(Some(&Some(progress("queued"))));
+        let applying = super::deployment_state_key(Some(&Some(progress("applying"))));
+        assert!(queued.is_some());
+        assert_ne!(queued, applying);
+        assert_eq!(super::deployment_state_key(Some(&None)), None);
+        assert_eq!(super::deployment_state_key(None), None);
+    }
     #[test]
     fn revision_scope_cve_intent_is_independent_of_presentation_and_other_query_state() {
         let retained = SystemCveInventorySelection::RetainedGeneration {

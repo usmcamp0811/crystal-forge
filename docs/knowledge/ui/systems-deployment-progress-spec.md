@@ -50,6 +50,42 @@ Evidence checked:
 - The paths in the retained guide (`packages/default/src/...`) predate the move to `packages/default/crates/cf-server/` and `packages/default/crates/cf-agent/`. The paths are stale. The migration directory is `packages/default/crates/cf-server/migrations/`.
 - The real Recent activity feed, the 4-second polling rule, the production type-to-confirm guard, and the fixture and check steps were not compared with the code.
 
+## Already-current targets (TASK-453 AC #10, fixed in TASK-525.1)
+
+A deployment can target the store path that the host already runs. For
+example, auto_latest can choose a newer commit that builds an identical
+closure. The agent skips such a target ("Already on target") and reports no
+progress. `record_report_events_tx` in
+`packages/default/crates/cf-server/src/queries/system_events.rs` therefore
+completes a still-`pending` row on the next unchanged agent report when the
+reported store path equals the row's target and the row was issued at or
+before the report. It records `cf_deployment_succeeded` with
+`metadata.already_current = true`. Expired rows are not revived. Before this
+change such a row stayed `picked_up` until its 2-hour expiry.
+
+## Deploy tab placement (TASK-525.1)
+
+Dev commit `bd8d068d` changed where a managed system shows deployment progress
+on its Deploy tab. The System Detail view does not render `PendingDeployBanner`
+while the Deploy tab is active. The flake-position card
+(`packages/web-ui/src/components/system/flake_position.rs`) shows the same
+progress record in deploy mode instead:
+
+- The headline names the action and the target commit or generation. It also
+  shows the distance from the running commit, in commits forward or back.
+- The target node has a `target` or `rollback` pin. The running commit shows
+  `was here` until activation.
+- A stage row under the lane connects the running commit to the target.
+
+`GET /systems/:id/deployment-status` returns a succeeded deployment for 30
+seconds after completion and a failed deployment for 2 minutes. The lane and the
+banner have an X that hides the finished deployment until the page reloads.
+
+The banner and the lane read one stage list (`DEPLOY_STAGES` in
+`pending_deploy_banner.rs`) and one subtext function. The other System Detail
+tabs keep the banner. The `copying` stage is not part of the list until
+TASK-449 adds server-reported copy progress.
+
 ## Related concepts
 
 - [Sidebar badges versus the notification bell](alerts-and-notifications-decision.md)

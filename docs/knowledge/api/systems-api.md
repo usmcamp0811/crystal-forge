@@ -40,6 +40,7 @@ verification and final UI/API alignment remain pending.
 | POST | `/systems/:id/rollback` | Operator+ | Rollback generation |
 | POST | `/systems/:id/sync` | Operator+ | Sync flake |
 | POST | `/systems/:id/cve-scan` | Operator+ | Request the server-resolved scan target with an optional expected-ID precondition |
+| GET | `/systems/:id/flake-position` | Viewer+ | Read the system position in its tracked branch, peers, and build states |
 | GET | `/systems/:id/deployments` | Viewer+ | Deployment history |
 | GET | `/systems/:id/logs` | Viewer+ | Deployment logs |
 | GET | `/systems/:id/evaluated-options` | Viewer+ | Read cached revision options |
@@ -210,6 +211,57 @@ Optional values serialize as null; empty histories as `[]`. Histories follow
 the current flake/configuration association, not every previous association of
 the registration. This response contains no guest observations, deployment
 attestation, Current authority, POA&M mutations, or execution secrets.
+
+## Flake-position read
+
+`GET /api/v1/systems/:id/flake-position` returns the position of one system in
+the tracked branch history of its flake. The System Detail Deploy tab and the
+External/Reference overview draw this response as the flake-position lane.
+
+Authorization is the same as `GET /systems/:id/commits`: Viewer+ with
+environment access (Admin unscoped). A hidden or missing system returns 404.
+The read does not mutate state and grants no deployment, rollback, or policy
+authority.
+
+Response fields:
+
+| Field | Meaning |
+|-------|---------|
+| `flake_id`, `flake_name`, `branch` | Registered flake and tracked branch. `branch` defaults to `main`. Null when the system has no active flake. |
+| `ordering` | `branch_snapshot` when `flakes.snapshot_ready_at` is set; otherwise `commit_timestamp` (newest first). |
+| `commits[]` | Non-archived branch commits from HEAD. Each has `position` (dense index, 0 = HEAD), `sha`, `message`, `author`, `committed_at`, `build_state`, and `peers`. |
+| `running_commit` | Newest returned branch commit whose `nixos` output for this configuration equals the latest observed store path. This is the commit that `view_system_deployment_status` reports. One store path can map to many commits when newer commits do not change the configuration. When no output matches, the value comes from the observational current-revision resolver used by `/systems/:id/commits`. |
+| `running_position` | Index of `running_commit` in `commits`. Null when `unknown_reason` is set. |
+| `unknown_reason` | `no_history`, `not_observed`, `untracked`, `off_branch`, or `beyond_window`. The Web UI derives a separate `configuration_removed` state for External and Reference systems from the configuration-assurance read (`availability = removed`); the endpoint does not return it. |
+| `last_tracked_position` | Newest returned commit whose `nixos` output for this configuration appears in the system's `system_states` history. |
+
+The list has at least 50 commits when the branch has them. It extends to two
+commits after the running commit and never exceeds 500 commits. A running
+commit deeper than 500 commits returns `beyond_window`.
+
+`build_state` describes the `nixos` derivation whose name is the system
+configuration name. `ready` means a build job succeeded and a completed cache
+push exists for the output (even if a retry is queued later). This is the same
+evidence that `view_system_deployment_status` requires for a deployable build.
+`unpublished` means a build job succeeded without that cache push, for example
+a build stuck in pending cache publication. Otherwise `building` is a queued or
+running job, `failed` is failed jobs only, and `not_built` is no build job.
+
+A commit that reuses an existing build (`derivations.reused_from_derivation_id`,
+`reused_build_job_id`) has an alias derivation that can own no job of its own.
+The server reads the build jobs of the commit's derivation, of its physical
+origin, and the job it adopted. A job and its completed cache push belong to the
+derivation that executed the build, which can be a different alias than the
+origin, so publication is checked on the derivation that owns each job. A reused,
+published output reads as `ready`.
+`unknown_reason = not_observed` uses the latest eligible observation, not any
+earlier one: a host whose latest report has no store path is `not_observed`
+even when an older report had one.
+
+`peers` lists other active systems on the same flake whose
+`view_system_deployment_status.current_commit_hash` equals the commit. For a
+non-Admin caller, the list includes only systems in the caller's member
+environments; a system without an environment is visible only to Admin.
 
 ## Latest guest-observation read
 
