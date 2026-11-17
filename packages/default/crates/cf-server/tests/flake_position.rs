@@ -579,7 +579,7 @@ async fn latest_observation_decides_not_observed(pool: PgPool) {
     sqlx::query(
         "INSERT INTO system_states(hostname,store_path,change_reason,timestamp) VALUES \
          ('lane-gap','/nix/store/lane-gap-1','startup', now() - interval '10 minutes'), \
-         ('lane-gap','  ','heartbeat', now() - interval '1 minute')",
+         ('lane-gap','  ','config_change', now() - interval '1 minute')",
     )
     .execute(&pool)
     .await
