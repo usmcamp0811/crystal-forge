@@ -4,7 +4,7 @@ title: Deploy tab flake-position lane, target picker, and flake-position API
 status: In Progress
 assignee: []
 created_date: '2026-11-15T16:11:00Z'
-updated_date: '2026-11-17T01:05:00Z'
+updated_date: '2026-11-17T03:01:00Z'
 labels:
   - web-ui
   - server
@@ -164,4 +164,11 @@ P2-6 picker rows have separate select and open-commit buttons (browser: Tab orde
 P2-7 ready now needs a completed cache push; new unpublished state (AC 2 clarified). P2-8 unplaceable targets fall back to the banner.
 P2-10 HTTP authorization test (403/404/200, peers scoped, hidden = missing); DB tests no longer ignored and added to database-regressions.sh; Delivery fragment asserts keyboard access and the post-activation pin; Assurance fragment asserts the removed last-tracked marker.
 Verification: farm web-ui 878 passed; farm sandbox PostgreSQL: flake_position 6, flake_position_http 1, already_current_deployment 2 = 9 passed. Not yet run locally: Delivery and Assurance fragments (CI owns them). AC checkboxes stay unchecked until the integration owners pass at the review revision.
+
+Second MR review (re-review of f4e140e4), fixed at a80b7708:
+1 reused builds: build and publication state is read from the physical derivation (alias reused_from_derivation_id, adopted reused_build_job_id). DB regression with one alias via its origin and one that adopts the job.
+2 not_observed: presence comes from the latest eligible observation (system_states.store_path is NOT NULL, so absence is a blank value). DB regression: older report with a path, latest blank.
+3 External/Reference overview: explicit loading and unavailable states via shared FlakePositionNotice (compiler-checked; not exercised in a browser because the fixtures hold only managed systems).
+4 AC 9, 10, 14 amended to the implemented fallback banner and the removed-configuration ownership.
+Verification: farm web-ui green at e7c7b74c; farm sandbox PostgreSQL 11 tests passed at a80b7708 (flake_position 8, flake_position_http 1, already_current_deployment 2). Browser (preview): forced 500 on flake-position shows the unavailable card, the progress banner for the active deployment, no running/ahead claims, selection still works; idle page 0 flake-position requests; unknown lane 8 nodes. Not verified: dark/light and narrow-width renders, query plans, Delivery/Assurance fragment execution (CI).
 <!-- SECTION:NOTES:END -->
