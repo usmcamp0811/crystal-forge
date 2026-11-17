@@ -1757,7 +1757,11 @@ pub async fn get_system_cve_inventory_page(
     let triage_states: HashMap<(String, String), String> = if keys.is_empty() {
         HashMap::new()
     } else {
-        let cve_ids = inventory.rows.iter().map(|row| row.cve_id.clone()).collect::<Vec<_>>();
+        let cve_ids = inventory
+            .rows
+            .iter()
+            .map(|row| row.cve_id.clone())
+            .collect::<Vec<_>>();
         let packages = inventory
             .rows
             .iter()
@@ -1781,7 +1785,9 @@ pub async fn get_system_cve_inventory_page(
         {
             Ok(rows) => rows
                 .into_iter()
-                .filter_map(|(cve_id, package, state)| state.map(|state| ((cve_id, package), state)))
+                .filter_map(|(cve_id, package, state)| {
+                    state.map(|state| ((cve_id, package), state))
+                })
                 .collect(),
             Err(_) => return internal_error("Failed to load CVE triage state"),
         }
@@ -4871,6 +4877,23 @@ fn event_history_title(event_type: &str) -> &'static str {
     }
 }
 
+/// Returns the agent-reported reason for a failed deployment event.
+///
+/// The agent sends a redacted message to `/agent/deployment-failed`, and the
+/// server stores it as `metadata.failure_message`. Returns `None` for other
+/// event types and for a missing or blank message.
+fn event_history_failure_message(event_type: &str, metadata: &serde_json::Value) -> Option<String> {
+    if event_type != "cf_deployment_failed" {
+        return None;
+    }
+    metadata
+        .get("failure_message")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(str::to_string)
+}
+
 pub async fn get_system_history(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -4909,7 +4932,8 @@ pub async fn get_system_history(
             .into_iter()
             .map(|row| {
                 let (event_kind, default_actor, outcome) = event_history_kind(&row.event_type);
-                let title = event_history_title(&row.event_type).to_string();
+                let title = event_history_failure_message(&row.event_type, &row.metadata)
+                    .unwrap_or_else(|| event_history_title(&row.event_type).to_string());
                 let actor = row
                     .actor
                     .clone()
@@ -5352,6 +5376,30 @@ mod tests {
         assert_eq!(
             classify_history_event("state_delta", None, false),
             ("state_change", "agent")
+        );
+    }
+
+    #[test]
+    fn event_history_failure_message_uses_agent_reason_for_failures_only() {
+        let metadata = serde_json::json!({ "failure_message": "  copy failed (DNS)  " });
+        assert_eq!(
+            event_history_failure_message("cf_deployment_failed", &metadata).as_deref(),
+            Some("copy failed (DNS)")
+        );
+        assert_eq!(
+            event_history_failure_message("cf_deployment_succeeded", &metadata),
+            None
+        );
+        assert_eq!(
+            event_history_failure_message(
+                "cf_deployment_failed",
+                &serde_json::json!({ "failure_message": " " })
+            ),
+            None
+        );
+        assert_eq!(
+            event_history_failure_message("cf_deployment_failed", &serde_json::Value::Null),
+            None
         );
     }
 

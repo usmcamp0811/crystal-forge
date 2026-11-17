@@ -1943,12 +1943,19 @@ pub async fn list_system_agent_event_rows(
             -- Deployment lifecycle events from the event system
             SELECT
                 se.occurred_at AS timestamp,
-                'info'::text AS level,
+                CASE se.event_type
+                    WHEN 'cf_deployment_failed' THEN 'error'
+                    ELSE 'info'
+                END::text AS level,
                 se.event_type,
                 CASE se.event_type
                     WHEN 'cf_deployment_started'  THEN 'Deployment started — applying new configuration'
                     WHEN 'cf_deployment_succeeded' THEN 'Deployment activated successfully'
-                    WHEN 'cf_deployment_failed'    THEN 'Deployment failed to activate'
+                    -- The agent-reported reason is redacted by the agent before upload.
+                    WHEN 'cf_deployment_failed'    THEN COALESCE(
+                        'Deployment failed: ' || NULLIF(BTRIM(se.metadata->>'failure_message'), ''),
+                        'Deployment failed'
+                    )
                     ELSE se.event_type
                 END AS message,
                 true AS deployment_related

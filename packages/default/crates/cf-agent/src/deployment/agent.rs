@@ -899,11 +899,19 @@ const READ_DIAGNOSTIC_TAIL_BYTES: usize = 64 * 1024;
 /// hint and never an authorization decision.
 ///
 /// Order matters: a signature failure is reported before any transport
-/// category, because the transfer succeeded and only trust failed.
+/// category, because the transfer succeeded and only trust failed. TLS and
+/// HTTP status categories precede generic transport categories, because curl
+/// reports some TLS rejections as a receive failure. Transport needles are the
+/// curl error texts that Nix includes in `unable to download` messages.
 fn classify_read_failure(stderr: &[u8]) -> &'static str {
     let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
-    if has(&["lacks a signature", "lacks a valid signature"]) {
+    if has(&["restricted setting and you are not a trusted user"])
+        && has(&["lacks a signature", "lacks a valid signature"])
+    {
+        "signature verification failed because the Nix daemon ignored the cache signing \
+         key: the agent user is not a trusted Nix user (add it to nix.settings.trusted-users)"
+    } else if has(&["lacks a signature", "lacks a valid signature"]) {
         "signature verification failed: the path is not signed by a configured trusted \
          signing key (check the cache signing public key)"
     } else if has(&[
@@ -922,11 +930,160 @@ fn classify_read_failure(stderr: &[u8]) -> &'static str {
         "TLS verification of the cache server certificate failed (check the cache CA)"
     } else if has(&["http error 401", "http error 403"]) {
         "the cache denied read authorization (HTTP 401 or 403)"
-    } else if has(&["http error 404", "does not exist in binary cache"]) {
+    } else if has(&[
+        "http error 404",
+        "does not exist in binary cache",
+        "is not valid",
+    ]) {
         "the store path or its NAR is missing from the cache"
+    } else if has(&["http error 429"]) {
+        "the cache rate-limited the read (HTTP 429)"
+    } else if has(&[
+        "http error 500",
+        "http error 502",
+        "http error 503",
+        "http error 504",
+    ]) {
+        "the cache server returned a server error (HTTP 5xx)"
+    } else if has(&["couldn't resolve host", "could not resolve host"]) {
+        "DNS resolution of the cache host failed"
+    } else if has(&[
+        "couldn't connect to server",
+        "could not connect to server",
+        "failed to connect",
+        "connection refused",
+        "network is unreachable",
+        "no route to host",
+    ]) {
+        "could not connect to the cache server (connection refused or unreachable)"
+    } else if has(&["timeout was reached", "timed out"]) {
+        "the connection to the cache timed out"
+    } else if has(&[
+        "failure when receiving data from the peer",
+        "failed sending data to the peer",
+        "transferred a partial file",
+        "server returned nothing",
+        "connection reset by peer",
+        "http2 framing layer",
+        "unexpected end-of-file",
+    ]) {
+        "the transfer from the cache was interrupted"
+    } else if has(&["hash mismatch"]) {
+        "the downloaded data did not match its expected hash (corrupt or changed cache \
+         entry)"
+    } else if has(&["no space left on device"]) {
+        "the agent host is out of disk space"
+    } else if has(&["daemon-socket", "cannot connect to socket"]) {
+        "the agent could not reach the local Nix daemon"
+    } else if has(&["permission denied"]) {
+        "a local Nix operation was denied permission (check the agent user's access to \
+         the Nix daemon and its cache directory)"
     } else {
         "Nix failed for an unrecognized reason; details are redacted"
     }
+}
+
+/// Bounds the redacted Nix detail added to a failure report.
+const REDACTED_DETAIL_MAX_LINES: usize = 3;
+const REDACTED_DETAIL_MAX_LINE_CHARS: usize = 300;
+const REDACTED: &str = "****";
+
+/// Returns every credential-bearing value this agent passed to one Nix read.
+///
+/// SECURITY: The list contains the configured and prepared cache URLs, Basic
+/// credentials, and every local credential file path and its parent directory.
+/// [`redact_nix_errors`] masks each value by exact match.
+fn known_read_secrets(
+    cache: &RuntimeCacheConfig,
+    read: &cf_config::cache_credentials::PreparedCacheRead,
+) -> Vec<String> {
+    let mut secrets = vec![cache.cache_url.clone(), read.url.clone()];
+    if let cf_protocol::cache::CacheReadAuth::Basic { username, password } = &cache.read_auth {
+        secrets.push(username.clone());
+        secrets.push(password.clone());
+    }
+    let mut paths: Vec<std::path::PathBuf> = read.ca_certificate_path.iter().cloned().collect();
+    paths.extend(
+        read.nix_settings
+            .iter()
+            .filter(|(_, value)| value.starts_with('/'))
+            .map(|(_, value)| std::path::PathBuf::from(value)),
+    );
+    for path in paths {
+        if let Some(parent) = path.parent() {
+            secrets.push(parent.to_string_lossy().into_owned());
+        }
+        secrets.push(path.to_string_lossy().into_owned());
+    }
+    secrets
+}
+
+/// Returns the last Nix `error:` lines with known and URL-borne secrets masked.
+///
+/// SECURITY: Nix stderr can contain cache URLs, credential file paths, redirect
+/// URLs with signed query parameters, and provider response text. This function
+/// keeps only lines that start with `error:`, masks every `secrets` value by
+/// exact match, removes URL user information, and masks every URL query string.
+/// Secrets shorter than four characters are not matched, so that masking does
+/// not destroy the message; Basic credentials that short are not supported
+/// protection. The output has at most [`REDACTED_DETAIL_MAX_LINES`] lines of
+/// [`REDACTED_DETAIL_MAX_LINE_CHARS`] characters.
+fn redact_nix_errors(stderr: &[u8], secrets: &[String]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let mut secrets: Vec<&str> = secrets
+        .iter()
+        .map(|secret| secret.trim_end_matches('/'))
+        .filter(|secret| secret.len() >= 4)
+        .collect();
+    // Longest first, so a URL is masked before a shorter value inside it.
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    let lines: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("error:"))
+        .map(|line| {
+            // SECURITY: URL scrubbing runs first. Exact masking can replace a
+            // URL scheme, and URL scrubbing then would not find that URL.
+            let mut line = scrub_urls(line);
+            for secret in &secrets {
+                line = line.replace(secret, REDACTED);
+            }
+            line.chars().take(REDACTED_DETAIL_MAX_LINE_CHARS).collect()
+        })
+        .collect();
+    let start = lines.len().saturating_sub(REDACTED_DETAIL_MAX_LINES);
+    lines[start..].join(" | ")
+}
+
+/// Removes user information and masks query strings in every URL in `line`.
+///
+/// A URL starts at `://` and ends at whitespace or a quote character.
+fn scrub_urls(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(index) = rest.find("://") {
+        let (head, tail) = rest.split_at(index + 3);
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '`'))
+            .unwrap_or(tail.len());
+        let (url, after) = tail.split_at(end);
+        let authority_end = url.find(['/', '?', '#']).unwrap_or(url.len());
+        let url = match url[..authority_end].rfind('@') {
+            Some(at) => &url[at + 1..],
+            None => url,
+        };
+        match url.find('?') {
+            Some(query) => {
+                out.push_str(&url[..=query]);
+                out.push_str(REDACTED);
+            }
+            None => out.push_str(url),
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Drains child stderr concurrently and returns only its last bytes.
@@ -1034,9 +1191,15 @@ async fn copy_authenticated_cache(
                             Vec::new()
                         }
                     };
+                    let detail = redact_nix_errors(&tail, &known_read_secrets(&cache, &read));
                     Err(anyhow::anyhow!(
-                        "Authenticated cache copy failed ({}); {status}",
-                        classify_read_failure(&tail)
+                        "Authenticated cache copy failed ({}); {status}{}",
+                        classify_read_failure(&tail),
+                        if detail.is_empty() {
+                            String::new()
+                        } else {
+                            format!("; nix: {detail}")
+                        }
                     ))
                 }
             }
@@ -1400,8 +1563,8 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
         let fixture = Fixture::new(&format!(
             "{PRIVATE_SCRIPT}\n\
              head -c 300000 /dev/zero | tr '\\0' x >&2\n\
-             printf '\\nerror: unable to download %s: secret-provider-body\\n' \"$3\" >&2\n\
-             printf \"error: cannot add path '/nix/store/secret-name' because it lacks a signature by a trusted key\\n\" >&2\n\
+             printf \"\\nerror: unable to download '%s/x.narinfo?X-Amz-Signature=sig-secret': HTTP error 500\\nresponse body:\\nsecret-provider-body\\n\" \"$3\" >&2\n\
+             printf \"error: cannot add path '/nix/store/abc-output' because it lacks a signature by a trusted key\\n\" >&2\n\
              exit 1\n"
         ));
         let error = copy_authenticated_cache(
@@ -1416,9 +1579,17 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
         .to_string();
         assert!(error.contains("signature verification failed"));
         assert!(error.contains("signing public key"));
+        // Redacted Nix error lines are kept; public store path names may appear.
+        // The prepared URL carries mTLS file paths in its query; the query and
+        // the signed redirect parameter are both masked.
+        assert!(
+            error.contains("nix: error: unable to download '****/?****': HTTP error 500"),
+            "{error}"
+        );
+        assert!(error.contains("/nix/store/abc-output"));
         for private in [
             "secret-provider-body",
-            "secret-name",
+            "sig-secret",
             "tls-private-key",
             "tls-certificate",
             "client-key",
@@ -1429,6 +1600,40 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
         }
         let directory = std::fs::read_to_string(fixture.0.join("credentials")).unwrap();
         assert!(!std::path::Path::new(&directory).exists());
+    }
+
+    #[test]
+    fn redacted_nix_errors_mask_known_and_url_secrets() {
+        let stderr = b"warning: noise https://c.example/leak\n\
+            error: unable to download 'https://user:pw@other.example/nar/x?sig=abc': HTTP error 503\n\
+            response body:\nprovider-body\n\
+            error: opening /run/cf-cache-1/netrc: hunter22 rejected\n\
+            error: one\nerror: two\n";
+        let secrets = vec![
+            "https://c.example/".to_string(),
+            "/run/cf-cache-1/netrc".to_string(),
+            "/run/cf-cache-1".to_string(),
+            "hunter22".to_string(),
+            "ab".to_string(),
+        ];
+        let detail = redact_nix_errors(stderr, &secrets);
+        assert_eq!(
+            detail,
+            "error: opening ****: **** rejected | error: one | error: two"
+        );
+        let first = redact_nix_errors(
+            b"error: unable to download 'https://user:pw@other.example/nar/x?sig=abc': HTTP error 503\n\
+              response body:\nprovider-body\n",
+            &secrets,
+        );
+        assert!(
+            first.contains("'https://other.example/nar/x?****': HTTP error 503"),
+            "{first}"
+        );
+        for private in ["user:pw", "sig=abc", "provider-body", "leak"] {
+            assert!(!first.contains(private), "{private} leaked into: {first}");
+        }
+        assert_eq!(redact_nix_errors(b"no error lines", &secrets), "");
     }
 
     #[test]
@@ -1462,6 +1667,51 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
                 "missing from the cache",
             ),
             ("", "unrecognized reason; details are redacted"),
+            (
+                "error: path '/nix/store/x' is not valid",
+                "missing from the cache",
+            ),
+            (
+                "error: unable to download 'https://c/x': HTTP error 429",
+                "rate-limited",
+            ),
+            (
+                "error: unable to download 'https://c/x': HTTP error 502",
+                "HTTP 5xx",
+            ),
+            (
+                "error: unable to download 'https://c/x': Couldn't resolve host name (6)",
+                "DNS resolution",
+            ),
+            (
+                "error: unable to download 'https://c/x': Couldn't connect to server (7)",
+                "could not connect",
+            ),
+            (
+                "error: unable to download 'https://c/x': Timeout was reached (28)",
+                "timed out",
+            ),
+            (
+                "error: unable to download 'https://c/x': Failure when receiving data from the peer (56)",
+                "interrupted",
+            ),
+            ("error: NAR hash mismatch in input", "expected hash"),
+            (
+                "error: writing to file: No space left on device",
+                "out of disk space",
+            ),
+            (
+                "error: cannot connect to socket at '/nix/var/nix/daemon-socket/socket'",
+                "local Nix daemon",
+            ),
+            (
+                "error: opening lock file: Permission denied",
+                "denied permission",
+            ),
+            (
+                "warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user\nerror: path lacks a signature by a trusted key",
+                "not a trusted Nix user",
+            ),
         ] {
             assert!(
                 classify_read_failure(stderr.as_bytes()).contains(expected),

@@ -920,10 +920,27 @@ exit status: 1
 ```
 
 The agent keeps at most the last 64 KiB of Nix stderr in memory and maps it to
-one reason. It never logs or reports the Nix text, because that text can contain
-cache URLs and credential file paths. Output that matches no known pattern gives
-`Nix failed for an unrecognized reason; details are redacted`. Timeout,
-cancellation, `require-sigs`, and credential cleanup are unchanged.
+one reason. Output that matches no known pattern gives
+`Nix failed for an unrecognized reason; details are redacted`.
+
+The agent also appends `; nix: <detail>`. The detail contains at most the last
+three Nix lines that start with `error:`, each cut to 300 characters. Before
+the agent logs or reports the detail, it removes secrets:
+
+- It replaces each value that the agent gave to Nix for this read with `****`.
+  These values are the configured and prepared cache URLs, the Basic username
+  and password, and each credential file path and its parent directory.
+- It removes user information (`user:password@`) from every URL.
+- It replaces every URL query string with `?****`. This removes signed
+  redirect parameters that the agent does not know.
+
+Lines that do not start with `error:` are dropped. Nix prints an HTTP response
+body on separate lines, so provider response text is not kept. Public store
+path names can appear in the detail. Timeout, cancellation, `require-sigs`, and
+credential cleanup are unchanged.
+
+The server stores the reported message. The system History tab shows it as the
+title of the failed deployment, and the Logs tab shows it in an `error` line.
 
 | Reason | Meaning | Check first |
 | --- | --- | --- |
@@ -932,7 +949,18 @@ cancellation, `require-sigs`, and credential cleanup are unchanged.
 | the cache rejected or could not use the client certificate | mTLS authentication failed. | The read client certificate and key (step 3) |
 | the cache denied read authorization (HTTP 401 or 403) | The cache refused the read identity. | The Basic or mTLS identity (step 3) |
 | the store path or its NAR is missing from the cache | The metadata or NAR is absent at the read endpoint. | Steps 2 and 4 |
-| Nix failed for an unrecognized reason | No known pattern matched. | Run the whole sequence |
+| the agent user is not a trusted Nix user | The Nix daemon ignored the cache signing key, so signature verification failed. | Add the agent user to `nix.settings.trusted-users` |
+| the cache rate-limited the read (HTTP 429) | The cache refused requests because of rate limits. | Cache provider limits |
+| the cache server returned a server error (HTTP 5xx) | The cache or a proxy in front of it failed. | Cache server logs |
+| DNS resolution of the cache host failed | The agent host cannot resolve the read URL host. | DNS on the agent host |
+| could not connect to the cache server | The connection was refused or the host is unreachable. | Firewall, routing, and the read URL port |
+| the connection to the cache timed out | No response arrived in time. | Network path to the cache |
+| the transfer from the cache was interrupted | The connection closed during a download. | Proxies and cache server stability |
+| the downloaded data did not match its expected hash | The NAR differs from its narinfo. | Re-push the path (step 4) |
+| the agent host is out of disk space | The local Nix store cannot store the path. | Free space or run garbage collection on the agent host |
+| the agent could not reach the local Nix daemon | The daemon socket is unavailable. | `nix-daemon.service` on the agent host |
+| a local Nix operation was denied permission | The agent user cannot use the daemon or its cache directory. | Agent user permissions |
+| Nix failed for an unrecognized reason | No known pattern matched. | Read the `nix:` detail, then run the whole sequence |
 
 Diagnostic sequence. Run the `curl` and `nix` commands from an administrator
 workstation. Do not install credentials on the agent. Replace each `<placeholder>`

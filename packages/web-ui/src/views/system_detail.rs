@@ -6024,27 +6024,15 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                         false,
                     );
                 }
+                // The agent reports only that the deploy failed and why. It
+                // does not report evaluation, activation, or rollback steps, so
+                // the timeline does not invent them.
                 HistoryEventKind::DeployFailed => {
                     push(
                         0,
-                        "info",
-                        format!(
-                            "[reconstructed timeline] deploy: evaluating configuration @ {sha}"
-                        ),
-                        false,
-                    );
-                    push(
-                        4,
                         "error",
-                        format!("[reconstructed timeline] activation failed: {short_msg}"),
+                        format!("[reconstructed timeline] deploy failed @ {sha}: {short_msg}"),
                         true,
-                    );
-                    push(
-                        6,
-                        "warn",
-                        "[reconstructed timeline] deploy: rolled back to previous generation"
-                            .into(),
-                        false,
                     );
                 }
                 HistoryEventKind::Deploy => {
