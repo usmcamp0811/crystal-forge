@@ -19,8 +19,8 @@ Read system-cves-chunk-1.md in full. Read the parent Systems document's Sections
 1.0, 10, 11.4, and 22. The parent file retains the name systems-view-design-v0.1.md,
 but its internal version must be 0.3 or newer with these decisions. If missing,
 report the missing handoff before edits; do not implement the old head fallback.
-Read docs/design/CrystalForge/components/SystemDetail.jsx and follow its shared
-triage components, including CvesView.jsx, and applicable styles. Use rg and
+Read SystemDetail in docs/design/CrystalForge/crystal-forge.html and follow its
+shared triage components, including CvesView, and inline styles. Use rg and
 bounded source ranges. No subagents, whole-repository review, or broad refactor.
 
 UI AUTHORITY: REQUIRED BEFORE UI EDITS

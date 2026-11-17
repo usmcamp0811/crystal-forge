@@ -31,7 +31,7 @@ Other architecture proposals remain proposals. In particular, schema-0 admission
 
 #### UI design authority
 
-**USER REQUIREMENT:** The owner's Claude design implementation is the UI source of truth. It is not merely a visual reference. Use the screen components, shared components, styles, content hierarchy, and interaction states in `docs/design/CrystalForge/`. For System Detail CVEs, start with `components/SystemDetail.jsx`, then follow its shared triage components and styles.
+**USER REQUIREMENT:** The owner's Claude design implementation is the UI source of truth. It is not merely a visual reference. Use the screen components, shared components, styles, content hierarchy, and interaction states in `docs/design/CrystalForge/crystal-forge.html`. For System Detail CVEs, start with the inline `SystemDetail`, then follow its shared triage components and styles. Commit-pinned source links below preserve the historical review evidence.
 
 This document defines data meaning, provenance, authority, persistence, and refresh behavior. It does not authorize an alternative UI. A required backend state is not permission to add a banner, badge, panel, card, column, button, dialog, tooltip, tab, or workflow. A new DTO field is not automatically a new visible field.
 
@@ -106,9 +106,9 @@ At the last metadata read, pipeline `2875331762` for `58006084` was running. The
 | `docs/evaluation-flake-snapshots.md` | Immutable evaluation artifacts, deployment-bound retained generations, Config reads, inspection, and evidence integrity. | Its older CVE inventory text allows a legacy fallback that current Current-inventory code no longer uses. |
 | `docs/specs/02-backend-api.md`, CVE scan and fleet triage sections | Current and historical inventory selectors, pagination, explicit current-authority states, diagnostics, and remediation API rules. | The updated Current rule is useful, but other Systems consumers do not all use it. The document is not a complete frontend state or source map. |
 | `docs/fleet-cve-triage.md` | CVE/package identity, system subjects, triage decisions, POA&M, and exact-evidence requirements. | It is a domain specification, not a full Systems page specification. |
-| `docs/design/CrystalForge/components/Systems.jsx` | Systems list and preview structure, section order, metadata, and interactions. | It uses mock data and simulated operations. Mock “clean” and deployment assumptions are not trustworthy domain rules. |
-| `docs/design/CrystalForge/components/SystemDetail.jsx` | Detail structure, revision bar, Config and CVE presentation, and triage examples. | Its revision logic uses mock array positions. Its host-override example must not be treated as proof that the same backend feature is implemented. |
-| `docs/design/CrystalForge/components/HardeningTab.jsx` | Revision bar, summary, filter, table, detail modal, and waiver presentation. | It includes local mock mutations, an example actor, placeholder fields, and an unwired export control. |
+| `docs/design/CrystalForge/crystal-forge.html` (`Systems`) | Systems list and preview structure, section order, metadata, and interactions. | It uses mock data and simulated operations. Mock “clean” and deployment assumptions are not trustworthy domain rules. |
+| `docs/design/CrystalForge/crystal-forge.html` (`SystemDetail`) | Detail structure, revision bar, Config and CVE presentation, and triage examples. | Its revision logic uses mock array positions. Its host-override example must not be treated as proof that the same backend feature is implemented. |
+| `docs/design/CrystalForge/crystal-forge.html` (`HardeningTab`) | Revision bar, summary, filter, table, detail modal, and waiver presentation. | It includes local mock mutations, an example actor, placeholder fields, and an unwired export control. |
 
 Sources: [S02], [S03], [S04], [S05], [S06], [S23], [S24], [S25].
 

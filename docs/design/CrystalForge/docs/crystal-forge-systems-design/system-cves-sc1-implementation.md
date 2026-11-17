@@ -64,8 +64,8 @@ the currently running derivation. Hardening keeps its existing selector rules.
 
 ## Design comparison
 
-The approved reference is `components/SystemDetail.jsx`,
-`components/CvesView.jsx`, and `fixtures/system-cves-sc1.js`. Compare at wide
+The approved reference is `crystal-forge.html` in the design root, including
+`SystemDetail`, `CvesView`, and the inline `SC1_CVE_DESIGN` states. Compare at wide
 and narrow widths in dark and light themes. The supported host feedback run
 captured these combinations for mapped-running and unmapped states. The
 authoritative screenshot comparison remains blocked by TASK-440.

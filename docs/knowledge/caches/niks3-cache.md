@@ -16,7 +16,7 @@ implementation_status: implemented
 This guide describes TASK-470's implemented Niks3 support in
 [MR !331](https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/331).
 The UI reference is the
-[Caches view design](../../design/CrystalForge/components/CachesView.jsx).
+[Caches view design](../../design/CrystalForge/crystal-forge.html).
 The upstream protocol reference is [Niks3 v1.6.0](https://github.com/Mic92/niks3/tree/v1.6.0).
 
 ## Supported configuration
