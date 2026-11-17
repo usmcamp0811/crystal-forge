@@ -368,6 +368,41 @@ fn unknown_copy(
     }
 }
 
+/// Card shown in place of the lane while the flake-position read is loading or
+/// after it failed.
+///
+/// Surfaces that show the lane MUST render this instead of dropping the
+/// section, so a failed read is visible and derived fallback data never looks
+/// like authoritative branch position, peers, or build state. `hint` adds a
+/// surface-specific sentence to the unavailable text.
+#[component]
+pub fn FlakePositionNotice(
+    loading: bool,
+    hostname: String,
+    #[props(default)] hint: Option<String>,
+) -> Element {
+    rsx! {
+        section {
+            class: "card sd-card fp-card",
+            "data-testid": "flake-position-card",
+            "data-fp-state": if loading { "loading" } else { "unavailable" },
+            div { class: "fp-summary", role: "status",
+                if loading {
+                    div { class: "fp-headline", "Loading flake position…" }
+                } else {
+                    div { class: "fp-headline", "Flake position unavailable" }
+                    div { class: "fp-sub",
+                        "The server could not load the branch position, other hosts, or build states for {hostname}."
+                        if let Some(hint) = hint {
+                            " {hint}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Deploy-mode state derived from a deployment progress record.
 #[derive(Clone, Debug, PartialEq)]
 struct DeployView {

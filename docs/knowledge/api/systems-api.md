@@ -247,6 +247,14 @@ evidence that `view_system_deployment_status` requires for a deployable build.
 a build stuck in pending cache publication. Otherwise `building` is a queued or
 running job, `failed` is failed jobs only, and `not_built` is no build job.
 
+A commit that reuses an existing build (`derivations.reused_from_derivation_id`,
+`reused_build_job_id`) has an alias derivation with no job or cache push of its
+own. The server reads its build and publication state from the physical
+derivation that it reuses, so a reused, published output reads as `ready`.
+`unknown_reason = not_observed` uses the latest eligible observation, not any
+earlier one: a host whose latest report has no store path is `not_observed`
+even when an older report had one.
+
 `peers` lists other active systems on the same flake whose
 `view_system_deployment_status.current_commit_hash` equals the commit. For a
 non-Admin caller, the list includes only systems in the caller's member

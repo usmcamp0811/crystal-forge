@@ -297,7 +297,10 @@ pub(super) fn ManagementDetail(
                                     if let Some(revision) = &e.selected_revision { p { class: "mg-copy", {revision.message.as_deref().unwrap_or("Commit message unavailable")} } }
                                     EvidenceIdentities { evidence: e.clone() }
                                 }
-                                if let Some(position) = flake_position.read().clone().flatten() {
+                                match flake_position.read().clone() {
+                                    None => rsx! { FlakePositionNotice { loading: true, hostname: system.hostname.clone() } },
+                                    Some(None) => rsx! { FlakePositionNotice { loading: false, hostname: system.hostname.clone() } },
+                                    Some(Some(position)) => {
                                     {
                                         // The lane places the system at the revision of the
                                         // artifact whose evidence is shown. That revision can
@@ -353,6 +356,7 @@ pub(super) fn ManagementDetail(
                                         }
                                     }
                                 }
+                                    }
                                 div { class: "mg-cols",
                                     ControlCard { system: system.clone(), evidence: e.clone(), parent_hostname: parent_hostname.clone() }
                                     if system.management_mode == ManagementMode::External {

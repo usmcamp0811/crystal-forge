@@ -158,11 +158,18 @@ pub async fn fetch_system_flake_position(
                COALESCE(f.snapshot_ready_at IS NOT NULL, false) AS snapshot_ready,
                COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
                  AS configuration_name,
-               EXISTS (
-                 SELECT 1 FROM view_agent_current_system_states state
+               -- INVARIANT: Observation presence comes from the LATEST eligible
+               -- row, the same row the running-commit lookups use. The view
+               -- holds every eligible observation, so an older row with a store
+               -- path must not make a host whose latest report has none look
+               -- observed (`untracked` instead of `not_observed`).
+               COALESCE((
+                 SELECT NULLIF(BTRIM(state.store_path), '') IS NOT NULL
+                 FROM view_agent_current_system_states state
                  WHERE state.hostname = s.hostname
-                   AND NULLIF(BTRIM(state.store_path), '') IS NOT NULL
-               ) AS has_observation
+                 ORDER BY state.timestamp DESC, state.id DESC
+                 LIMIT 1
+               ), false) AS has_observation
         FROM systems s
         LEFT JOIN flakes f ON f.id = s.flake_id AND f.deleted_at IS NULL
         WHERE s.id = $1
@@ -307,14 +314,23 @@ pub async fn fetch_system_flake_position(
             WHEN COUNT(*) FILTER (WHERE bj.status = 'failed') > 0 THEN 'failed'
             ELSE 'not_built'
           END AS build_state
+          -- INVARIANT: Build and publication evidence belongs to the PHYSICAL
+          -- derivation. A commit that reuses an existing build has an alias
+          -- derivation (`reused_from_derivation_id`) that owns no job and no
+          -- cache push of its own, and it can adopt a successful job directly
+          -- (`reused_build_job_id`). Reading only `bj.derivation_id = d.id`
+          -- classified such a commit as `not_built` even when the reused
+          -- output was built and published.
           FROM derivations d
-          JOIN build_jobs bj ON bj.derivation_id = d.id
+          JOIN derivations phys ON phys.id = COALESCE(d.reused_from_derivation_id, d.id)
+          JOIN build_jobs bj
+            ON bj.derivation_id IN (d.id, phys.id) OR bj.id = d.reused_build_job_id
           CROSS JOIN LATERAL (
             SELECT EXISTS (
               SELECT 1 FROM cache_push_jobs cpj
-              WHERE cpj.derivation_id = d.id
+              WHERE cpj.derivation_id = phys.id
                 AND cpj.status = 'completed'
-                AND cpj.store_path = d.store_path
+                AND cpj.store_path = COALESCE(phys.store_path, phys.expected_store_path)
             ) AS published
           ) pub
           WHERE d.commit_id = o.id

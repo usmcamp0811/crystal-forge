@@ -74,7 +74,7 @@ use crate::components::poam::{
 use crate::components::system::config_explorer::ConfigExplorer;
 use crate::components::system::deploy_target_picker::DeployTargetPicker;
 use crate::components::system::flake_position::{
-    FlakePositionCard, LaneModel, LaneUnknown, can_draw_deployment,
+    FlakePositionCard, FlakePositionNotice, LaneModel, LaneUnknown, can_draw_deployment,
 };
 use crate::components::system::{
     AutoLatestDeployEvent, AutoLatestDeployPrompt, AutoLatestDeployState, EditSystemModal,
@@ -5182,23 +5182,10 @@ fn DeployTab(
             },
         }
         } else {
-            section {
-                class: "card sd-card fp-card",
-                "data-testid": "flake-position-card",
-                "data-fp-state": if matches!(flake_position, FlakePositionRead::Loading) { "loading" } else { "unavailable" },
-                if matches!(flake_position, FlakePositionRead::Loading) {
-                    div { class: "fp-summary",
-                        div { class: "fp-headline", "Loading flake position…" }
-                    }
-                } else {
-                    div { class: "fp-summary",
-                        div { class: "fp-headline", "Flake position unavailable" }
-                        div { class: "fp-sub",
-                            "The server could not load the branch position, other hosts, or build states for {system.hostname}. "
-                            "The targets below come from the commit list, ordered by commit time. They carry no branch position, host, or build information."
-                        }
-                    }
-                }
+            FlakePositionNotice {
+                loading: matches!(flake_position, FlakePositionRead::Loading),
+                hostname: system.hostname.clone(),
+                hint: "The targets below come from the commit list, ordered by commit time. They carry no branch position, host, or build information.".to_string(),
             }
         }
 

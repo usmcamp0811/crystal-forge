@@ -468,3 +468,130 @@ async fn running_commit_beyond_the_500_commit_bound_is_reported_not_dropped(pool
         "the running commit is still named"
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn reused_builds_are_classified_through_the_physical_derivation(pool: PgPool) {
+    // Commit 3 built and was published. Commit 4 built, but its cache push is
+    // pending. Commit 1 reuses commit 3's physical derivation; commit 2 reuses
+    // commit 4's physical derivation and also adopts its build job directly.
+    // The alias derivations own no build job or cache push of their own.
+    let fleet = fleet(&pool, true).await;
+    let subject = system(&pool, &fleet, "lane-reuse", fleet.env_a, Some(0)).await;
+    let derivation = |commit_index: usize| {
+        let pool = pool.clone();
+        let commit = fleet.commits[commit_index];
+        async move {
+            sqlx::query_scalar::<_, i32>(
+                "SELECT id FROM derivations WHERE commit_id=$1 AND derivation_name='lane-reuse'",
+            )
+            .bind(commit)
+            .fetch_one(&pool)
+            .await
+            .expect("derivation")
+        }
+    };
+    let (origin_published, origin_pending) = (derivation(3).await, derivation(4).await);
+    let job_of_pending: Uuid = {
+        sqlx::query(
+            "INSERT INTO build_jobs(derivation_id,status) VALUES($1,'success'),($2,'success')",
+        )
+        .bind(origin_published)
+        .bind(origin_pending)
+        .execute(&pool)
+        .await
+        .expect("jobs");
+        sqlx::query_scalar("SELECT id FROM build_jobs WHERE derivation_id=$1")
+            .bind(origin_pending)
+            .fetch_one(&pool)
+            .await
+            .expect("job id")
+    };
+    sqlx::query(
+        "INSERT INTO cache_push_jobs(derivation_id,status,store_path) \
+         SELECT id,'completed',store_path FROM derivations WHERE id=$1",
+    )
+    .bind(origin_published)
+    .execute(&pool)
+    .await
+    .expect("published");
+    sqlx::query(
+        "INSERT INTO cache_push_jobs(derivation_id,status,store_path,error_message) \
+         SELECT id,'pending',store_path,'cache_probe_failed' FROM derivations WHERE id=$1",
+    )
+    .bind(origin_pending)
+    .execute(&pool)
+    .await
+    .expect("pending");
+
+    for (alias_commit, origin, adopted_job) in [
+        (1_usize, origin_published, None),
+        (2_usize, origin_pending, Some(job_of_pending)),
+    ] {
+        let alias = derivation(alias_commit).await;
+        sqlx::query(
+            "UPDATE derivations alias SET derivation_path=origin.derivation_path, \
+                    expected_store_path=origin.store_path, store_path=NULL, \
+                    reused_from_derivation_id=origin.id, reused_build_job_id=$3 \
+             FROM derivations origin WHERE alias.id=$1 AND origin.id=$2",
+        )
+        .bind(alias)
+        .bind(origin)
+        .bind(adopted_job)
+        .execute(&pool)
+        .await
+        .expect("alias derivation");
+    }
+
+    let view = fetch_system_flake_position(&pool, subject, None)
+        .await
+        .expect("read")
+        .expect("system exists");
+    let state = |position: usize| view.commits[position].build_state;
+    assert_eq!(
+        state(3),
+        FlakePositionBuildState::Ready,
+        "origin, published"
+    );
+    assert_eq!(
+        state(4),
+        FlakePositionBuildState::Unpublished,
+        "origin, push pending"
+    );
+    assert_eq!(
+        state(1),
+        FlakePositionBuildState::Ready,
+        "alias of a published origin"
+    );
+    assert_eq!(
+        state(2),
+        FlakePositionBuildState::Unpublished,
+        "alias that adopted the job of an unpublished origin"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn latest_observation_decides_not_observed(pool: PgPool) {
+    // The host once reported a store path, but its latest report has none. The
+    // view holds every eligible row, so presence must come from the latest row.
+    let fleet = fleet(&pool, true).await;
+    let subject = system(&pool, &fleet, "lane-gap", fleet.env_a, None).await;
+    sqlx::query(
+        "INSERT INTO system_states(hostname,store_path,change_reason,timestamp) VALUES \
+         ('lane-gap','/nix/store/lane-gap-1','startup', now() - interval '10 minutes'), \
+         ('lane-gap',NULL,'heartbeat', now() - interval '1 minute')",
+    )
+    .execute(&pool)
+    .await
+    .expect("states");
+
+    let view = fetch_system_flake_position(&pool, subject, None)
+        .await
+        .expect("read")
+        .expect("system exists");
+    assert_eq!(
+        view.unknown_reason,
+        Some(FlakePositionUnknownReason::NotObserved),
+        "an older row with a store path must not make the host look observed"
+    );
+    assert_eq!(view.running_position, None);
+}
