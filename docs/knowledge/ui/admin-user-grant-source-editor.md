@@ -94,6 +94,18 @@ exercise the new `admin-source-grants` browser fragment in the existing
 `integration-access` `lifecycle-local-bootstrap` scenario and retain design
 comparison images. Existing UI unit results do not substitute for that run.
 
+The corrected farm Access gate passed at `2c298432`, including the actual browser
+password/status PATCH, exact source-row preservation, account-only audit checks
+and absence of local fallback after fixture withdrawal. The passing rendered
+modal shows IdP Operator/production memberships with empty, disabled local
+controls, then preserves those sources on reload. The original Role,
+Environments, Password reset and Enabled order and Save/Cancel/Delete hierarchy
+remain; only ownership context and intentional local controls are added. This
+desktop evidence does not establish a full narrow-screen/keyboard/error-state
+matrix or exact-head GitLab CI. The screenshot is retained in the Access
+evidence `browser/admin-source-unrelated-save` directory; detailed artifact
+identifiers and remaining gates are recorded in TASK-529.2.
+
 ## Related concepts
 
 - [Admin console and login views](admin-console-and-login-views.md)

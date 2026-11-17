@@ -299,3 +299,27 @@ HTTP, persistence and audit assertions remain intact. Re-run the full gate befor
 claiming either new browser case passed. The old native core post-check run is
 also confirmed complete with exit 0 (1h51m54s checkPhase), but it is an older
 derivation, not current review-head CI. All six acceptance boxes stay unchecked.
+
+The corrected full Access gate passed on the farm at `2c298432`, including all
+three new source-preservation/withdrawal cases and the Operator UI denial case,
+plus retained admin/environment/profile/session cases. Gate derivation
+`ffr7xr856ak3gb7xf2k4v9z9n5xgri81-cf-it-access-lifecycle-local-bootstrap.drv`,
+output `a30jja298m7c49h70cjy094763bq2zzx-cf-it-access-lifecycle-local-bootstrap`;
+its evidence/meta.json confirms the revision. Screenshot
+`browser/admin-source-unrelated-save/admin-source-unrelated-save-reloaded.png`
+was inspected: effective IdP role/memberships are separate, local drafts remain
+empty and opt-ins unchecked, account disabled as requested and password field
+blank after reload. Original section/action order is retained. The run before
+this pass encountered a farm polkit-unit SIGSEGV before VM startup; that is not
+an application pass and was retried without local compilation or assertion
+reductions. The earlier obsolete-copy test failure remains recorded above.
+
+These farm results address the four concrete review findings at the recorded
+code checkpoints. They are not an exact-head GitLab CI claim, maintainer approval
+or permission to merge. All six acceptance items remain open, MR !345 stays
+Draft, and this task stays In Progress. A fresh normal core/native check for
+`2c298432` is running in tmux window `review-native-core`, log
+`/tmp/opencode/task529-review-native-core.log`; the older completed native run
+is not substituted for it. GitLab's public pipeline endpoint returned 403, so
+exact-head CI remains externally unverified here. The production cutover/source
+classification/recovery rehearsal remains required before delegated access.
