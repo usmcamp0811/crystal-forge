@@ -25,7 +25,7 @@ for (const required of [
 }
 
 const policyEditor = manifest.views.find((view) => view.name === "policy-editor");
-assert.strictEqual(policyEditor.designRef, "docs/design/CrystalForge/components/PolicyEditor.jsx");
+assert.strictEqual(policyEditor.designRef, "docs/design/CrystalForge/crystal-forge.html");
 assert.strictEqual(policyEditor.designMarker.selector, ".pe-shell");
 assert.strictEqual(policyEditor.dioxusMarker.selector, "[data-testid='policy-editor-modal']");
 assert.deepStrictEqual(policyEditor.designActions, [
@@ -37,7 +37,7 @@ assert.deepStrictEqual(policyEditor.dioxusActions, [
 ]);
 
 const poamDetail = manifest.views.find((view) => view.name === "poam-detail");
-assert.strictEqual(poamDetail.designRef, "docs/design/CrystalForge/components/PoamViews.jsx");
+assert.strictEqual(poamDetail.designRef, "docs/design/CrystalForge/crystal-forge.html");
 assert.strictEqual(poamDetail.dioxusRoute, "/compliance");
 assert.strictEqual(poamDetail.designMarker.selector, ".poam-tray");
 assert.strictEqual(poamDetail.dioxusMarker.selector, "[data-testid='poam-detail']");

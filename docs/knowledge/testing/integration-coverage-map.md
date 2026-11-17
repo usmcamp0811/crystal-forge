@@ -830,7 +830,9 @@ normative continuity contract control evidence and permission meaning. The
 continuity specification retains precedence for Current authority. A scoped Git
 comparison found no changes to the four reference components below between
 `6e4ea520` and `dbf50b47`. Exact sections are named in each entry. All design
-paths below are relative to `docs/design/CrystalForge/components/`; all production
+paths below are historical references relative to `docs/design/CrystalForge/components/`
+at those revisions; the current runtime reference is the inline source in
+`docs/design/CrystalForge/crystal-forge.html`. All production
 UI paths are relative to `packages/web-ui/src/` unless a full repository path is
 given. Assurance entries use the existing
 `checks/integration-assurance/scenarios/evidence-remediation-lifecycle` under
@@ -1872,7 +1874,7 @@ Source shorthand is relative to the repository root:
 | A-contract | [Adopted maintenance contract](integration-test-contract.md), Sections 1–4: supported boundary ownership, real-component proof and independently authored facts. Active TASK-490 child acceptance criteria refine the named cases; a new discovery does not silently extend a child task. |
 | A-systems | `docs/design/CrystalForge/docs/crystal-forge-systems-design/{systems-view-design-v0.1,system-cves-chunk-1}.md`: owner decisions, target intent, non-disclosure, read-only reads and UI authority. Only accepted clauses control; AS-BUILT/PROPOSED sections do not. |
 | A-continuity | `docs/design/CrystalForge/cve-poam-evidence-continuity-design-spec.md`, normative product contract, Sections 2, 6–24, 27–29 and 32. It supersedes SC1's older Current-action retention gate where stated. |
-| A-design | `docs/design/CrystalForge/components/`: approved component states referenced below. Mock names and counts may supply authored fixture values, never backend policy or evidence authority. Missing states use D3/D6. |
+| A-design | `docs/design/CrystalForge/crystal-forge.html`: approved component states referenced below, now inline rather than split JSX files. Mock names and counts may supply authored fixture values, never backend policy or evidence authority. Missing states use D3/D6. |
 | E-domain | `docs/knowledge/builders/verified-source-evaluator-contract.md`, `deployment/manual-deployment-queue-contract.md`, `evaluation/evaluation-snapshot-retention-and-rollback.md`, and `ui/system-cves-sc1-contract.md`: inspected mechanism/precedence pointers. Their `implemented` metadata does not approve new requirements. |
 
 Scenario abbreviations use the six composition targets: **L** = Access

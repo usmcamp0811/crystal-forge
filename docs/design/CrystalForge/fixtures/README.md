@@ -1,9 +1,10 @@
 # Crystal Forge — golden fixtures
 
-`crystal-forge.fixtures.json` is a **canonical, deterministic snapshot** of every data
-registry the design example renders from (the `data-*.js` mocks). Use it as the shared
-contract between the HTML design example and your Dioxus port: feed the same JSON into
-both, render, and assert the outputs match.
+`crystal-forge.fixtures.json` preserves the **canonical, deterministic snapshot**
+from the former split design runtime. Existing server seeding, UI screenshot,
+and integration tooling still consume this JSON. Keep it in place until those
+consumers are migrated separately. The current design runtime is
+[`../crystal-forge.html`](../crystal-forge.html), with its own inline fixture data.
 
 - **Deterministic** — generated with a seeded RNG (`_meta.rngSeed = 1337`), so every
   regeneration produces byte-identical output. Safe to commit and diff in CI.
@@ -11,21 +12,15 @@ both, render, and assert the outputs match.
   evaluations, 48 CVEs, 5 flakes (with per-flake commit lists), 13 policies, 4 compliance
   bundles, 5 caches, per-system scan history, and the admin/server registries.
 
-## The design example reads this file too
+## Runtime and fixture ownership
 
-`crystal-forge.html` now loads `crystal-forge.fixtures.js` (a classic-script wrapper that
-sets `window.__CF_FIXTURES` to the exact bytes of the JSON) **before** its `data-*.js`
-modules. Every registry declaration prefers the fixture and falls back to its original
-generator only if the fixture is absent:
+The single HTML embeds its scripts, styles, and fixture data. Editing this JSON
+does not change the design on reload. The former generated JavaScript wrapper
+and split mock modules have been removed. Do not regenerate them.
 
-```js
-const SYSTEMS = (typeof __fx === "function" && __fx("systems")) || HOSTS.map(buildSystem);
-```
-
-So the HTML mock and your Dioxus port read the **same bytes** — edit the JSON and the
-design example reflects it on reload (regenerate the `.js` wrapper afterward; see below).
-This also makes the example fully deterministic (the few `Math.random`-derived fields like
-`storePath` are now frozen to the fixture).
+`system-cves-sc1-check.js` remains an independent browser interaction helper.
+It opens the single HTML and uses its inline `SC1_CVE_DESIGN` states through
+the existing `sc1` query parameter and browser events.
 
 ## Suggested CI use
 
@@ -41,16 +36,10 @@ Two directions — pick whichever is easier for your stack:
 Either way, key each assertion by the stable `id` fields (`sys-*`, `eval-*`, build ids,
 `CVE-*`, `fl-*`, policy ids, bundle ids) — never by array position.
 
-## Regenerating
+## Updating
 
-Two artifacts stay in lockstep and are both derived from the mock's `data-*.js` modules
-(run in load order with `Math.random` seeded to 1337):
-
-- `crystal-forge.fixtures.json` — the canonical golden data (commit this; Dioxus/CI reads it).
-- `crystal-forge.fixtures.js` — a `window.__CF_FIXTURES = <same JSON>` wrapper the HTML loads.
-
-Regenerate both whenever the mock data changes, so the file, the wrapper, and the live
-example never drift. (Ask the assistant to "regenerate fixtures".)
+Changes to this golden JSON require review of its seeding and test consumers.
+Do not replace it with a new export's inline fixtures as part of runtime cleanup.
 
 ## Top-level shape
 

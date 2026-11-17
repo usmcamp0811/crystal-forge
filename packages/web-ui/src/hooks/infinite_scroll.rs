@@ -1,7 +1,7 @@
 //! Infinite-scroll hook for Dioxus WASM.
 //!
 //! Mirrors `useInfiniteScroll(resetKey, pageSize = 30)` from
-//! `docs/design/CrystalForge/components/Shell.jsx`, with the following
+//! `docs/design/CrystalForge/crystal-forge.html`, with the following
 //! behavioural differences from the v1 implementation:
 //!
 //! * Listens on the `.content` scroll container (where Crystal Forge's

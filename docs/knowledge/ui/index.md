@@ -22,6 +22,10 @@
 * [Crystal Forge UI/UX Design Extraction for Figma](figma-design-extraction-snapshot.md) - Records the April 2026 audit of the Crystal Forge web UI: design tokens, page layouts and wireframes, component library, breakpoints, and accessibility state.
 * [Figma Extraction: User Workflows, Design Challenges and Redesign Plan](figma-extraction-workflows-and-redesign-plan.md) - Records the April 2026 analysis of deploy, add-system, and CVE investigation workflows, the design challenges found, the phased Figma redesign recommendations, and the questions prepared for Claude in Figma.
 
+# Operator Guide
+
+* [Single-file Crystal Forge design reference](single-file-design-reference.md) - Import Claude HTML exports into readable inline source, preview without a backend, review useful diffs, and distinguish the mockup from authorization requirements.
+
 # UI Design
 
 * [Admin console and login views](admin-console-and-login-views.md) - Describes the Admin console tabs (users, audit log, OIDC mappings), their authorization, and the production OIDC and dev-mode login flows.

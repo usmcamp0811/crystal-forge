@@ -17,7 +17,7 @@ priority: high
 <!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem
 
-Agent access needs an explicit, bounded authorization contract and a durable remediation-context specification. Token authorization must not expand during POA&M role refresh or continue using stale managed OIDC entitlements. The supplied design export must augment the existing design example without losing legacy functionality.
+Agent access needs an explicit, bounded authorization contract and a durable remediation-context specification. Token authorization must not expand during POA&M role refresh or continue using stale managed OIDC entitlements. The supplied design export supplies the updated reference; the user subsequently approved replacing split runtime assets with a single readable HTML artifact while preserving exported behavior, written contracts and independent fixtures.
 
 ## Goal
 
@@ -52,7 +52,7 @@ No milestone is complete without passing acceptance tests tied to its requiremen
 
 ## Non-goals
 
-This parent does not authorize an unbounded implementation task, deployment, a replacement design application, automatic mutation access, or changes to unrelated backlog locks. Split later milestones into sprint-ready children before implementation.
+This parent does not authorize an unbounded implementation task, deployment, automatic mutation access, or changes to unrelated backlog locks. The user-approved single-file design-reference replacement is scoped to TASK-526.1, not production application replacement. Split later milestones into sprint-ready children before implementation.
 
 ## Architectural constraints
 
@@ -72,7 +72,7 @@ Each child must specify acceptance tests and exact runnable commands before impl
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 TASK-526.1 preserves the full CF-AGENT-ACCESS-001 v1.1 source in the authoritative OKF path and integrates the supplied export additively with verified legacy design parity.
+- [ ] #1 TASK-526.1 preserves the full CF-AGENT-ACCESS-001 v1.1 requirements in the authoritative OKF path and normalizes the supplied export into the user-approved single-file design reference, with preservation checks and explicit design/spec gaps.
 - [ ] #2 M0-M5 each have scoped delivery tasks, traceable specification requirements, acceptance tests, actual passing evidence, and truthful implementation status before milestone completion.
 - [ ] #3 Operator, Viewer, and Admin owner self-service passes without an Admin gate; session+CSRF management and separate admin oversight pass positive and denial tests.
 - [ ] #4 CFAT hash-only storage, mcp audience, explicit environment IDs/scopes, bounded expiry, immutable grants, fresh fail-closed OIDC authority, and transactional revoke/rotate pass security and concurrency acceptance tests.
