@@ -4,7 +4,7 @@ title: Deploy tab flake-position lane, target picker, and flake-position API
 status: In Progress
 assignee: []
 created_date: '2026-11-15T16:11:00Z'
-updated_date: '2026-11-17T03:01:00Z'
+updated_date: '2026-11-17T03:51:00Z'
 labels:
   - web-ui
   - server
@@ -171,4 +171,6 @@ Second MR review (re-review of f4e140e4), fixed at a80b7708:
 3 External/Reference overview: explicit loading and unavailable states via shared FlakePositionNotice (compiler-checked; not exercised in a browser because the fixtures hold only managed systems).
 4 AC 9, 10, 14 amended to the implemented fallback banner and the removed-configuration ownership.
 Verification: farm web-ui green at e7c7b74c; farm sandbox PostgreSQL 11 tests passed at a80b7708 (flake_position 8, flake_position_http 1, already_current_deployment 2). Browser (preview): forced 500 on flake-position shows the unavailable card, the progress banner for the active deployment, no running/ahead claims, selection still works; idle page 0 flake-position requests; unknown lane 8 nodes. Not verified: dark/light and narrow-width renders, query plans, Delivery/Assurance fragment execution (CI).
+
+Third MR review (3e2e8e79), fixed at 20c0cb2e: publication evidence is checked on the derivation that owns each build job (exec), not only the physical origin, because an adopted job can belong to a different alias (derivation_execution_source; reuse admission uses derivation_publication_eligible(source.id)). DB regression with origin A, execution alias B (job+push), adopting alias C: B and C ready, A not_built. Farm sandbox PostgreSQL: 12 tests passed (flake_position 9, flake_position_http 1, already_current_deployment 2).
 <!-- SECTION:NOTES:END -->
