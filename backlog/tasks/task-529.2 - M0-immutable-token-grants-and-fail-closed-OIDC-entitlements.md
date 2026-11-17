@@ -267,3 +267,35 @@ review-provided pipeline, so its status is unverified here, not assumed pending
 or passing. Migration 0335 is unchanged; no schema migration is required by these
 fixes. Do not mark review findings resolved until the corresponding current
 source regressions and required gates actually pass.
+
+Review-fix evidence at `386b0052`: the pinned farm database derivation
+`2xlnaj0w9fjzinzmb0xqpcy74hb8h0q5-cf-oidc-authorization-regressions-0.3.0.drv`
+passed 46 nonignored tests: one restricted-grant case, 21 admin-source/HTTP/
+atomicity cases and 24 OIDC cases. This includes real signed callback races for
+identical/different profiles and the named-index fallback, as well as rollback
+after each mutation/audit failure. Output:
+`g9n649wycnli2lp94fp69cyydql5rqqm-cf-oidc-authorization-regressions-0.3.0`.
+The sandbox PostgreSQL instance stopped cleanly.
+
+The final embedded application farm build passed, output
+`7d1pzdndbwixlv9ybdx0ablc7qqm3x73-cf-server-0.3.0`, deriver
+`cj8hj4k05si56rq77kwwimmwwxl2wpjr`. The earlier WIP application build failed in
+the existing `niks3_probe_failure_never_polls_success_transition` test; its
+failure is not counted as a pass. OKF validation passed 200 concepts and 219
+Mermaid blocks. No migration/checksum or checked SQLx metadata changed.
+
+The preview is now refreshed to the review-fix application at 8529; application
+PID 115127, task PostgreSQL PID 102192/data directory unchanged. Manual browser
+smoke observed only a password field in a separate local-Admin fixture's PATCH,
+HTTP 200 and unchanged grant metadata, with no page/request errors. It is preview
+evidence, not the pure-IdP integration gate. The Users modal screenshot and exact
+ownership proof are in the retained preview handoff/runtime directory.
+
+The first expanded Access run failed before its new write because the test
+expected the obsolete “Effective environments” wording. The reviewed contract
+distinguishes assigned memberships from the Admin browser-role bypass, so the
+assertion now expects “Assigned environment memberships”; all source, payload,
+HTTP, persistence and audit assertions remain intact. Re-run the full gate before
+claiming either new browser case passed. The old native core post-check run is
+also confirmed complete with exit 0 (1h51m54s checkPhase), but it is an older
+derivation, not current review-head CI. All six acceptance boxes stay unchecked.

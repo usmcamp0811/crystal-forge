@@ -38,7 +38,7 @@ exports.run = async (ctx) => {
     const modal = page.getByTestId("edit-user-modal");
     await expect(modal).toBeVisible();
     await expect(modal.getByTestId("effective-role")).toHaveText("Effective role (read-only): Operator");
-    await expect(modal.getByTestId("effective-environments")).toHaveText(`Effective environments (read-only): ${config.environment}`);
+    await expect(modal.getByTestId("effective-environments")).toHaveText(`Assigned environment memberships (read-only): ${config.environment}`);
     await expect(modal.getByTestId("role-sources")).toContainText("Identity provider roles: Operator");
     await expect(modal.getByTestId("role-sources")).toContainText("Local roles: None");
     await expect(modal.getByTestId("role-sources")).toContainText("Unresolved legacy roles: None");
