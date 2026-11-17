@@ -250,6 +250,51 @@ async fn delayed_valid_and_invalid_evidence_cannot_overwrite_newer_success(
 }
 
 #[sqlx::test]
+async fn identity_creation_conflict_cannot_rebind_owner_or_overwrite_claims(
+    pool: PgPool,
+) -> Result<()> {
+    use crystal_forge::queries::auth_identity::create_user_and_bind_external_identity;
+
+    let first_claims = serde_json::json!({"marker": "first-validated-binding"});
+    let first = create_user_and_bind_external_identity(
+        &pool,
+        "oidc-binding-first@example.invalid",
+        Some("First Identity"),
+        "oidc",
+        "stable-binding-conflict",
+        Some("https://identity.example.invalid"),
+        first_claims.clone(),
+    )
+    .await?;
+    let conflicting = create_user_and_bind_external_identity(
+        &pool,
+        "oidc-binding-second@example.invalid",
+        Some("Conflicting Identity"),
+        "oidc",
+        "stable-binding-conflict",
+        Some("https://identity.example.invalid"),
+        serde_json::json!({"marker": "must-not-replace-existing-evidence"}),
+    )
+    .await;
+    assert!(conflicting.is_err());
+    let binding: (Uuid, serde_json::Value) = sqlx::query_as(
+        "SELECT user_id, claims FROM external_identities
+         WHERE provider_key = 'oidc' AND subject = 'stable-binding-conflict'
+           AND tenant_discriminator = 'https://identity.example.invalid'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(binding, (first.id, first_claims));
+    let orphaned: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users WHERE email = 'oidc-binding-second@example.invalid'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(orphaned, 0);
+    Ok(())
+}
+
+#[sqlx::test]
 async fn mapped_environment_names_normalize_before_resolution(pool: PgPool) -> Result<()> {
     let (user_id, identity_id, _) = fixture(&pool).await?;
     let prod: Uuid = sqlx::query_scalar(

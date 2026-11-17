@@ -467,6 +467,16 @@ pub async fn is_user_active(pool: &PgPool, user_id: Uuid) -> Result<bool, AuthRe
     Ok(value.unwrap_or(false))
 }
 
+/// Creates a user and its stable external identity binding atomically.
+///
+/// An identity conflict never moves an existing binding or replaces its claims.
+/// A concurrent first sign-in must retry identity lookup instead of taking over
+/// the winning transaction's user. Profile/entitlement updates use their own
+/// authenticated, source-aware paths.
+///
+/// # Errors
+/// Returns a database error on a user/identity conflict or persistence failure;
+/// the new user and notification preferences roll back with the binding.
 pub async fn create_user_and_bind_external_identity(
     pool: &PgPool,
     email: &str,
@@ -515,12 +525,7 @@ pub async fn create_user_and_bind_external_identity(
     let tenant_key = normalize_tenant_discriminator(tenant_discriminator);
     sqlx::query(
         "INSERT INTO external_identities (user_id, provider_key, subject, tenant_discriminator, claims)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (provider_key, subject, tenant_discriminator)
-         DO UPDATE SET
-             user_id = EXCLUDED.user_id,
-             claims = EXCLUDED.claims,
-             updated_at = NOW()",
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(user_id)
     .bind(provider_key)

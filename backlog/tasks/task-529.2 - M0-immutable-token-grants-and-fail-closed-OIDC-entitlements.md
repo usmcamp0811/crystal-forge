@@ -151,3 +151,26 @@ Static re-review found no remaining blocker in the corrected generation,
 normalization, binding or shared-lock code. This is source review, not runtime
 acceptance. Current requests continue in retained tmux windows `regression`
 and `access`; inspect their exit markers before launching more builds.
+
+Corrected database proof at `89e7689b` passed on the farm: restricted grant 1/1,
+admin sources 10/10, OIDC entitlements 17/17, no ignored tests. Derivation
+`wr5b72gvhllqrrrx2vp543f3zp3x800g-cf-oidc-authorization-regressions-0.3.0.drv`,
+output `ad6wmqavp3y5iqpjaaca6vn8c4chlgyp-cf-oidc-authorization-regressions-0.3.0`.
+The sandbox-owned PostgreSQL instance was stopped after execution. Static SQLx
+metadata audit confirmed no checked query/result shape or cached entry references
+the altered identity/assignment tables; no offline cache update is required.
+
+Final identity-binding review found that the existing first-sign-in creation
+helper could upsert an identity onto a different new user during a conflict.
+Changed it to reject the conflicting insert and roll back the new user and
+preferences. Added an isolated regression asserting the original owner and
+claims remain unchanged and no orphan user persists. This final source change
+requires a fresh farm run; the preceding 28-pass result is not its verification.
+
+Access prerequisite retry additionally encountered signal 6 in farm
+`p5lfir5qd2c1q9hinxn59ga2cp0wm3g5-unit-systemd-oomd.service.drv`; its log had no
+application output. A further farm-only retry is running. No VM case has a
+passing result yet. Core component verification is also still pending after
+the earlier documented failures. The user requested MR creation when ready;
+GitLab CLI API authentication is absent, but authenticated Git push options may
+be used to request an MR after readiness instead of requesting secret tokens.
