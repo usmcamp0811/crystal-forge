@@ -1,3 +1,4 @@
+pub mod authorization;
 pub mod dev_mode;
 pub mod extractors;
 pub mod models;

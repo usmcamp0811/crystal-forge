@@ -8,6 +8,8 @@
 
 # Security Model
 
+* [Credential grant boundaries in POA&M services](credential-grant-groundwork.md) - Partial M0 implementation: immutable restricted grants survive read refresh without Admin wildcard expansion, while unsupported reads, exports and mutations fail closed; PAT admission and OIDC freshness remain release gates.
+
 * [API authentication, sessions, and role-based authorization](api-authentication-and-authorization.md) - Explains cookie-session login, dev-mode login, the Viewer/Operator/Admin roles, authorization middleware, and environment scoping with non-disclosing not-found behavior; open it when changing who may call an API endpoint.
 * [Auth Session Security Strategy](session-cookies-and-csrf.md) - Describes the server-authoritative browser session: cookie names and attributes, hashed token storage, session lifetime and logout invalidation, and the double-submit CSRF protection.
 * [Authentication, authorization, and system registration](authentication-and-authorization-overview.md) - Open for managed enrollment versus keyless external/reference registration, login modes, and environment-scoped roles.

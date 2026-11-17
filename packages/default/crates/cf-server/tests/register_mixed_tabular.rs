@@ -102,6 +102,7 @@ async fn mixed_snapshot_exports_full_sources_and_rejects_combined_overflow(pool:
         .await
         .unwrap();
     let actor = PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id: user,
         identifier: "Mixed Admin".into(),
         is_admin: false,

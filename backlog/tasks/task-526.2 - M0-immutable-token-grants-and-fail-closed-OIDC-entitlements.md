@@ -1,7 +1,7 @@
 ---
 id: TASK-526.2
 title: M0 immutable token grants and fail-closed OIDC entitlements
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-16'
 labels: [security, authorization, oidc, agent-access]
@@ -45,7 +45,7 @@ Required cases: token grant survives POA&M refresh; owner promotion cannot widen
 
 - Impact: server request authorization context, POA&M role refresh, OIDC identity/role mapping and persistence, session-derived authority, tests, and security knowledge contracts.
 - Risk: high; privilege escalation, stale access, accidental removal of unrelated grants, or partial reconciliation.
-- Dependencies: no implementation prerequisite on TASK-271, token issuance, MCP, or design integration. Explicit request requirements are sufficient for this invariant-only groundwork. Use the complete user-provided CF-AGENT-ACCESS-001 v1.1 message dated 2026-11-16 for constants and contracts; TASK-526.1 preserves it at the authoritative spec path. There is no missing-source blocker. Implementation requires normal task preflight and a dedicated worktree; this task remains To Do without an active lock.
+- Dependencies: no implementation prerequisite on TASK-271, token issuance or MCP. TASK-526.1 preserves the complete CF-AGENT-ACCESS-001 v1.1 specification at the authoritative path. This task is now active in its dedicated worktree; legacy OIDC grant ownership/cutover remains a rollout gate, not a missing specification.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -57,3 +57,22 @@ Required cases: token grant survives POA&M refresh; owner promotion cannot widen
 - [ ] #5 Focused component/database tests and the affected existing integration-access authorization scenario pass, including cross-environment denial and all specified failure cases; exact commands and results are recorded.
 - [ ] #6 Public authorization contracts and affected OKF docs describe grant immutability, effective-authority intersection, managed/local ownership, freshness, and fail-closed behavior; required documentation/SQLx validation passes. Full v1.1 alignment and acceptance evidence are required before marking M0 complete.
 <!-- AC:END -->
+
+## Implementation Notes
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: OpenCode on vm-agent in /home/mcamp/code/crystal-forge/TASK-526.2-agent-authorization
+
+User selected implementation on 2026-11-16. Branch `TASK-526.2-agent-authorization` starts at the pushed specification/design checkpoint `f0416e36`, which contains `dev` baseline `bd8d068d` plus the two handoff commits. New worktree verified clean. Integration `dev` has pre-existing untracked locks, task copies and a session file; none will be modified. No `main` worktree exists. Scope is backend authorization groundwork; no browser-visible changes or live database access.
+
+OIDC owner decision: administrator-managed grants remain independent of IdP-managed grants. User has two OIDC accounts, Admin and Operator. Existing grant ownership is ambiguous and MUST NOT be inferred from the Users screenshot, null actor attribution or the displayed `all` environment summary. Preserve existing grants until an explicit classification/cutover decision; unresolved legacy ownership blocks OIDC PAT rollout. Do not claim M0 reconciliation complete while this gate remains. Initial implementation can independently establish immutable authorization-grant semantics and test service refresh.
+
+Verification: focused authorization/POA&M tests using `nix develop`, isolated PostgreSQL only for database tests, existing Access owner scenario where applicable, and `nix build .#okf-knowledge -L`. Record actual commands/results. No milestone is complete yet.
+
+Implementation checkpoint: introduced nonsecret private `RestrictedGrant` fields and explicit `CredentialIdentity` on every PoamActor construction. Four transaction-refreshed readers require mcp audience, both CVE/POA&M read scopes, future expiry and current-owner/original-grant intersection. Restricted actors never inherit Admin wildcard or mutation flags. Unsafe shared-plan reads fail closed; other readers, exports and every restricted mutation are denied until explicit capability/admission policy exists. Browser authentication behavior is unchanged. No token secret, API endpoint, schema migration or OIDC assignment change is included.
+
+Before the user's build-farm-only instruction, focused authorization unit tests passed 2/2 and `cargo check --tests` passed. Subsequent SQLx test/public-contract refinements have not been locally compiled. From that instruction onward, use `nix build --max-jobs 0` only, not local Cargo. Read-only review identified missing Admin-owner mutation/hydration tests and public error contracts; those have been added. `git diff --check` passes. Farm execution and final docs validation pending; no acceptance criterion is marked complete.
+
+Farm checkpoint: `nix build .#okf-knowledge --max-jobs 0 --no-link -L` passed (58 validator tests, 198 concepts, 219 Mermaid blocks). Focused PostgreSQL proof uses a temporary override of the existing core derivation, on the farm only, with a fresh sandbox-owned Unix-socket-only cluster and verified data_directory; no host database is contacted. The first attempt timed out; a transient Nix stale-file-handle evaluation was retried. The next attempt failed because the temporary harness inherited core test selection and exposed an empty database to online SQLx macros. PostgreSQL stopped cleanly. The harness is corrected to use SQLX_OFFLINE and select the exact integration test; the regression itself is not yet claimed passed.
+
+SQLx metadata disposition: no schema or compile-time query-macro changes; the added projection guard uses runtime-bound SQL. No offline metadata regeneration is required for this checkpoint. Token-row validation, fresh OIDC persistence, request-boundary and concurrent admission evidence remain outstanding.
+<!-- SECTION:NOTES:END -->
