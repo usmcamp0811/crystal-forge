@@ -1703,13 +1703,18 @@ pub fn SystemDetailView(
         }
     });
 
-    // The lane re-reads its position while a deployment is in progress, so the
-    // host pin moves to the target after activation.
+    // The lane re-reads its position when a deployment starts, changes stage, or
+    // ends, so the host pin moves to the target after activation.
+    //
+    // CONCURRENCY: The status resource republishes a value on every 4-second
+    // poll, even when nothing changed, so reading it directly would re-run this
+    // read every poll. A memo notifies only when its value changes (PartialEq),
+    // which keeps an idle page from polling this endpoint.
+    let deployment_key =
+        use_memo(move || deployment_state_key(deployment_progress_resource.read().as_ref()));
     let id_for_flake_position = id.clone();
     let flake_position_resource = use_resource(move || {
-        // Re-read when a deployment starts, changes stage, or ends, so the host
-        // pin moves after activation. An idle page does not poll this endpoint.
-        let _deployment_key = deployment_state_key(deployment_progress_resource.read().as_ref());
+        let _ = deployment_key();
         let id = id_for_flake_position.clone();
         async move {
             let system_id = Uuid::parse_str(&id).ok()?;
