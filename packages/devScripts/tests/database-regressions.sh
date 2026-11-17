@@ -441,6 +441,7 @@ SQL
     # Preserve the existing targets and Cargo's failure propagation. Separate
     # compilation/linking from execution to identify a silent boundary.
     for testTarget in \
+      admin_source_grants \
       already_current_deployment \
       assignment_semantics \
       compliance_assignment_zombie_repair \
@@ -451,6 +452,7 @@ SQL
       framework_version_id_lifecycle \
       hardening_admission_migration_upgrade \
       management_mode_migration_upgrade \
+      oidc_entitlements \
       policy_counts_defect \
       policy_editor_phase2 \
       poam_workflows \

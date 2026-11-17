@@ -112,23 +112,33 @@ impl<'a> AuthIdentityRepository<'a> {
         Ok(external_identity)
     }
 
+    /// Adds an independent local role contribution under the user writer lock.
+    ///
+    /// Preserves actor attribution on an existing IdP-only effective row.
+    ///
+    /// # Errors
+    /// Returns a database error if the user is absent or persistence fails.
     pub async fn assign_role(
         &self,
         assignment: &NewRoleAssignment,
     ) -> Result<UserRoleAssignment, AuthRepositoryError> {
+        let mut tx = self.pool.begin().await?;
+        lock_local_grant_owner(&mut tx, assignment.user_id).await?;
         let role_assignment = sqlx::query_as::<_, UserRoleAssignment>(
-            "INSERT INTO user_role_assignments (user_id, role, granted_by_user_id)
-             VALUES ($1, $2, $3)
+            "INSERT INTO user_role_assignments (user_id, role, granted_by_user_id, local_grant)
+             VALUES ($1, $2, $3, true)
              ON CONFLICT (user_id, role)
-             DO UPDATE SET granted_by_user_id = EXCLUDED.granted_by_user_id
+             DO UPDATE SET local_grant = true, legacy_ownership_unresolved = false,
+                 granted_by_user_id = CASE WHEN user_role_assignments.oidc_identity_id IS NULL
+                     THEN EXCLUDED.granted_by_user_id ELSE user_role_assignments.granted_by_user_id END
              RETURNING id, user_id, role, granted_by_user_id, created_at",
         )
         .bind(assignment.user_id)
         .bind(assignment.role)
         .bind(assignment.granted_by_user_id)
-        .fetch_one(self.pool)
+        .fetch_one(&mut *tx)
         .await?;
-
+        tx.commit().await?;
         Ok(role_assignment)
     }
 
@@ -217,7 +227,10 @@ pub async fn find_user_roles(
     repo.list_roles(user_id).await
 }
 
-/// Assign a role to a user.
+/// Adds an independent local role contribution to a user.
+///
+/// # Errors
+/// Returns a database error if the user is absent or persistence fails.
 pub async fn assign_role_to_user(
     pool: &PgPool,
     user_id: Uuid,
@@ -233,26 +246,27 @@ pub async fn assign_role_to_user(
     repo.assign_role(&assignment).await
 }
 
-/// Synchronize a user's role assignment to exactly one role.
+/// Replaces local and unresolved role contributions with one local role.
 ///
-/// Ensures the user has exactly the specified role and removes any others.
-/// Uses a transaction so delete+insert is atomic.
+/// Preserves managed contributions and their actor attribution. This is an
+/// explicit local ownership decision, not the OIDC reconciliation entry point.
+///
+/// # Errors
+/// Returns a database error if the user is absent or persistence fails.
 pub async fn sync_user_role(
     pool: &PgPool,
     user_id: Uuid,
     role: AuthRole,
 ) -> Result<(), AuthRepositoryError> {
     let mut tx = pool.begin().await?;
-
-    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
+    lock_local_grant_owner(&mut tx, user_id).await?;
+    clear_local_contributions(&mut tx, user_id, "user_role_assignments").await?;
 
     sqlx::query(
-        "INSERT INTO user_role_assignments (user_id, role, granted_by_user_id)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (user_id, role) DO NOTHING",
+        "INSERT INTO user_role_assignments (user_id, role, granted_by_user_id, local_grant)
+         VALUES ($1, $2, $3, true)
+         ON CONFLICT (user_id, role) DO UPDATE
+         SET local_grant = true, legacy_ownership_unresolved = false",
     )
     .bind(user_id)
     .bind(role)
@@ -538,25 +552,68 @@ pub async fn get_oidc_mapping_matches(
     Ok(rows)
 }
 
-pub async fn clear_user_role_assignments(
-    pool: &PgPool,
+// CONCURRENCY: All local writers use the same user-first lock as reconciliation
+// and administrator transactions. Never lock assignments before this row.
+async fn lock_local_grant_owner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: Uuid,
-) -> Result<(), AuthRepositoryError> {
-    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
+) -> Result<(), sqlx::Error> {
+    sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE id = $1 FOR UPDATE")
         .bind(user_id)
-        .execute(pool)
+        .fetch_one(&mut **tx)
         .await?;
     Ok(())
 }
 
+// The table name is a private, constant call-site identifier, never user input.
+async fn clear_local_contributions(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    table: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(&format!(
+        "DELETE FROM {table} WHERE user_id = $1 AND oidc_identity_id IS NULL"
+    ))
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(&format!(
+        "UPDATE {table} SET local_grant = false, legacy_ownership_unresolved = false
+         WHERE user_id = $1 AND (local_grant OR legacy_ownership_unresolved)"
+    ))
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Removes local and unresolved role sources, preserving managed sources.
+///
+/// # Errors
+/// Returns a database error if the user is absent or persistence fails.
+pub async fn clear_user_role_assignments(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<(), AuthRepositoryError> {
+    let mut tx = pool.begin().await?;
+    lock_local_grant_owner(&mut tx, user_id).await?;
+    clear_local_contributions(&mut tx, user_id, "user_role_assignments").await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Removes local and unresolved environment sources, preserving managed sources.
+///
+/// # Errors
+/// Returns a database error if the user is absent or persistence fails.
 pub async fn clear_user_environment_memberships(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<(), AuthRepositoryError> {
-    sqlx::query("DELETE FROM user_environment_memberships WHERE user_id = $1")
-        .bind(user_id)
-        .execute(pool)
-        .await?;
+    let mut tx = pool.begin().await?;
+    lock_local_grant_owner(&mut tx, user_id).await?;
+    clear_local_contributions(&mut tx, user_id, "user_environment_memberships").await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -571,19 +628,28 @@ pub async fn get_environment_ids_by_names(
     Ok(ids)
 }
 
+/// Adds a local environment contribution without replacing managed attribution.
+///
+/// # Errors
+/// Returns a database error if the user/environment is absent or persistence fails.
 pub async fn insert_user_environment_membership(
     pool: &PgPool,
     user_id: Uuid,
     environment_id: Uuid,
 ) -> Result<(), AuthRepositoryError> {
+    let mut tx = pool.begin().await?;
+    lock_local_grant_owner(&mut tx, user_id).await?;
     sqlx::query(
-        "INSERT INTO user_environment_memberships (user_id, environment_id, assigned_by_user_id)
-         VALUES ($1, $2, NULL)",
+        "INSERT INTO user_environment_memberships (user_id, environment_id, assigned_by_user_id, local_grant)
+         VALUES ($1, $2, NULL, true)
+         ON CONFLICT (user_id, environment_id) DO UPDATE
+         SET local_grant = true, legacy_ownership_unresolved = false",
     )
     .bind(user_id)
     .bind(environment_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 

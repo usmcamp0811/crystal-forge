@@ -92,7 +92,8 @@ The export does **not** implement Admin token oversight, Access Inspector,
 Server MCP status, Connect agent entry points or new remediation-context panels.
 These remain requirements in
 [CF-AGENT-ACCESS-001 v1.1](../security/agent-access-tokens-mcp-remediation-context.md)
-and TASK-526, not functionality supplied by this export.
+and TASK-529, not functionality supplied by this export. TASK-529.1 tracks the
+design handoff.
 
 The mockup uses local React state and simulated delays, not token APIs or MCP.
 Its random-secret fallback, fixed rotation expiry, partial effective-access

@@ -62,6 +62,35 @@ Failure evidence from tested commit
 database host and missing auth mode; `journals/controller/crystal-forge.journal`
 records `both host and hostaddr are missing`.
 
+## Source-aware administration HTTP boundary (TASK-529.2)
+
+The existing `authorization.py` appends two cases after its original baseline
+assertions, in the same fresh controller VM/database:
+
+- `authorization-admin-replacement-preserves-idp-and-classifies-explicit-category`
+  uses the existing Admin session and matching CSRF cookie/header. Explicit
+  SQL prerequisites give the existing Operator overlapping local/IdP grants,
+  unresolved legacy grants and a local-only membership. Role-only PATCH to
+  Viewer resolves the role category without classifying legacy memberships.
+  Explicit `environments: []` then resolves the membership category. Both writes
+  preserve IdP contributions; PATCH and a subsequent Admin list return effective
+  Operator and the IdP environment, rather than the requested local authority.
+- `authorization-source-union-does-not-admit-operator-admin-mutations` uses the
+  original live Operator session with matching CSRF. Self and cross-user Admin
+  PATCHes return 403 `forbidden` without business, audit-count or source-ownership
+  changes. It restores Operator with empty memberships and removes the injected
+  identity/environments before later fragments.
+
+Authority: approved [CF-AGENT-ACCESS-001 v1.1](../../docs/knowledge/security/agent-access-tokens-mcp-remediation-context.md),
+sections 4.4 (unchanged human-session boundary) and 5.3 (separate local/managed
+ownership), plus the independent administrator/IdP grants decision in TASK-529.2.
+Disposition: extend the existing scenario; retain all earlier assertions. The
+SQL fixtures use the existing VM-only psql mechanism and schema 0335 source
+columns; they supply prerequisites, not the result of the HTTP write.
+This is admin HTTP-boundary coverage, not signed real-OIDC callback,
+freshness/reconciliation or PAT-admission proof. These two cases are implemented
+but **unrun**; the historical passing results above do not cover them.
+
 ## Commands
 
 ```bash

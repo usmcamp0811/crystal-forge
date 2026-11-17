@@ -1,14 +1,14 @@
 ---
-id: TASK-526.2
+id: TASK-529.2
 title: M0 immutable token grants and fail-closed OIDC entitlements
 status: In Progress
 assignee: []
 created_date: '2026-11-16'
 labels: [security, authorization, oidc, agent-access]
-parent_task_id: TASK-526
+parent_task_id: TASK-529
 dependencies: []
 references:
-  - TASK-526
+  - TASK-529
   - docs/knowledge/security/agent-access-tokens-mcp-remediation-context.md
 priority: high
 ---
@@ -45,7 +45,7 @@ Required cases: token grant survives POA&M refresh; owner promotion cannot widen
 
 - Impact: server request authorization context, POA&M role refresh, OIDC identity/role mapping and persistence, session-derived authority, tests, and security knowledge contracts.
 - Risk: high; privilege escalation, stale access, accidental removal of unrelated grants, or partial reconciliation.
-- Dependencies: no implementation prerequisite on TASK-271, token issuance or MCP. TASK-526.1 preserves the complete CF-AGENT-ACCESS-001 v1.1 specification at the authoritative path. This task is now active in its dedicated worktree; legacy OIDC grant ownership/cutover remains a rollout gate, not a missing specification.
+- Dependencies: no implementation prerequisite on TASK-271, token issuance or MCP. TASK-529.1 preserves the complete CF-AGENT-ACCESS-001 v1.1 specification at the authoritative path. This task is now active in its dedicated worktree; legacy OIDC grant ownership/cutover remains a rollout gate, not a missing specification.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -61,6 +61,8 @@ Required cases: token grant survives POA&M refresh; owner promotion cannot widen
 ## Implementation Notes
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: OpenCode on vm-agent in /home/mcamp/code/crystal-forge/TASK-526.2-agent-authorization
+
+Allocation provenance: old TASK-526.2 was a session allocation collision resolved as TASK-529.2 after the origin/dev `881dbc76` rebase; parent is TASK-529. This task remains In Progress with the same lock path. Planned branch: `TASK-529.2-agent-authorization`; the existing branch/worktree have not been renamed. Historical branch names, commit hashes, tmux identifiers and temporary derivation paths below retain their original values. The owner will handle Git/worktree and external references separately.
 
 User selected implementation on 2026-11-16. Branch `TASK-526.2-agent-authorization` starts at the pushed specification/design checkpoint `f0416e36`, which contains `dev` baseline `bd8d068d` plus the two handoff commits. New worktree verified clean. Integration `dev` has pre-existing untracked locks, task copies and a session file; none will be modified. No `main` worktree exists. Scope is backend authorization groundwork; no browser-visible changes or live database access.
 
@@ -81,4 +83,47 @@ Pre-rebase farm proof at `3105dabc`: the corrected focused SQLx derivation passe
 User requested latest-base rebase. Fetched origin/dev to `881dbc76` and rebased cleanly. `git range-diff bd8d068d..3105dabc origin/dev..HEAD` showed all three task patches unchanged; backend checkpoint is now `ccabd80d`. Read the newly merged AGENTS build-farm section. Confirmed Nix configuration `builders = @/etc/nix/machines` and `max-jobs = 0`; subsequent commands use those settings without overrides. User explicitly approved force-with-lease; pushed the rebased branch using an exact expected remote tip `3105dabc829c4b41625386542720ad99d891d1b2`.
 
 Rebased-source verification is running separately in persistent tmux server `cf-task5262`, session `farm`: window 0 owns `nix build .#default.cf-server-core-drv --no-link -L`, window `regression` owns the focused farm-only SQLx derivation from `/tmp/opencode/task-526-poam-regression.nix`. A transient stale-file-handle core evaluation was retried. Inspect panes before starting another copy. Pre-rebase passes do not prove the new base. No local compiler or host PostgreSQL was used after the user's farm-only instruction. Task remains In Progress with every full-M0 acceptance item unchecked.
+Integration HTTP impact (TASK-529.2, owner-selected bounded slice): authority is approved CF-AGENT-ACCESS-001 v1.1 sections 4.4 (unchanged human-session boundary) and 5.3 (separate managed/local ownership), plus the owner's independent administrator/IdP grants decision above. Consumers are Admin user PATCH/list and existing session-derived role guards. Disposition: retain every existing lifecycle-local-bootstrap assertion; extend its existing authorization.py with `authorization-admin-replacement-preserves-idp-and-classifies-explicit-category` and `authorization-source-union-does-not-admit-operator-admin-mutations`. Explicit prerequisite source rows in the fresh scenario VM database distinguish local, IdP and unresolved legacy contributions. Assert role-only classification leaves legacy membership unresolved; explicit environment replacement resolves that category; IdP role/environment survive local removal; requested Viewer returns effective Operator in PATCH and list; the existing Operator session cannot PATCH itself or another user (403 forbidden, no source/business/audit change). Restore the Operator fixture for later fragments. This proves the admin session+CSRF HTTP boundary only, not a signed real-OIDC callback, freshness/reconciliation, PAT admission, immutable token intersection or cross-environment resource denial. No new check, scenario derivation or VM. Focused gate `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` remains unrun by user instruction; no local builds, databases, services or tests were started.
 <!-- SECTION:NOTES:END -->
+
+## OIDC implementation checkpoint (verification pending)
+
+Migration 0335 preserves effective legacy grants and adds independent local/IdP
+source tracking, unresolved ownership, durable sync state and a flow generation.
+New authoritative reconciliation retains independent local sources and replaces
+only the bound identity's source. Valid empty evidence yields an IdP-owned
+Viewer/no managed environments, not retention of removed managed privileges.
+Unknown legacy ownership preserves current browser login/grants without marking
+the identity fresh, including when group evidence is absent.
+
+An ordered database generation is reserved before redirect and stored in the
+server-side OIDC flow. Older callbacks cannot overwrite newer successful grants
+or invalidate a newer sync. User/identity locks, the shared administrator advisory
+lock, pending state and attempt fencing cover cancellation and replacement.
+Admin category replacement resolves legacy ownership as explicit local grants;
+it does not silently classify those grants as IdP-owned.
+
+Callback, strict claims, positive configurable freshness policy (86400-second
+default), source-aware admin writers, fixture role writer, and guarded deletion
+are wired. New PostgreSQL tests cover ownership union, migration, freshness,
+rollback, old evidence, concurrent admin operations and authoritative revocation.
+Two existing Access-owner cases exercise real session/CSRF admin HTTP boundaries.
+These changes are not a PAT issuance API or MCP transport.
+
+Security review found and corrected stale-success ordering, mapped-environment
+normalization and shared administrator lock-order gaps. Formatting/whitespace
+checks pass. Current-source farm compilation and test execution are pending.
+No migration has been applied to the user's database or a persistent preview.
+
+Prior rebased grant-isolation regression passed, output
+`gy7lli6dcvn40jx5ly6qqkzr5zmd5w1d-cf-restricted-authorization-regression-0.3.0`.
+The normal core build at that checkpoint failed 18 library tests: 16 parser
+deadline/validation failures tracked by the upstream TASK-526, plus the two Niks3
+failures captured in TASK-530. It is not a passing package result. Current
+OIDC-specific tests and the extended Access scenario still require farm results.
+
+Task IDs were renumbered because origin/dev independently allocated TASK-526.
+Active branch is now `TASK-529.2-agent-authorization`; the worktree path and
+retained tmux socket still use the original 526.2 allocation. The previous pushed
+526.2 branch remains historical. User requests an MR when the scoped work and
+required checks are ready; do not move to Review or claim M0 completion yet.

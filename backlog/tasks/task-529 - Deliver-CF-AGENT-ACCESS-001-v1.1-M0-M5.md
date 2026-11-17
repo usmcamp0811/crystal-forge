@@ -1,5 +1,5 @@
 ---
-id: TASK-526
+id: TASK-529
 title: Deliver CF-AGENT-ACCESS-001 v1.1 M0-M5
 status: Backlog
 assignee: []
@@ -21,7 +21,9 @@ Agent access needs an explicit, bounded authorization contract and a durable rem
 
 ## Goal
 
-Deliver CF-AGENT-ACCESS-001 v1.1 through M0-M5, with acceptance-test evidence for every milestone. The authoritative specification destination is `docs/knowledge/security/agent-access-tokens-mcp-remediation-context.md`. The local export `/home/mcamp/code/crystal-forge/crystal-forge.html` is a design reference, not the security authority. TASK-526.1 preserves the full specification and integrates the design; TASK-526.2 begins the independent M0 authorization groundwork. Both children were selected for the sprint by explicit user delegation; TASK-526.1 is now In Progress in its dedicated worktree, while TASK-526.2 remains To Do.
+Deliver CF-AGENT-ACCESS-001 v1.1 through M0-M5, with acceptance-test evidence for every milestone. The authoritative specification destination is `docs/knowledge/security/agent-access-tokens-mcp-remediation-context.md`. The local export `/home/mcamp/code/crystal-forge/crystal-forge.html` is a design reference, not the security authority. TASK-529.1 preserves the full specification and integrates the design; TASK-529.2 begins the independent M0 authorization groundwork. Both children were selected for the sprint by explicit user delegation and are In Progress in their existing dedicated worktrees. This parent remains Backlog.
+
+Allocation provenance: our old TASK-526, TASK-526.1 and TASK-526.2 names were session allocation collisions resolved after rebasing onto origin/dev at `881dbc76`. TASK-526 belongs to the existing farm parser-deadline task. The delivery family is now TASK-529, TASK-529.1 and TASK-529.2. Historical commit hashes, branch names and worktree paths remain provenance; the owner will handle Git renaming separately.
 
 ## Required delivery contract
 
@@ -39,7 +41,7 @@ Deliver CF-AGENT-ACCESS-001 v1.1 through M0-M5, with acceptance-test evidence fo
 
 This is the backlog coverage map; preserve the user-provided source specification's exact milestone requirements and numbering rather than silently rewriting them.
 
-- **M0 — Authorization groundwork:** immutable grant/context separation; fail-closed OIDC managed entitlement reconciliation and freshness; regression and acceptance tests. TASK-526.2.
+- **M0 — Authorization groundwork:** immutable grant/context separation; fail-closed OIDC managed entitlement reconciliation and freshness; regression and acceptance tests. TASK-529.2.
 - **M1 — Reusable PAT service and UI:** hash-only credentials, explicit scopes/environment IDs, `mcp` audience, bounded expiry, session+CSRF management, transactional revoke/rotate, Operator-first Profile self-service and Connect agent entry points, negative/race and local/OIDC browser tests.
 - **M2 — Read-only MCP:** four specified tools, protocol and authorization contracts, cross-environment isolation, secret redaction, and no mutation side effects.
 - **M3 — Remediation context/provenance:** exact context/evidence contracts and TASK-271 attribution integration, including unknown and stale evidence tests.
@@ -52,7 +54,7 @@ No milestone is complete without passing acceptance tests tied to its requiremen
 
 ## Non-goals
 
-This parent does not authorize an unbounded implementation task, deployment, automatic mutation access, or changes to unrelated backlog locks. The user-approved single-file design-reference replacement is scoped to TASK-526.1, not production application replacement. Split later milestones into sprint-ready children before implementation.
+This parent does not authorize an unbounded implementation task, deployment, automatic mutation access, or changes to unrelated backlog locks. The user-approved single-file design-reference replacement is scoped to TASK-529.1, not production application replacement. Split later milestones into sprint-ready children before implementation.
 
 ## Architectural constraints
 
@@ -66,13 +68,13 @@ Each child must specify acceptance tests and exact runnable commands before impl
 
 - Impact: identity/authorization, OIDC, POA&M context refresh, token persistence/API, MCP, CVE provenance, design examples, Web UI, audit, and OKF.
 - Risk: high; stale authority, credential disclosure, environment leakage, role escalation, and credential lifecycle races.
-- Dependencies: TASK-526.1 and TASK-526.2 are first slices. TASK-271 is a provenance integration dependency, not a prerequisite for independent M0 policy work. Later tasks must identify exact predecessor milestones.
+- Dependencies: TASK-529.1 and TASK-529.2 are first slices. TASK-271 is a provenance integration dependency, not a prerequisite for independent M0 policy work. Later tasks must identify exact predecessor milestones.
 - Source: user-provided CF-AGENT-ACCESS-001 v1.1 message dated 2026-11-16, available in the main agent's conversation. The previous missing-source claim was incorrect due to incomplete delegation context. Use the complete source for exact tool contracts, numerical expiry/freshness limits, and milestone mapping; this backlog summary is not the full specification.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 TASK-526.1 preserves the full CF-AGENT-ACCESS-001 v1.1 requirements in the authoritative OKF path and normalizes the supplied export into the user-approved single-file design reference, with preservation checks and explicit design/spec gaps.
+- [ ] #1 TASK-529.1 preserves the full CF-AGENT-ACCESS-001 v1.1 requirements in the authoritative OKF path and normalizes the supplied export into the user-approved single-file design reference, with preservation checks and explicit design/spec gaps.
 - [ ] #2 M0-M5 each have scoped delivery tasks, traceable specification requirements, acceptance tests, actual passing evidence, and truthful implementation status before milestone completion.
 - [ ] #3 Operator, Viewer, and Admin owner self-service passes without an Admin gate; session+CSRF management and separate admin oversight pass positive and denial tests.
 - [ ] #4 CFAT hash-only storage, mcp audience, explicit environment IDs/scopes, bounded expiry, immutable grants, fresh fail-closed OIDC authority, and transactional revoke/rotate pass security and concurrency acceptance tests.

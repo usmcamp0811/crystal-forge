@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
@@ -361,44 +361,123 @@ pub async fn count_enabled_admins(pool: &PgPool) -> Result<i64> {
     Ok(count)
 }
 
-pub async fn clear_user_roles(pool: &PgPool, user_id: Uuid) -> Result<()> {
-    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
-        .bind(user_id)
-        .execute(pool)
+/// Serializes OIDC grant reconciliation and guarded administrator mutations.
+///
+/// All callers MUST acquire shared advisory lock `(526, 2)` before locking a
+/// user, identity or assignment. Guard counts then see committed grant changes
+/// from the preceding holder without locking other users or assignment rows.
+/// Authoritative IdP revocation may remove the final managed Admin; this lock
+/// orders guard decisions but MUST NOT preserve revoked managed authority.
+///
+/// # Errors
+/// Returns an error if the transaction cannot acquire the advisory lock.
+pub(crate) async fn lock_admin_grant_changes(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(526, 2)")
+        .execute(&mut **tx)
         .await?;
     Ok(())
 }
 
+async fn lock_user_guard(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<Option<UserDeleteGuardRow>> {
+    // Read assignments in a new statement after any wait on the user lock.
+    let exists = sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+        .bind(user_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    if exists.is_none() {
+        return Ok(None);
+    }
+    Ok(sqlx::query_as::<_, UserDeleteGuardRow>(
+        "SELECT u.is_active,
+                EXISTS(SELECT 1 FROM user_role_assignments ura
+                       WHERE ura.user_id = u.id AND ura.role = 'admin') AS has_admin_role
+         FROM users u WHERE u.id = $1 FOR UPDATE OF u",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+async fn enabled_admin_count(tx: &mut Transaction<'_, Postgres>) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users u WHERE u.is_active
+         AND EXISTS(SELECT 1 FROM user_role_assignments ura
+                    WHERE ura.user_id = u.id AND ura.role = 'admin')",
+    )
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+// Explicit replacement classifies only this category. Delete source-less rows
+// before clearing flags so the source CHECK holds at every statement boundary.
+async fn clear_local_roles(tx: &mut Transaction<'_, Postgres>, user_id: Uuid) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM user_role_assignments WHERE user_id = $1 AND oidc_identity_id IS NULL",
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE user_role_assignments SET local_grant = false, legacy_ownership_unresolved = false
+         WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Removes local and unresolved legacy role sources, retaining managed roles.
+///
+/// Does not classify environment ownership or enforce the last-admin guard.
+/// Administrator role replacement should use the guarded atomic replacement.
+///
+/// # Errors
+/// Returns an error on database failure; all changes roll back together.
+pub async fn clear_user_roles(pool: &PgPool, user_id: Uuid) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    lock_user_guard(&mut tx, user_id).await?;
+    clear_local_roles(&mut tx, user_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Disables a user unless this removes the last enabled effective Admin.
+///
+/// # Errors
+/// Returns an error on database failure without committing a partial mutation.
 pub async fn disable_user_with_admin_guard(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<GuardedMutationOutcome> {
     let mut tx = pool.begin().await?;
-
-    let active_admin_ids = sqlx::query_scalar::<_, Uuid>(
-        "SELECT u.id
-         FROM users u
-         JOIN user_role_assignments ura ON ura.user_id = u.id
-         WHERE u.is_active = TRUE AND ura.role = 'admin'
-         FOR UPDATE",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-
-    if active_admin_ids.len() <= 1 {
-        tx.rollback().await?;
+    lock_admin_grant_changes(&mut tx).await?;
+    let Some(target) = lock_user_guard(&mut tx, user_id).await? else {
+        return Ok(GuardedMutationOutcome::NotFound);
+    };
+    if target.is_active && target.has_admin_role && enabled_admin_count(&mut tx).await? <= 1 {
         return Ok(GuardedMutationOutcome::GuardrailViolation);
     }
-
     sqlx::query("UPDATE users SET is_active = FALSE WHERE id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
-
     tx.commit().await?;
     Ok(GuardedMutationOutcome::Applied)
 }
 
+/// Replaces local and unresolved role sources with one explicit local role.
+///
+/// Retains IdP contributions and their actor attribution on overlapping rows.
+/// Classifies roles only, leaving unresolved environment ownership unchanged.
+/// The optional guard checks the final effective union, so a managed Admin
+/// survives a local Viewer replacement. Production admin callers enable it.
+///
+/// # Errors
+/// Returns an error on database failure; removal and insertion roll back together.
 pub async fn replace_user_primary_role_with_admin_guard(
     pool: &PgPool,
     user_id: Uuid,
@@ -408,31 +487,20 @@ pub async fn replace_user_primary_role_with_admin_guard(
 ) -> Result<GuardedMutationOutcome> {
     let mut tx = pool.begin().await?;
 
-    if enforce_last_admin_guard {
-        let active_admin_ids = sqlx::query_scalar::<_, Uuid>(
-            "SELECT u.id
-             FROM users u
-             JOIN user_role_assignments ura ON ura.user_id = u.id
-             WHERE u.is_active = TRUE AND ura.role = 'admin'
-             FOR UPDATE",
-        )
-        .fetch_all(&mut *tx)
-        .await?;
-
-        if active_admin_ids.len() <= 1 {
-            tx.rollback().await?;
-            return Ok(GuardedMutationOutcome::GuardrailViolation);
-        }
-    }
-
-    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
+    lock_admin_grant_changes(&mut tx).await?;
+    let Some(target) = lock_user_guard(&mut tx, user_id).await? else {
+        return Ok(GuardedMutationOutcome::NotFound);
+    };
+    clear_local_roles(&mut tx, user_id).await?;
 
     sqlx::query(
-        "INSERT INTO user_role_assignments (user_id, role, granted_by_user_id)
-         VALUES ($1, $2, $3)",
+        "INSERT INTO user_role_assignments
+         (user_id, role, granted_by_user_id, local_grant, legacy_ownership_unresolved)
+         VALUES ($1, $2, $3, true, false)
+         ON CONFLICT (user_id, role) DO UPDATE SET
+             local_grant = true, legacy_ownership_unresolved = false,
+             granted_by_user_id = CASE WHEN user_role_assignments.oidc_identity_id IS NULL
+                 THEN EXCLUDED.granted_by_user_id ELSE user_role_assignments.granted_by_user_id END",
     )
     .bind(user_id)
     .bind(role)
@@ -440,46 +508,41 @@ pub async fn replace_user_primary_role_with_admin_guard(
     .execute(&mut *tx)
     .await?;
 
+    if enforce_last_admin_guard
+        && target.is_active
+        && target.has_admin_role
+        && enabled_admin_count(&mut tx).await? == 0
+    {
+        tx.rollback().await?;
+        return Ok(GuardedMutationOutcome::GuardrailViolation);
+    }
+
     tx.commit().await?;
     Ok(GuardedMutationOutcome::Applied)
 }
 
+/// Deletes a user and owned grants before deleting linked identities.
+///
+/// Preserves audit event identifiers and clears references from surviving grants.
+/// Rejects deletion of the last enabled effective Admin.
+///
+/// # Errors
+/// Returns an error on database failure; deletion rolls back atomically.
 pub async fn delete_user_with_admin_guard(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<GuardedMutationOutcome> {
     let mut tx = pool.begin().await?;
 
-    let active_admin_ids = sqlx::query_scalar::<_, Uuid>(
-        "SELECT u.id
-         FROM users u
-         JOIN user_role_assignments ura ON ura.user_id = u.id
-         WHERE u.is_active = TRUE AND ura.role = 'admin'
-         FOR UPDATE",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-
-    let guard_row = sqlx::query_as::<_, UserDeleteGuardRow>(
-        "SELECT u.is_active,
-                EXISTS(
-                    SELECT 1 FROM user_role_assignments ura
-                    WHERE ura.user_id = u.id AND ura.role = 'admin'
-                ) AS has_admin_role
-         FROM users u
-         WHERE u.id = $1
-         FOR UPDATE",
-    )
-    .bind(user_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    lock_admin_grant_changes(&mut tx).await?;
+    let guard_row = lock_user_guard(&mut tx, user_id).await?;
 
     let Some(guard_row) = guard_row else {
         tx.rollback().await?;
         return Ok(GuardedMutationOutcome::NotFound);
     };
 
-    if guard_row.is_active && guard_row.has_admin_role && active_admin_ids.len() <= 1 {
+    if guard_row.is_active && guard_row.has_admin_role && enabled_admin_count(&mut tx).await? <= 1 {
         tx.rollback().await?;
         return Ok(GuardedMutationOutcome::GuardrailViolation);
     }
@@ -502,6 +565,19 @@ pub async fn delete_user_with_admin_guard(
     .bind(user_id)
     .execute(&mut *tx)
     .await?;
+
+    // INVARIANT: Source foreign keys restrict identity removal. Remove owned
+    // effective grants first, even though user deletion also cascades them.
+    for table in [
+        "user_role_assignments",
+        "user_environment_memberships",
+        "external_identities",
+    ] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE user_id = $1"))
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+    }
 
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
@@ -577,6 +653,14 @@ pub async fn validate_environment_names_exist(
     Err(format!("Unknown environment(s): {}", missing.join(", ")))
 }
 
+/// Replaces local and unresolved environment sources, retaining IdP membership.
+///
+/// An empty list explicitly resolves only environment ownership. Role sources
+/// remain unchanged. Retained managed rows keep their original actor attribution.
+///
+/// # Errors
+/// Returns an error for unknown environments, missing users or database failures.
+/// All membership changes roll back together on failure.
 pub async fn replace_user_environment_memberships(
     pool: &PgPool,
     user_id: Uuid,
@@ -596,11 +680,30 @@ pub async fn replace_user_environment_memberships(
         .await
         .map_err(|_| "Failed to start membership update".to_string())?;
 
-    sqlx::query("DELETE FROM user_environment_memberships WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&mut *tx)
+    if lock_user_guard(&mut tx, user_id)
         .await
-        .map_err(|_| "Failed to update environment memberships".to_string())?;
+        .map_err(|_| "Failed to lock membership owner".to_string())?
+        .is_none()
+    {
+        return Err("User not found".to_string());
+    }
+
+    sqlx::query(
+        "DELETE FROM user_environment_memberships WHERE user_id = $1 AND oidc_identity_id IS NULL",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| "Failed to update environment memberships".to_string())?;
+
+    sqlx::query(
+        "UPDATE user_environment_memberships
+         SET local_grant = false, legacy_ownership_unresolved = false WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| "Failed to classify environment memberships".to_string())?;
 
     if normalized.is_empty() {
         tx.commit()
@@ -632,8 +735,13 @@ pub async fn replace_user_environment_memberships(
 
     for env in resolved {
         sqlx::query(
-            "INSERT INTO user_environment_memberships (user_id, environment_id, assigned_by_user_id)
-             VALUES ($1, $2, $3)",
+            "INSERT INTO user_environment_memberships
+             (user_id, environment_id, assigned_by_user_id, local_grant, legacy_ownership_unresolved)
+             VALUES ($1, $2, $3, true, false)
+             ON CONFLICT (user_id, environment_id) DO UPDATE SET
+                 local_grant = true, legacy_ownership_unresolved = false,
+                 assigned_by_user_id = CASE WHEN user_environment_memberships.oidc_identity_id IS NULL
+                     THEN EXCLUDED.assigned_by_user_id ELSE user_environment_memberships.assigned_by_user_id END",
         )
         .bind(user_id)
         .bind(env.id)

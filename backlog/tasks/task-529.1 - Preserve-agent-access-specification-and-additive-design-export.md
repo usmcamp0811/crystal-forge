@@ -1,14 +1,14 @@
 ---
-id: TASK-526.1
+id: TASK-529.1
 title: Preserve agent-access specification and single-file design export
 status: In Progress
 assignee: []
 created_date: '2026-11-16'
 labels: [security, specification, design, okf]
-parent_task_id: TASK-526
+parent_task_id: TASK-529
 dependencies: []
 references:
-  - TASK-526
+  - TASK-529
   - docs/knowledge/security/agent-access-tokens-mcp-remediation-context.md
   - /home/mcamp/code/crystal-forge/crystal-forge.html
 priority: high
@@ -43,7 +43,7 @@ Follow existing OKF schema/index patterns and Mermaid rules. Preserve source req
 
 - Impact: the canonical security concept, security indexes/cross-links, and `docs/design/CrystalForge` example assets and interactions.
 - Risk: medium; lost specification detail, misleading implementation status, or regression from replacing a bundled design.
-- Dependencies: parent TASK-526 provides the delivery scope; local export is available and has been inspected as an HTML bundle. No dependency on M0 implementation.
+- Dependencies: parent TASK-529 provides the delivery scope; local export is available and has been inspected as an HTML bundle. No dependency on M0 implementation.
 - Source: user-provided CF-AGENT-ACCESS-001 v1.1 message dated 2026-11-16, available in the main agent's conversation. The earlier missing-source claim resulted from incomplete delegation context and is incorrect. Use that complete message for preservation and comparison; do not reconstruct the specification from this backlog summary. There is no missing-source blocker.
 <!-- SECTION:DESCRIPTION:END -->
 
@@ -60,11 +60,13 @@ Follow existing OKF schema/index patterns and Mermaid rules. Preserve source req
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: OpenCode on vm-agent in /home/mcamp/code/crystal-forge/TASK-526.1-agent-access-design
 
+Allocation provenance: old TASK-526.1 was a session allocation collision resolved as TASK-529.1 after the origin/dev `881dbc76` rebase; parent is TASK-529. Status remains In Progress. The lock path and historical branch below retain their original names; Git/worktree renaming is owner-managed.
+
 Activated on 2026-11-16 by explicit user direction. Dedicated worktree verified clean before backlog mirroring; branch `TASK-526.1-agent-access-design`, base `dev` at `bd8d068dc287d222baeea9c7336363a03da55371`. User subsequently approved single-file runtime replacement, legacy runtime cleanup, static-only preview and regular commits/pushes. Specification is recorded; design migration is underway. No runtime milestone or security test has been marked complete.
 
 Checkpoint: specification and task records committed as `43b27c53` and pushed to origin. Default SSH port 22 timed out; command-scoped Git URL rewriting to GitLab's alternate SSH endpoint on port 443 succeeded without changing persistent Git configuration.
 
-Design comparison: 65 existing bundled resources matched byte-for-byte; new Access Tokens source plus a Profile insertion after Active sessions. Normalized 67 resources, 71 scripts and one unchanged CSS block into readable HTML. Removed 75 split/duplicate runtime assets and repointed current test/design consumers; written contracts, review assets and independently consumed golden JSON remain. No existing Profile section was reordered or merged by the export. The supplied export lacks admin oversight, inspector, MCP status, Connect agent shortcuts and remediation panels; TASK-526 M1–M3 retains these obligations. The mockup is not evidence of backend authorization.
+Design comparison: 65 existing bundled resources matched byte-for-byte; new Access Tokens source plus a Profile insertion after Active sessions. Normalized 67 resources, 71 scripts and one unchanged CSS block into readable HTML. Removed 75 split/duplicate runtime assets and repointed current test/design consumers; written contracts, review assets and independently consumed golden JSON remain. No existing Profile section was reordered or merged by the export. The supplied export lacks admin oversight, inspector, MCP status, Connect agent shortcuts and remediation panels; TASK-529 M1–M3 retains these obligations. The mockup is not evidence of backend authorization.
 
 Verification so far: six importer unit tests pass; exact normalization/idempotency and script order/content/CSS preservation pass; manifest contracts and reference resolution pass; consent banner extraction is byte-identical; web-ui oracle/derivation Nix evaluation passes. Browser smoke passed Profile navigation, create, one-time reveal acknowledgement and resulting row with zero page errors/failed requests. Full persona/mobile/legacy-flow matrix remains unverified. Static preview is `http://127.0.0.1:8526/crystal-forge.html`, task-owned loopback PID 28238, no DB/backend.
 

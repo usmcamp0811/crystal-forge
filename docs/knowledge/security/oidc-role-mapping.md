@@ -1,7 +1,7 @@
 ---
 type: Operator Guide
 title: "OIDC Role Mapping Configuration"
-description: "Describes how an OIDC login maps token groups to the Admin, Operator, and Viewer roles and to environment memberships through database group mappings, the bootstrap admin group, the Viewer default, and troubleshooting; open it when configuring OIDC access."
+description: "Describes database group mappings, source-aware OIDC role and environment replacement, independent local overrides, legacy classification, and login troubleshooting."
 tags:
   - crystal-forge
   - auth
@@ -33,11 +33,24 @@ sources:
   - id: code-6
     resource: "Crystal Forge repository file modules/nixos/crystal-forge/default.nix at commit 3b23d36f"
     title: NixOS OIDC options
+  - id: current-reconciliation
+    resource: packages/default/crates/cf-server/src/queries/oidc_entitlements.rs
+    title: TASK-529.2 source-aware reconciliation
+  - id: current-callback
+    resource: packages/default/crates/cf-server/src/handlers/api/auth_oidc.rs
+    title: TASK-529.2 ordered callback reconciliation
 ---
 
 # OIDC Role Mapping Configuration
 
-Crystal Forge maps the groups in an OIDC token to a local role and to environment memberships on every OIDC login. The mapping lives in the **database table `oidc_group_mappings`**. An Admin edits it through the Web UI or the admin API.
+Crystal Forge maps validated OIDC groups to IdP-owned roles and environment
+memberships on login. The mapping lives in **`oidc_group_mappings`**. An Admin
+edits it through the Web UI or admin API. Independent local overrides survive
+IdP reconciliation. This guide describes implemented source in TASK-529.2;
+current-source farm verification is pending. The historical source references
+above retain provenance for the earlier guide, not proof of current behavior.
+See [OIDC entitlement ownership](oidc-entitlement-ownership.md) for the partial
+PAT groundwork and upgrade procedure.
 
 > **Not used:** The environment variables `CRYSTAL_FORGE_ROLE_MAPPING` and `CRYSTAL_FORGE_DEFAULT_ROLE`, and any "safe-deny" behavior that they describe, do not affect login. The file `auth/role_mapping.rs` exists in the source tree, but `auth/mod.rs` does not declare it as a module, so the build does not compile it. Do not set those variables.
 
@@ -53,37 +66,53 @@ Three roles exist:
 
 ```mermaid
 flowchart TD
-    A[OIDC callback with token claims] --> B[Read the roles claim]
-    B --> C[Trim and lowercase each group]
-    C --> D[Look up group_name in oidc_group_mappings]
-    D --> E{Any mapping with a role?}
-    E -- yes --> F[Replace all role assignments with the highest mapped role]
-    E -- no --> G{User has existing roles?}
-    G -- yes --> H[Keep existing roles]
-    G -- no --> I[Assign Viewer]
-    F --> J[Resolve mapped environments]
-    H --> J
-    I --> J
-    J --> K{Any mapping and every mapped environment exists?}
-    K -- yes --> L[Replace environment memberships]
-    K -- no --> M[Keep existing memberships]
-    L --> N[Create session]
-    M --> N
+    A[Reserve database generation before redirect] --> B[Validate flow and token then bind identity]
+    B --> C{Newer generation accepted?}
+    C -- no --> X[Deny login without changing newer state]
+    C -- yes --> D[Commit pending attempt]
+    D --> E{Active owner and exactly one linked identity?}
+    E -- no --> Y[Deny login and fence failure]
+    E -- yes --> F{Unresolved legacy grants?}
+    F -- yes --> G[Preserve grants and mark legacy unresolved]
+    G --> N[Create browser session without fresh PAT eligibility]
+    F -- no --> H{Valid authoritative group evidence?}
+    H -- no --> Y
+    H -- yes --> I[Normalize groups and lock matching database mappings]
+    I --> J[Select highest mapped role or Viewer]
+    J --> K{All mapped environments active and known?}
+    K -- no --> Y
+    K -- yes --> L[Atomically replace only IdP contributions and stamp valid sync]
+    L --> M[Create browser session with effective local and IdP union]
 ```
 
-1. **Read groups.** The server reads the claim named by the OIDC `roles_claim` setting (default `groups`). It accepts an array of strings, a single string, or a comma-separated string. A dotted claim name such as `realm_access.roles` reads a nested value.
-2. **Normalize.** The server trims each group and converts it to lower case. It drops empty values.
-3. **Match.** The server selects the rows of `oidc_group_mappings` whose `group_name` equals a normalized group.
-4. **Assign the role.**
-   - If at least one matching row has a role, the server deletes **all** of the user's role assignments and assigns the highest mapped role. The order is Admin, then Operator, then Viewer.
-   - If no matching row has a role and the user has no roles, the server assigns **Viewer**.
-   - If no matching row has a role and the user has roles, the server keeps them unchanged.
-5. **Assign environments.** See [Environment memberships](#environment-memberships).
-6. **Create the session.** The server **never rejects** a login because no group matches. It rejects a login only for token or account errors, for example an invalid ID token (HTTP 401) or an email that the provider did not verify (HTTP 403).
+1. **Validate and order.** The callback validates flow/token evidence and binds
+   provider, subject and issuer. It reuses the generation reserved before
+   redirect. Older callbacks cannot restore rights or overwrite newer state.
+2. **Check compatibility.** Exactly one external identity is supported, counting
+   all providers. Multiple linked identities deny login. Unresolved legacy grants
+   preserve existing rights and login even if group evidence is missing, but
+   remain not fresh. Binding, activity and generation checks still apply.
+3. **Read groups for managed reconciliation.** The `roles_claim` setting defaults
+   to `groups`. Arrays must contain only strings; single/comma-separated strings
+   and dotted paths such as `realm_access.roles` are supported. An empty array or
+   blank string is valid empty evidence. Missing, null or malformed evidence
+   denies managed login with HTTP 403; it is not an empty successful mapping.
+4. **Normalize and match.** Trim and ASCII-lowercase groups, drop empty values,
+   then match normalized `oidc_group_mappings.group_name` values.
+5. **Replace managed rights.** Select the highest mapped role: Admin, Operator,
+   otherwise Viewer. Replace only this identity's IdP contributions. No matched
+   role means OIDC-owned Viewer, not retention of the previous managed role.
+   See [Environment memberships](#environment-memberships).
+6. **Commit then issue the session.** Managed grants, claims and successful sync
+   time commit atomically before session creation. Failure rolls back that
+   transaction and leaves fenced invalid/pending freshness. Local rights survive.
 
-**Consequence:** A user whose groups match nothing signs in as Viewer with no environment membership. A Viewer with no membership sees no environment-scoped data. This is access control by scope, not a login denial.
-
-**Removed groups.** Roles change only when a mapping matches. A user who loses every mapped group keeps the last assigned role. To remove access, an Admin changes the user's roles directly.
+**Removed groups.** Valid empty groups or no matching mappings remove obsolete
+IdP rights and yield managed Viewer with no managed environments. Effective
+rights still include local overrides. An Admin's explicit reassignment creates
+a local override; later IdP group removal does not revoke it. The last-Admin
+guard cannot retain revoked IdP Admin rights, so plan independent recovery before
+cutover: final IdP Admin removal can leave zero Admins.
 
 ## Mapping records
 
@@ -92,7 +121,7 @@ Each row of `oidc_group_mappings` has:
 | Column | Meaning |
 | --- | --- |
 | `group_name` | Normalized group name. Unique. |
-| `role` | `admin`, `operator`, `viewer`, or empty. An empty role leaves the role unchanged and may still map environments. |
+| `role` | `admin`, `operator`, `viewer`, or empty. An empty role contributes no role; if no match contributes Admin or Operator, managed role defaults to Viewer. It may still map environments. |
 | `environments` | Environment names for membership. May be empty. |
 
 A group name has at most 128 characters. It may contain only letters, numbers, `-`, `_`, `.`, `:`, and `/`. **A group name with a space is invalid.** The server stores the name in lower case.
@@ -113,19 +142,27 @@ The NixOS option `services.crystal-forge.server.oidc.bootstrapAdminGroup` sets `
 
 ## Environment memberships
 
-A mapping can list environment names. The server replaces the user's environment memberships only when **all** these conditions hold:
+A mapping can list environment names. A successful managed reconciliation
+replaces this identity's entire environment contribution with the normalized,
+deduplicated union from current matching mappings. No matches or no environment
+names means **no managed memberships**. Independent local memberships survive,
+including overlap on the same effective row.
 
-- At least one mapping matched.
-- The matched mappings list at least one environment.
-- Every listed environment name exists.
-
-If a listed environment does not exist, the server logs a warning and keeps the existing memberships. If no mapping matched, or none lists an environment, the server also keeps them.
+Every mapped environment must exist and be active. Unknown or inactive names
+deny reconciliation and login; rollback is not a successful preserve-old-access
+fallback. Unresolved legacy grants use the separate compatibility path above
+until explicit category-by-category classification.
 
 ## Configuration
 
 Configure the OIDC client with the NixOS options under `services.crystal-forge.server.oidc`. The claim that holds groups has this option:
 
 - `rolesClaim`: sets `CRYSTAL_FORGE_OIDC_ROLES_CLAIM`. The default is `groups`.
+- `entitlementMaxAgeSeconds`: sets
+  `CRYSTAL_FORGE_OIDC_ENTITLEMENT_MAX_AGE_SECONDS`. Default 86400 (24 hours),
+  integer range 1 through 4294967295 seconds. This bounds future OIDC-owned PAT
+  eligibility, not existing browser session TTL. The helper is not yet wired to
+  PAT admission; see [freshness policy](oidc-entitlement-ownership.md#freshness-policy-and-future-pat-boundary).
 
 Microsoft Entra ID commonly sends app roles in the `roles` claim, so set `rolesClaim = "roles"` for Entra. Keycloak can send nested realm roles in `realm_access.roles`.
 
@@ -170,31 +207,42 @@ A group named `authentik Admins` contains a space and cannot be a mapping name. 
 ## Testing role mapping
 
 1. Log in with OIDC.
-2. Check the server log. The server logs the number of groups, the number of matched mappings, and the assigned role. It logs group names at debug level only.
-3. Check the database:
-
-   ```sql
-   SELECT u.email, r.role
-   FROM users u
-   JOIN user_role_assignments r ON u.id = r.user_id;
-   ```
+2. Check the effective role and memberships through existing admin controls and
+   review login/reconciliation logs. Do not log raw identity claims or secrets.
+3. In an approved isolated rehearsal, verify source flags and sync state as well
+   as effective rights. Effective rights alone do not prove IdP ownership or
+   freshness. Follow the [upgrade procedure](oidc-entitlement-ownership.md#one-time-upgrade-procedure)
+   before classifying existing accounts. Current-source farm execution remains
+   pending; a manual login is not full M0 acceptance evidence.
 
 ## Troubleshooting
 
 **The user signs in as Viewer and sees nothing**
-- The token carries no groups, or no group matches a mapping. The server logs `No groups found in OIDC token claims` or `no matching group-to-role mappings found`.
+- Valid empty groups or no matching mapping produces managed Viewer without
+  managed environments. Missing/malformed groups instead deny managed login.
 - Check that the provider sends the claim, and that `rolesClaim` names it.
 - Check that `oidc_group_mappings.group_name` equals the lower-case group value.
 
 **The role does not update after a group change**
 - Roles update on login. The user must sign out and sign in.
-- A removed group does not lower a role (see [Removed groups](#what-happens-at-login)).
+- Check independent local overrides or unresolved legacy ownership. Removed
+  managed groups lower managed authority on successful reconciliation; local
+  overrides survive until explicitly removed.
 
 **Environment access does not change**
-- Every environment name in the mapping must exist. One unknown name keeps the old memberships.
+- Every mapped environment must exist and be active; otherwise login fails and
+  freshness does not advance. Check local overlap and unresolved ownership if
+  effective memberships survive a successful empty managed replacement.
+
+**Login fails after upgrade**
+- Check group claim shape, active mapped environments, owner/identity binding,
+  stale flow generation and multiple linked identities. The legacy compatibility
+  path does not support multi-identity linkage. Use the preverified recovery path
+  rather than retaining revoked IdP privileges or fabricating a successful sync.
 
 ## Related concepts
 
 - [Session cookies and CSRF](session-cookies-and-csrf.md): the session created after a successful login.
+- [OIDC entitlement ownership and freshness](oidc-entitlement-ownership.md): source union, locking, failure fencing and upgrade runbook.
 - [OIDC provider compatibility validation](oidc-provider-compatibility-validation.md): provider claim shapes tested against role extraction.
 - [API authentication, sessions, and role-based authorization](api-authentication-and-authorization.md): roles and environment scoping.

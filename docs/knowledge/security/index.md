@@ -1,14 +1,15 @@
 # Design Specification
 
-* [Agent Access Tokens, MCP, and Remediation Context](agent-access-tokens-mcp-remediation-context.md) - Proposed CF-AGENT-ACCESS-001 v1.1 contract for Operator-owned tokens, immutable environment grants, MCP tools, OIDC freshness, evidence, provenance, and additive UI requirements; not implemented runtime behavior.
+* [Agent Access Tokens, MCP, and Remediation Context](agent-access-tokens-mcp-remediation-context.md) - Proposed CF-AGENT-ACCESS-001 v1.1 contract for Operator-owned tokens, immutable environment grants, MCP tools, OIDC freshness, evidence, provenance, and additive UI requirements; delivery TASK-529 and design handoff TASK-529.1; not implemented runtime behavior.
 
 # Operator Guide
 
-* [OIDC Role Mapping Configuration](oidc-role-mapping.md) - Describes mapping OIDC groups to the Admin, Operator, and Viewer roles through environment variables, highest-privilege selection, safe-deny behavior, provider examples, and troubleshooting; read the status note before relying on it.
+* [OIDC Role Mapping Configuration](oidc-role-mapping.md) - Configures database group mappings, managed role/environment replacement, Viewer fallback, independent local overrides and legacy-login limitations; current-source farm verification is pending.
 
 # Security Model
 
-* [Credential grant boundaries in POA&M services](credential-grant-groundwork.md) - Partial M0 implementation: immutable restricted grants survive read refresh without Admin wildcard expansion, while unsupported reads, exports and mutations fail closed; PAT admission and OIDC freshness remain release gates.
+* [Credential grant boundaries in POA&M services](credential-grant-groundwork.md) - Partial M0 implementation in TASK-529.2: immutable restricted grants survive read refresh without Admin wildcard expansion; source-aware OIDC groundwork exists, while PAT admission, token-row validation and acceptance evidence remain release gates.
+* [OIDC entitlement ownership and freshness](oidc-entitlement-ownership.md) - Partial source implementation: local/IdP union, legacy classification, ordered callback reconciliation, failure fencing, future-PAT eligibility and one-time upgrade/recovery procedure; helper not wired to PAT admission and farm verification pending.
 
 * [API authentication, sessions, and role-based authorization](api-authentication-and-authorization.md) - Explains cookie-session login, dev-mode login, the Viewer/Operator/Admin roles, authorization middleware, and environment scoping with non-disclosing not-found behavior; open it when changing who may call an API endpoint.
 * [Auth Session Security Strategy](session-cookies-and-csrf.md) - Describes the server-authoritative browser session: cookie names and attributes, hashed token storage, session lifetime and logout invalidation, and the double-submit CSRF protection.

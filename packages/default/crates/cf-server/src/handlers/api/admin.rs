@@ -22,7 +22,7 @@ use crate::handlers::api::rbac::{extract_request_origin, require_admin as requir
 use crate::models::auth_identity::AuthRole;
 use crate::models::retry_policy::{AutomaticRetryPolicy, RetryPolicyValidationError};
 use crate::queries::admin::{self, GuardedMutationOutcome, OidcMappingRow};
-use crate::queries::auth_identity::{assign_role_to_user, get_user_roles};
+use crate::queries::auth_identity::get_user_roles;
 use crate::queries::users::{insert_user, update_password_hash_by_user_id};
 
 #[derive(Debug, Deserialize)]
@@ -250,6 +250,7 @@ pub async fn delete_oidc_mapping(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// Creates a user with explicit local grants and returns effective authority.
 pub async fn create_user(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -361,6 +362,10 @@ pub async fn create_user(
     }
 }
 
+/// Updates local grants, classifying legacy ownership only for supplied categories.
+///
+/// Managed IdP grants survive replacement. The response reports the highest
+/// effective role and all effective environments, which can exceed the request.
 pub async fn update_user(
     State(pool): State<PgPool>,
     Path(user_id): Path<String>,
@@ -387,7 +392,6 @@ pub async fn update_user(
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load user roles"),
     };
-    let had_admin = roles.iter().any(|role| role.role == AuthRole::Admin);
     let current_role = highest_role(roles.iter().map(|role| role.role).collect());
     let prior_environments = load_user_environments(&pool, target_user_id)
         .await
@@ -395,7 +399,7 @@ pub async fn update_user(
     let mut audit_events: Vec<(AuditAction, serde_json::Value)> = vec![];
 
     if let Some(enabled) = payload.enabled {
-        if should_block_last_admin_disable(enabled, current.is_active, had_admin) {
+        if !enabled {
             match admin::disable_user_with_admin_guard(&pool, target_user_id).await {
                 Ok(GuardedMutationOutcome::Applied) => {}
                 Ok(GuardedMutationOutcome::GuardrailViolation) => {
@@ -424,36 +428,29 @@ pub async fn update_user(
     }
 
     if let Some(role) = payload.role {
-        if should_block_final_admin_role_removal(role, had_admin, current.is_active) {
-            match admin::replace_user_primary_role_with_admin_guard(
-                &pool,
-                target_user_id,
-                role_to_auth_role(role),
-                admin_user_id,
-                true,
-            )
-            .await
-            {
-                Ok(GuardedMutationOutcome::Applied) => {}
-                Ok(GuardedMutationOutcome::GuardrailViolation) => {
-                    return conflict("Cannot remove the final admin role assignment");
-                }
-                Ok(GuardedMutationOutcome::NotFound) => return not_found("User not found"),
-                Err(_) => return internal_error("Failed to validate admin guardrail"),
-            }
-        } else if set_user_primary_role(&pool, target_user_id, role, admin_user_id)
-            .await
-            .is_err()
+        match admin::replace_user_primary_role_with_admin_guard(
+            &pool,
+            target_user_id,
+            role_to_auth_role(role),
+            admin_user_id,
+            true,
+        )
+        .await
         {
-            return internal_error("Failed to update user role");
+            Ok(GuardedMutationOutcome::Applied) => {}
+            Ok(GuardedMutationOutcome::GuardrailViolation) => {
+                return conflict("Cannot remove the final admin role assignment");
+            }
+            Ok(GuardedMutationOutcome::NotFound) => return not_found("User not found"),
+            Err(_) => return internal_error("Failed to validate admin guardrail"),
         }
 
-        if Some(role) != current_role {
-            audit_events.push((
-                AuditAction::UserRoleAssigned,
-                serde_json::json!({ "from": current_role, "to": role }),
-            ));
-        }
+        // Source classification is auditable even if effective authority stays
+        // unchanged because the IdP contributes the same or a higher role.
+        audit_events.push((
+            AuditAction::UserRoleAssigned,
+            serde_json::json!({ "from": current_role, "local_role": role, "classifies_legacy_roles": true }),
+        ));
     }
 
     if let Some(environments) = payload.environments {
@@ -463,20 +460,10 @@ pub async fn update_user(
             return bad_request(&message);
         }
 
-        let mut after = environments
-            .iter()
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty())
-            .collect::<Vec<_>>();
-        after.sort();
-        let mut before = prior_environments.clone();
-        before.sort();
-        if before != after {
-            audit_events.push((
-                AuditAction::UserEnvironmentMembershipUpdated,
-                serde_json::json!({ "from": prior_environments, "to": environments }),
-            ));
-        }
+        audit_events.push((
+            AuditAction::UserEnvironmentMembershipUpdated,
+            serde_json::json!({ "from": prior_environments, "local_environments": environments, "classifies_legacy_environments": true }),
+        ));
     }
 
     if let Some(password) = payload
@@ -881,20 +868,19 @@ async fn set_user_primary_role(
     role: Role,
     granted_by_user_id: Uuid,
 ) -> Result<(), ()> {
-    admin::clear_user_roles(pool, user_id)
-        .await
-        .map_err(|_| ())?;
-
-    assign_role_to_user(
+    match admin::replace_user_primary_role_with_admin_guard(
         pool,
         user_id,
         role_to_auth_role(role),
-        Some(granted_by_user_id),
+        granted_by_user_id,
+        true,
     )
     .await
-    .map_err(|_| ())?;
-
-    Ok(())
+    .map_err(|_| ())?
+    {
+        GuardedMutationOutcome::Applied => Ok(()),
+        GuardedMutationOutcome::GuardrailViolation | GuardedMutationOutcome::NotFound => Err(()),
+    }
 }
 
 async fn sync_user_environments(
@@ -1032,22 +1018,6 @@ async fn record_admin_audit_event(
     .map_err(|_| ())?;
 
     Ok(())
-}
-
-fn should_block_last_admin_disable(
-    enabled: bool,
-    is_currently_active: bool,
-    had_admin: bool,
-) -> bool {
-    !enabled && is_currently_active && had_admin
-}
-
-fn should_block_final_admin_role_removal(
-    next_role: Role,
-    had_admin: bool,
-    is_currently_active: bool,
-) -> bool {
-    next_role != Role::Admin && had_admin && is_currently_active
 }
 
 fn is_valid_email(value: &str) -> bool {
@@ -1261,26 +1231,6 @@ mod tests {
         assert!(!is_valid_email(""));
         assert!(!is_valid_email("missing-at"));
         assert!(!is_valid_email("missing-domain@"));
-    }
-
-    #[test]
-    fn blocks_last_admin_disable_only_for_active_admin() {
-        assert!(should_block_last_admin_disable(true, true, true) == false);
-        assert!(should_block_last_admin_disable(false, true, true));
-        assert!(should_block_last_admin_disable(false, false, true) == false);
-        assert!(should_block_last_admin_disable(false, true, false) == false);
-    }
-
-    #[test]
-    fn blocks_final_admin_role_removal_only_when_demoting_active_admin() {
-        assert!(should_block_final_admin_role_removal(Role::Admin, true, true) == false);
-        assert!(should_block_final_admin_role_removal(
-            Role::Operator,
-            true,
-            true
-        ));
-        assert!(should_block_final_admin_role_removal(Role::Viewer, true, false) == false);
-        assert!(should_block_final_admin_role_removal(Role::Viewer, false, true) == false);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 ---
 type: Security Model
 title: Credential grant boundaries in POA&M services
-description: Explains the partial M0 credential-grant boundary, restricted read intersection, disabled mutation paths, and remaining PAT and OIDC admission gates.
+description: Explains the partial M0 credential-grant boundary, restricted read intersection, source-aware OIDC groundwork, and remaining PAT admission gates.
 tags:
   - crystal-forge
   - authorization
@@ -13,9 +13,10 @@ implementation_status: partial
 
 ## Status and authority
 
-TASK-526.2 starts the authorization prerequisite for
+TASK-529.2 starts the authorization prerequisite for
 [CF-AGENT-ACCESS-001 v1.1](agent-access-tokens-mcp-remediation-context.md).
-This change adds domain authorization inputs; it does **not** implement PAT
+This groundwork adds domain authorization inputs and source-aware OIDC
+reconciliation; it does **not** implement PAT
 authentication, token persistence, lifecycle endpoints, or MCP transport.
 No HTTP endpoint accepts these inputs from a client. The existing browser
 session extractors and routes remain the only human authentication channel.
@@ -77,20 +78,35 @@ attribution can represent OIDC, bootstrap/local writes, or a removed assigning
 administrator. The Users page's role/source labels and `all` environment summary
 are not evidence of individual grant ownership.
 
-This slice does not backfill ownership or alter existing account grants.
-Unclassified legacy assignments remain an explicit OIDC PAT rollout blocker.
-A source-aware migration/cutover and recovery policy must be established before
-OIDC-backed PATs are admitted. Independent grants are the agreed future policy;
-preserving current rows is not evidence that fail-closed reconciliation or
-entitlement freshness exists yet.
+Migration `0335_oidc_entitlement_sources.sql` preserves legacy effective rows and
+flags externally linked users' grants as unresolved rather than guessing their
+source. Local boolean and bound identity pointer contributions form a union;
+overlapping local/IdP rights survive removal of just one source. Explicit admin
+replacement classifies only the supplied category as **local**, not IdP-owned.
+
+The callback now uses source-aware reconciliation, a generation reserved before
+redirect, durable pending/failure fencing and atomic successful freshness.
+Managed invalid evidence denies login; unresolved legacy ownership preserves
+login and rights even with missing groups, without certifying freshness. This
+compatibility path still rejects unsupported multiple linked identities.
+Valid empty groups replace managed rights with OIDC-owned Viewer and no managed
+memberships. Independent local overrides survive.
+
+The future-PAT eligibility helper and configurable positive maximum age (default
+24 hours) exist in source but are not wired to bearer admission. This policy does
+not shorten existing browser session TTL. Unresolved legacy ownership still
+blocks future OIDC PAT eligibility. See [OIDC entitlement ownership and
+freshness](oidc-entitlement-ownership.md) for locking, last-Admin revocation,
+source constraints and the one-time upgrade/recovery procedure.
 
 ## Remaining release gates
 
 M0 remains incomplete. The following work is still required before PAT/MCP
 release:
 
-1. Source-aware OIDC assignment reconciliation, successful authoritative sync
-   time, maximum entitlement age, failure/rollback behavior and legacy cutover.
+1. Current-source farm evidence for OIDC reconciliation, freshness,
+   failure/rollback and concurrency; reviewed legacy classification/cutover and
+   independent recovery Admin. The source helper alone is not PAT admission.
 2. Token-row validation for every admitted request and transaction-aware checks
    for any future mutation, with deterministic revocation ordering.
 3. Binding the credential to the authenticated current owner; role and
@@ -113,5 +129,8 @@ and restricted mutation denial independent of owner Admin status.
 The existing state-machine database regression runner already runs the entire
 `poam_workflows` integration target. Adding this test does not create another
 top-level check. Execution results, failures and unrun integration-owner gates
-are recorded in TASK-526.2. Builds after the owner's build-farm instruction use
-`--max-jobs 0`; no local Cargo compilation is authorized.
+are recorded in TASK-529.2. Historical passes do not establish current-source
+verification. Current-source farm gates and documentation validation remain
+pending; none were run for this documentation update. Exact farm commands and
+database-test scope are in [OIDC entitlement ownership](oidc-entitlement-ownership.md#pending-verification).
+No local Cargo compilation is authorized.
