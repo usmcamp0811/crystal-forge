@@ -571,14 +571,15 @@ async fn reused_builds_are_classified_through_the_physical_derivation(pool: PgPo
 
 #[sqlx::test(migrations = "./migrations")]
 async fn latest_observation_decides_not_observed(pool: PgPool) {
-    // The host once reported a store path, but its latest report has none. The
+    // The host once reported a store path, but its latest report is blank
+    // (store_path is NOT NULL, so absence is an empty or whitespace value). The
     // view holds every eligible row, so presence must come from the latest row.
     let fleet = fleet(&pool, true).await;
     let subject = system(&pool, &fleet, "lane-gap", fleet.env_a, None).await;
     sqlx::query(
         "INSERT INTO system_states(hostname,store_path,change_reason,timestamp) VALUES \
          ('lane-gap','/nix/store/lane-gap-1','startup', now() - interval '10 minutes'), \
-         ('lane-gap',NULL,'heartbeat', now() - interval '1 minute')",
+         ('lane-gap','  ','heartbeat', now() - interval '1 minute')",
     )
     .execute(&pool)
     .await
