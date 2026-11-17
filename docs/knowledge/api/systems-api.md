@@ -248,9 +248,12 @@ a build stuck in pending cache publication. Otherwise `building` is a queued or
 running job, `failed` is failed jobs only, and `not_built` is no build job.
 
 A commit that reuses an existing build (`derivations.reused_from_derivation_id`,
-`reused_build_job_id`) has an alias derivation with no job or cache push of its
-own. The server reads its build and publication state from the physical
-derivation that it reuses, so a reused, published output reads as `ready`.
+`reused_build_job_id`) has an alias derivation that can own no job of its own.
+The server reads the build jobs of the commit's derivation, of its physical
+origin, and the job it adopted. A job and its completed cache push belong to the
+derivation that executed the build, which can be a different alias than the
+origin, so publication is checked on the derivation that owns each job. A reused,
+published output reads as `ready`.
 `unknown_reason = not_observed` uses the latest eligible observation, not any
 earlier one: a host whose latest report has no store path is `not_observed`
 even when an older report had one.
