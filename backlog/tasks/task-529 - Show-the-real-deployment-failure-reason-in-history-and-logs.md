@@ -28,7 +28,7 @@ The stored message itself is not useful for chesty: `Authenticated cache copy fa
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 `classify_read_failure` recognizes more common Nix copy failures with fixed, credential-free categories: DNS resolution, connection refused or unreachable, network timeout, interrupted transfer, cache server error (HTTP 5xx), rate limiting (HTTP 429), hash mismatch, local disk full, and Nix daemon or store permission problems. Raw stderr is still never logged or reported.
-- [ ] #7 The agent appends the last three Nix `error:` lines to the failure message. It masks every value it gave Nix for the read (cache URLs, Basic credentials, credential paths and their directories) with `****`, removes URL user information, and masks every URL query string. Other lines, including HTTP response bodies, are dropped. (Owner decision, 2026-11-17.)
+- [ ] #7 For complete stderr without a response-body delimiter, the agent appends at most the last three masked `error:` lines to the failure message. It masks every value it gave Nix for the read (cache URLs, Basic credentials, credential paths and their directories) with `****`, removes URL user information, and masks every URL query string. If a response-body delimiter appears or stderr capture is truncated/incomplete, it suppresses all detail. (Owner decision and second-review security requirement, 2026-11-17.)
 - [ ] #2 The History API title for a `cf_deployment_failed` event includes explicitly safe stored display text when it exists. Legacy raw metadata is not displayed or returned; otherwise the title is `Deployment failed`.
 - [ ] #3 The agent-events log line for a `cf_deployment_failed` event uses level `error` and includes only explicitly safe stored display text when it exists.
 - [ ] #4 The Logs tab shows one reconstructed line for a failed deploy with the real failure reason. It no longer shows the invented evaluation, activation, and rollback lines.
@@ -92,3 +92,37 @@ The stored message itself is not useful for chesty: `Authenticated cache copy fa
   browser screenshot, overflow result, or green pipeline is claimed. Keep this
   task In Progress pending successful Delivery/browser verification.
 - MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/344
+
+## Second review: provider-controlled response bodies
+
+- Suppress the entire masked detail when stderr contains `response body:`
+  anywhere, case-insensitively. Do not infer that a later `error:` line marks
+  the end of a body. The fixed category and exit status remain available.
+- The bounded collector now records whether it retained the entire stream.
+  Truncation, read failure, drain timeout, or join failure suppress detail;
+  a retained tail could have lost the response-body delimiter.
+- Tests cover a body beginning with `error: internal-token=secret-value-12345`,
+  mixed-case and inline delimiters, and a large body that evicts its delimiter.
+  Fake-Nix tests exercise authenticated-copy failures, typed safe-display
+  selection, report serialization, and credential cleanup. The older oversized
+  signature test now expects a fixed category without any captured detail.
+- Verification on the configured farm:
+  - `nix build .#default.cf-agent-drv .#okf-knowledge --no-link -L`: passed;
+    agent test groups passed 25, 13, and 1 tests.
+  - An ephemeral `cf-server-drv.overrideAttrs` narrowed only `checkPhase` to
+    `cargo test --offline --locked --release --package cf-server --features
+    cf-server/embedded-ui --lib
+    handlers::api::builders::tests::niks3_probe_failure_never_polls_success_transition
+    -- --exact --nocapture`: passed independently (1 test) on the same farm.
+  - `nix build .#default.cf-server-drv --no-link -L`: passed normally, including
+    the full library group (1575 passed, 853 ignored under existing policy).
+    No production package test was skipped or changed to obtain this result.
+  - `nix build .#checks.x86_64-linux.integration-delivery.scenarios.delivery-lifecycle
+    --no-link -L`: ran the normal VM scenario, but hit its 1800-second timeout
+    in `publication-rejects-untrusted-signature-then-accepts-same-signed-output`.
+    The driver was waiting for the existing `services` node's `nix copy --from
+    daemon --to ...` command. The final bad-file-descriptor exception followed
+    VM shutdown. The new failure-report/browser cases were not reached.
+- Keep the MR Draft and task In Progress. Delivery browser behavior, overflow,
+  screenshots, and exact-head CI remain unverified. The embedded-server test
+  is no longer the current blocker; the full Delivery timeout is.

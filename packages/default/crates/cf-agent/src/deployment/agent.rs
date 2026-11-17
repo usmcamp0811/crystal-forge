@@ -1078,17 +1078,27 @@ fn known_read_secrets(
     secrets
 }
 
-/// Returns the last Nix `error:` lines with known and URL-borne secrets masked.
+/// Returns bounded, masked diagnostics only when no response body is present.
 ///
 /// SECURITY: Nix stderr can contain cache URLs, credential file paths, redirect
 /// URLs with signed query parameters, and provider response text. This function
-/// keeps only lines that start with `error:`, masks every `secrets` value by
-/// exact match, removes URL user information, and masks every URL query string.
+/// suppresses all detail if a response-body delimiter is present anywhere.
+/// Provider bodies can themselves contain `error:` lines and cannot be
+/// distinguished from subsequent Nix diagnostics. Callers must also suppress
+/// detail for incomplete captures, which may have lost the delimiter.
+/// Otherwise it keeps `error:` lines, masks every `secrets` value by exact
+/// match, removes URL user information, and masks every URL query string.
 /// Every nonempty secret is masked, even when that reduces readability. The
 /// output has at most [`REDACTED_DETAIL_MAX_LINES`] lines of
 /// [`REDACTED_DETAIL_MAX_LINE_CHARS`] characters.
 fn redact_nix_errors(stderr: &[u8], secrets: &[String]) -> String {
     let text = String::from_utf8_lossy(stderr);
+    // SECURITY: Nix's FileTransferError appends provider-controlled text after
+    // this delimiter. Do not resume parsing even if another line looks like a
+    // Nix diagnostic. Inline and mixed-case delimiters also fail closed.
+    if text.to_ascii_lowercase().contains("response body:") {
+        return String::new();
+    }
     let mut secrets: Vec<&str> = secrets
         .iter()
         .map(String::as_str)
@@ -1145,27 +1155,59 @@ fn scrub_urls(line: &str) -> String {
     out
 }
 
-/// Drains child stderr concurrently and returns only its last bytes.
+/// Captures the bounded stderr tail and whether the entire stream was retained.
+#[derive(Default)]
+struct ReadDiagnostics {
+    tail: Vec<u8>,
+    complete: bool,
+}
+
+impl ReadDiagnostics {
+    fn display_detail(&self, secrets: &[String]) -> String {
+        // SECURITY: A truncated/read-failed capture can begin inside a provider
+        // body after its delimiter. Only complete streams can supply detail.
+        if self.complete {
+            redact_nix_errors(&self.tail, secrets)
+        } else {
+            String::new()
+        }
+    }
+}
+
+/// Drains child stderr concurrently and records whether any bytes were lost.
 ///
 /// CONCURRENCY: Draining prevents a full pipe from stalling Nix. The tail is
 /// bounded by [`READ_DIAGNOSTIC_TAIL_BYTES`] regardless of output volume.
 fn capture_stderr_tail(
     mut stderr: tokio::process::ChildStderr,
-) -> tokio::task::JoinHandle<Vec<u8>> {
+) -> tokio::task::JoinHandle<ReadDiagnostics> {
     tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
         let mut tail = Vec::new();
+        let mut truncated = false;
         let mut chunk = [0u8; 8192];
-        while let Ok(read) = stderr.read(&mut chunk).await {
-            if read == 0 {
-                break;
-            }
+        loop {
+            let read = match stderr.read(&mut chunk).await {
+                Ok(0) => {
+                    return ReadDiagnostics {
+                        tail,
+                        complete: !truncated,
+                    };
+                }
+                Ok(read) => read,
+                Err(_) => {
+                    return ReadDiagnostics {
+                        tail,
+                        complete: false,
+                    };
+                }
+            };
             tail.extend_from_slice(&chunk[..read]);
             if tail.len() > READ_DIAGNOSTIC_TAIL_BYTES {
+                truncated = true;
                 tail.drain(..tail.len() - READ_DIAGNOSTIC_TAIL_BYTES);
             }
         }
-        tail
     })
 }
 
@@ -1247,14 +1289,14 @@ async fn copy_authenticated_cache(
                         Ok(Ok(tail)) => tail,
                         _ => {
                             stderr.abort();
-                            Vec::new()
+                            ReadDiagnostics::default()
                         }
                     };
-                    let detail = redact_nix_errors(&tail, &known_read_secrets(&cache, &read));
+                    let detail = tail.display_detail(&known_read_secrets(&cache, &read));
                     Err(anyhow::Error::new(AuthenticatedCacheCopyDisplayError(
                         format!(
                             "Authenticated cache copy failed ({}); {status}{}",
-                            classify_read_failure(&tail),
+                            classify_read_failure(&tail.tail),
                             if detail.is_empty() {
                                 String::new()
                             } else {
@@ -1680,14 +1722,10 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
         .to_string();
         assert!(error.contains("signature verification failed"));
         assert!(error.contains("signing public key"));
-        // Redacted Nix error lines are kept; public store path names may appear.
-        // The prepared URL carries mTLS file paths in its query; the query and
-        // the signed redirect parameter are both masked.
-        assert!(
-            error.contains("nix: error: unable to download '****/?****': HTTP error 500"),
-            "{error}"
-        );
-        assert!(error.contains("/nix/store/abc-output"));
+        // A truncated stream cannot prove which lines were Nix diagnostics.
+        // Keep the fixed classifier, never the captured detail.
+        assert!(!error.contains("; nix:"), "{error}");
+        assert!(!error.contains("/nix/store/abc-output"));
         for private in [
             "secret-provider-body",
             "sig-secret",
@@ -1701,6 +1739,69 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
         }
         let directory = std::fs::read_to_string(fixture.0.join("credentials")).unwrap();
         assert!(!std::path::Path::new(&directory).exists());
+    }
+
+    #[test]
+    fn provider_response_bodies_suppress_all_diagnostic_detail() {
+        for delimiter in ["response body:", "ReSpOnSe BoDy:", "error: response body:"] {
+            let stderr = format!(
+                "error: unable to download 'https://cache.example/nar': HTTP error 500\n\
+                 {delimiter}\nerror: internal-token=secret-value-12345\n\
+                 error: path lacks a signature by a trusted key\n"
+            );
+            assert_eq!(redact_nix_errors(stderr.as_bytes(), &[]), "");
+        }
+        let incomplete = ReadDiagnostics {
+            tail: b"error: internal-token=secret-value-12345".to_vec(),
+            complete: false,
+        };
+        assert_eq!(incomplete.display_detail(&[]), "");
+        assert_eq!(ReadDiagnostics::default().display_detail(&[]), "");
+    }
+
+    #[tokio::test]
+    async fn provider_error_lines_never_enter_safe_failure_reports() {
+        for oversized_body in [false, true] {
+            let body = if oversized_body {
+                // Evict the HTTP heading and body delimiter from the tail.
+                "head -c 300000 /dev/zero | tr '\\0' x >&2\nprintf '\\n' >&2\n"
+            } else {
+                ""
+            };
+            let fixture = Fixture::new(&format!(
+                "{PRIVATE_SCRIPT}\n\
+                 printf \"error: unable to download '%s/nar': HTTP error 500\\nresponse body:\\n\" \"$3\" >&2\n\
+                 {body}\
+                 printf 'error: internal-token=secret-value-12345\\n' >&2\n\
+                 exit 1\n"
+            ));
+            let error = copy_authenticated_cache(
+                cache(true),
+                "/nix/store/output".into(),
+                false,
+                Duration::from_secs(10),
+                fixture.program(),
+            )
+            .await
+            .unwrap_err();
+            let safe = deployment_failure_display(&error).unwrap();
+            assert!(!safe.contains("secret-value-12345"), "{safe}");
+            assert!(!safe.contains("internal-token"), "{safe}");
+            assert!(!safe.contains("; nix:"), "{safe}");
+            if !oversized_body {
+                assert!(safe.contains("HTTP 5xx"), "{safe}");
+            }
+            let report = serde_json::to_string(&DeploymentFailedReport {
+                hostname: "probe",
+                target_store_path: "/nix/store/output",
+                error: safe,
+                display_error: Some(safe),
+            })
+            .unwrap();
+            assert!(!report.contains("secret-value-12345"), "{report}");
+            let directory = std::fs::read_to_string(fixture.0.join("credentials")).unwrap();
+            assert!(!std::path::Path::new(&directory).exists());
+        }
     }
 
     #[test]
@@ -1741,7 +1842,6 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
     fn redacted_nix_errors_mask_known_and_url_secrets() {
         let stderr = b"warning: noise https://c.example/leak\n\
             error: unable to download 'https://user:pw@other.example/nar/x?sig=abc': HTTP error 503\n\
-            response body:\nprovider-body\n\
             error: opening /run/cf-cache-1/netrc: hunter22 rejected\n\
             error: one\nerror: two\n";
         let secrets = vec![
@@ -1757,8 +1857,7 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
             "error: opening ****: **** rejected | error: one | error: two"
         );
         let first = redact_nix_errors(
-            b"error: unable to download 'https://user:pw@other.example/nar/x?sig=abc': HTTP error 503\n\
-              response body:\nprovider-body\n",
+            b"error: unable to download 'https://user:pw@other.example/nar/x?sig=abc': HTTP error 503\n",
             &secrets,
         );
         assert!(

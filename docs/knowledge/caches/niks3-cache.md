@@ -923,8 +923,9 @@ The agent keeps at most the last 64 KiB of Nix stderr in memory and maps it to
 one reason. Output that matches no known pattern gives
 `Nix failed for an unrecognized reason; details are redacted`.
 
-The agent also appends `; nix: <detail>`. The detail contains at most the last
-three Nix lines that start with `error:`, each cut to 300 characters. Before
+When the complete stderr stream is retained and has no response-body delimiter,
+the agent also appends `; nix: <detail>`. The detail contains at most the last
+three lines that start with `error:`, each cut to 300 characters. Before
 the agent logs or reports the detail, it removes secrets:
 
 - It replaces each value that the agent gave to Nix for this read with `****`.
@@ -936,10 +937,17 @@ the agent logs or reports the detail, it removes secrets:
 - It replaces every URL query string with `?****`. This removes signed
   redirect parameters that the agent does not know.
 
-Lines that do not start with `error:` are dropped. Nix prints an HTTP response
-body on separate lines, so provider response text is not kept. Public store
-path names can appear in the detail. Timeout, cancellation, `require-sigs`, and
-credential cleanup are unchanged.
+An `error:` prefix alone does not prove that a line is a Nix diagnostic: HTTP
+response bodies can contain that prefix too. If stderr contains `response body:`
+anywhere (case-insensitive), the agent suppresses the entire detail, including
+lines before or after the delimiter. It does not attempt to find the body's end.
+If the stream exceeds 64 KiB, fails to read, or fails to finish draining, the
+agent also suppresses detail: a retained tail may begin inside a body after its
+delimiter. Only the fixed category and exit status remain in these cases.
+
+For a complete stream without that delimiter, lines that do not start with
+`error:` are dropped. Public store path names can appear in the masked detail.
+Timeout, cancellation, `require-sigs`, and credential cleanup are unchanged.
 
 Only a typed, redacted authenticated-cache copy error supplies `display_error`
 in the signed `/agent/deployment-failed` report. Outer error contexts are not
