@@ -399,3 +399,72 @@ async fn finished_deployment_visibility_window(pool: PgPool) {
     assert!(finish("failed", 60).await, "failure stays for 2 minutes");
     assert!(!finish("failed", 300).await, "old failure is hidden");
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn running_commit_beyond_the_500_commit_bound_is_reported_not_dropped(pool: PgPool) {
+    use crystal_forge::queries::flake_position::FLAKE_POSITION_MAX_COMMITS;
+    // 520 branch commits. The host runs the output of commit 510, which is
+    // deeper than the bound, so the list stops at the bound and the response
+    // says why instead of silently omitting the running commit.
+    let flake: i32 = sqlx::query_scalar(
+        "INSERT INTO flakes(name,repo_url,branch) VALUES('deep','https://example.invalid/deep','main') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("flake");
+    sqlx::query(
+        "INSERT INTO commits(flake_id,git_commit_hash,commit_timestamp,message,author) \
+         SELECT $1, lpad(n::text, 40, '0'), now() - make_interval(mins => n), 'c' || n, 'dev' \
+         FROM generate_series(0, 519) n",
+    )
+    .bind(flake)
+    .execute(&pool)
+    .await
+    .expect("commits");
+    let env: Uuid =
+        sqlx::query_scalar("INSERT INTO environments(name) VALUES('deep-env') RETURNING id")
+            .fetch_one(&pool)
+            .await
+            .expect("environment");
+    let subject: Uuid = sqlx::query_scalar(
+        "INSERT INTO systems(hostname,public_key,derivation,flake_id,system_configuration_name,environment_id) \
+         VALUES('deep-host','test-key','test-derivation',$1,'deep-host',$2) RETURNING id",
+    )
+    .bind(flake)
+    .bind(env)
+    .fetch_one(&pool)
+    .await
+    .expect("system");
+    sqlx::query(
+        "INSERT INTO derivations(commit_id,derivation_type,derivation_name,derivation_path,status_id,completed_at,store_path) \
+         SELECT c.id,'nixos','deep-host','/nix/store/deep-host.drv',10,now(),'/nix/store/deep-host-510' \
+         FROM commits c WHERE c.flake_id=$1 AND c.git_commit_hash = lpad('510', 40, '0')",
+    )
+    .bind(flake)
+    .execute(&pool)
+    .await
+    .expect("derivation");
+    sqlx::query("INSERT INTO system_states(hostname,store_path,change_reason) VALUES('deep-host','/nix/store/deep-host-510','startup')")
+        .execute(&pool)
+        .await
+        .expect("state");
+
+    let view = fetch_system_flake_position(&pool, subject, None)
+        .await
+        .expect("read")
+        .expect("system exists");
+    assert_eq!(view.commits.len() as i64, FLAKE_POSITION_MAX_COMMITS);
+    assert_eq!(view.commits[0].position, 0);
+    assert_eq!(
+        view.unknown_reason,
+        Some(FlakePositionUnknownReason::BeyondWindow)
+    );
+    assert_eq!(
+        view.running_position, None,
+        "no position is claimed outside the list"
+    );
+    assert!(
+        view.running_commit.is_some(),
+        "the running commit is still named"
+    );
+}

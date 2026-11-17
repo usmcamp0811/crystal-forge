@@ -232,7 +232,7 @@ Response fields:
 | `commits[]` | Non-archived branch commits from HEAD. Each has `position` (dense index, 0 = HEAD), `sha`, `message`, `author`, `committed_at`, `build_state`, and `peers`. |
 | `running_commit` | Newest returned branch commit whose `nixos` output for this configuration equals the latest observed store path. This is the commit that `view_system_deployment_status` reports. One store path can map to many commits when newer commits do not change the configuration. When no output matches, the value comes from the observational current-revision resolver used by `/systems/:id/commits`. |
 | `running_position` | Index of `running_commit` in `commits`. Null when `unknown_reason` is set. |
-| `unknown_reason` | `no_history`, `not_observed`, `untracked`, `off_branch`, or `beyond_window`. |
+| `unknown_reason` | `no_history`, `not_observed`, `untracked`, `off_branch`, or `beyond_window`. The Web UI derives a separate `configuration_removed` state for External and Reference systems from the configuration-assurance read (`availability = removed`); the endpoint does not return it. |
 | `last_tracked_position` | Newest returned commit whose `nixos` output for this configuration appears in the system's `system_states` history. |
 
 The list has at least 50 commits when the branch has them. It extends to two
@@ -240,9 +240,12 @@ commits after the running commit and never exceeds 500 commits. A running
 commit deeper than 500 commits returns `beyond_window`.
 
 `build_state` describes the `nixos` derivation whose name is the system
-configuration name: `ready` when any build job succeeded (even if a retry is
-queued later), otherwise `building` for a queued or running job, `failed` for
-failed jobs only, and `not_built` when no build job exists.
+configuration name. `ready` means a build job succeeded and a completed cache
+push exists for the output (even if a retry is queued later). This is the same
+evidence that `view_system_deployment_status` requires for a deployable build.
+`unpublished` means a build job succeeded without that cache push, for example
+a build stuck in pending cache publication. Otherwise `building` is a queued or
+running job, `failed` is failed jobs only, and `not_built` is no build job.
 
 `peers` lists other active systems on the same flake whose
 `view_system_deployment_status.current_commit_hash` equals the commit. For a
