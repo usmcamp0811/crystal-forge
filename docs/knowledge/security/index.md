@@ -1,3 +1,7 @@
+# Design Specification
+
+* [Agent Access Tokens, MCP, and Remediation Context](agent-access-tokens-mcp-remediation-context.md) - Proposed CF-AGENT-ACCESS-001 v1.1 contract for Operator-owned tokens, immutable environment grants, MCP tools, OIDC freshness, evidence, provenance, and additive UI requirements; not implemented runtime behavior.
+
 # Operator Guide
 
 * [OIDC Role Mapping Configuration](oidc-role-mapping.md) - Describes mapping OIDC groups to the Admin, Operator, and Viewer roles through environment variables, highest-privilege selection, safe-deny behavior, provider examples, and troubleshooting; read the status note before relying on it.
