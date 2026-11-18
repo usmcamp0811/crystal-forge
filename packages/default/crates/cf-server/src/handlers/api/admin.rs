@@ -18,7 +18,9 @@ use crate::api::models::{
 };
 use crate::auth::password::hash_password;
 use crate::handlers::agent_request::CFState;
-use crate::handlers::api::rbac::{extract_request_origin, require_admin as require_admin_user};
+use crate::handlers::api::rbac::{
+    extract_request_origin, require_admin as require_admin_user, require_admin_session,
+};
 use crate::models::auth_identity::AuthRole;
 use crate::models::retry_policy::{AutomaticRetryPolicy, RetryPolicyValidationError};
 use crate::queries::admin::{self, GuardedMutationOutcome, OidcMappingRow};
@@ -382,13 +384,19 @@ pub async fn create_user(
 /// last-admin rejection leave every category and source classification intact.
 /// Grant edits require explicit intent; clearing local roles preserves legacy
 /// ownership and cannot be combined with a replacement role.
+///
+/// SECURITY: The Admin check below is an early rejection only. It is not
+/// serialized with concurrent demotion, disablement or logout. The mutation
+/// transaction repeats the actor and session checks after taking its locks and
+/// answers 403 if the actor lost authority while the request was queued.
 pub async fn update_user(
     State(pool): State<PgPool>,
     Path(user_id): Path<String>,
     headers: HeaderMap,
     Json(payload): Json<UpdateAdminUserRequest>,
 ) -> impl IntoResponse {
-    let Some(admin_user_id) = require_admin_user(&pool, &headers).await else {
+    let Some((admin_user_id, admin_session_id)) = require_admin_session(&pool, &headers).await
+    else {
         return forbidden();
     };
     if let Err(response) = crate::handlers::api::auth_session::require_csrf(&headers) {
@@ -446,17 +454,15 @@ pub async fn update_user(
         environments,
         password_hash,
         actor_user_id: admin_user_id,
+        actor_session_id: admin_session_id,
         actor_identifier,
         request_origin: extract_request_origin(&headers),
     };
     match admin::patch_admin_user(&pool, target_user_id, patch).await {
-        Ok(admin::AdminUserPatchOutcome::Applied) => {}
-        Ok(admin::AdminUserPatchOutcome::NotFound) => return not_found("User not found"),
-        Ok(admin::AdminUserPatchOutcome::InvalidEnvironments) => {
-            return bad_request("Unknown environment(s)");
-        }
-        Ok(admin::AdminUserPatchOutcome::LastAdmin) => {
-            return conflict("Cannot remove the final enabled admin");
+        Ok(outcome) => {
+            if let Some(rejection) = patch_rejection(&outcome) {
+                return rejection;
+            }
         }
         Err(_) => return internal_error("Failed to update user"),
     }
@@ -464,6 +470,24 @@ pub async fn update_user(
     match fetch_admin_user_summary(&pool, target_user_id).await {
         Ok(summary) => (StatusCode::OK, Json(summary)).into_response(),
         Err(_) => internal_error("Failed to load updated user"),
+    }
+}
+
+/// Maps a PATCH outcome to its HTTP error, or `None` when it was applied.
+///
+/// A rejected outcome left all state unchanged. `ActorNotAuthorized` answers
+/// 403 with the same body as the early Admin check.
+fn patch_rejection(outcome: &admin::AdminUserPatchOutcome) -> Option<axum::response::Response> {
+    match outcome {
+        admin::AdminUserPatchOutcome::Applied => None,
+        admin::AdminUserPatchOutcome::NotFound => Some(not_found("User not found")),
+        admin::AdminUserPatchOutcome::InvalidEnvironments => {
+            Some(bad_request("Unknown environment(s)"))
+        }
+        admin::AdminUserPatchOutcome::LastAdmin => {
+            Some(conflict("Cannot remove the final enabled admin"))
+        }
+        admin::AdminUserPatchOutcome::ActorNotAuthorized => Some(forbidden()),
     }
 }
 
@@ -1387,6 +1411,22 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn patch_outcomes_map_to_http_rejections() {
+        use admin::AdminUserPatchOutcome as Outcome;
+
+        assert!(patch_rejection(&Outcome::Applied).is_none());
+        for (outcome, status) in [
+            (Outcome::NotFound, StatusCode::NOT_FOUND),
+            (Outcome::InvalidEnvironments, StatusCode::BAD_REQUEST),
+            (Outcome::LastAdmin, StatusCode::CONFLICT),
+            (Outcome::ActorNotAuthorized, StatusCode::FORBIDDEN),
+        ] {
+            let response = patch_rejection(&outcome).expect("rejection must map to an error");
+            assert_eq!(response.status(), status, "{outcome:?}");
+        }
     }
 
     #[tokio::test]

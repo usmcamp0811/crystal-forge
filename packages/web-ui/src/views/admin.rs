@@ -909,6 +909,9 @@ fn EditUserModal(
                             option { value: "Viewer", "Viewer" }
                         }
                         div { class: "help", "Replaces local roles with one role. No local role removes only local roles and preserves unresolved legacy roles. Identity provider grants remain independent." }
+                        if let Some(notice) = user.grant_sources.as_ref().and_then(|sources| multiple_local_roles_notice(&sources.local_roles)) {
+                            div { "data-testid": "multiple-local-roles-notice", class: "help", "{notice}" }
+                        }
                         if user.grant_sources.as_ref().is_some_and(|sources| !sources.legacy_roles.is_empty()) {
                             div { class: "sd-callout sd-callout-info", style: "font-size:12px;",
                                 "Legacy role ownership is unresolved. Replacing this category classifies the selected role as local and removes the previous unresolved legacy roles."
@@ -2882,7 +2885,13 @@ impl LocalGrantEdit {
                 Ok(request)
             };
         };
-        let role_changed = self.role != primary_role(&baseline.local_roles);
+        // INVARIANT: The selection is compared with the full local role set,
+        // not only the highest role. With several local roles, keeping the
+        // pre-selected highest role while the override is enabled is a
+        // deliberate normalization to that single role. Zero- and
+        // single-role baselines keep the exact no-op behavior.
+        let selected_roles: Vec<Role> = self.role.into_iter().collect();
+        let role_changed = selected_roles != ordered_roles(&baseline.local_roles);
         let classify_role = !baseline.legacy_roles.is_empty()
             && self.acknowledge_legacy_role
             && self.role.is_some();
@@ -2916,10 +2925,28 @@ impl LocalGrantEdit {
     }
 }
 
-fn primary_role(roles: &[Role]) -> Option<Role> {
+/// Returns the distinct roles in display order: Admin, Operator, Viewer.
+fn ordered_roles(roles: &[Role]) -> Vec<Role> {
     [Role::Admin, Role::Operator, Role::Viewer]
         .into_iter()
-        .find(|role| roles.contains(role))
+        .filter(|role| roles.contains(role))
+        .collect()
+}
+
+fn primary_role(roles: &[Role]) -> Option<Role> {
+    ordered_roles(roles).first().copied()
+}
+
+/// Returns a notice when saving the override collapses several local roles.
+fn multiple_local_roles_notice(local_roles: &[Role]) -> Option<String> {
+    let roles = ordered_roles(local_roles);
+    (roles.len() > 1).then(|| {
+        format!(
+            "This account has {} local roles ({}). Saving with the override enabled replaces them with the selected role.",
+            roles.len(),
+            roles_summary(&roles)
+        )
+    })
 }
 
 fn roles_summary(roles: &[Role]) -> String {
@@ -3031,9 +3058,10 @@ mod local_grant_edit_tests {
         source.local_roles = vec![Role::Admin, Role::Viewer];
         let mut edit = LocalGrantEdit::new(Some(source));
         edit.edit_role = true;
+        assert_eq!(edit.role, Some(Role::Admin));
         assert_eq!(
             to_value(edit.request(None, None).unwrap()).unwrap(),
-            json!({})
+            json!({"role":"Admin", "edit_local_grants":true})
         );
         edit.role = Some(Role::Viewer);
         assert_eq!(
@@ -3044,6 +3072,123 @@ mod local_grant_edit_tests {
         assert_eq!(
             to_value(edit.request(None, None).unwrap()).unwrap(),
             json!({"clear_local_role":true, "edit_local_grants":true})
+        );
+    }
+
+    fn multi_role_source() -> AdminUserGrantSources {
+        let mut source = sources();
+        source.local_roles = vec![Role::Viewer, Role::Admin];
+        source
+    }
+
+    #[test]
+    fn multiple_local_roles_without_opt_in_send_nothing() {
+        let mut edit = LocalGrantEdit::new(Some(multi_role_source()));
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({})
+        );
+        edit.role = Some(Role::Viewer);
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({})
+        );
+        edit.role = None;
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn multiple_local_roles_with_opt_in_normalize_to_the_selected_role() {
+        let mut edit = LocalGrantEdit::new(Some(multi_role_source()));
+        edit.edit_role = true;
+        assert_eq!(edit.role, Some(Role::Admin));
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"role":"Admin", "edit_local_grants":true})
+        );
+        edit.role = Some(Role::Viewer);
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"role":"Viewer", "edit_local_grants":true})
+        );
+        edit.role = None;
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"clear_local_role":true, "edit_local_grants":true})
+        );
+    }
+
+    #[test]
+    fn single_and_duplicate_local_roles_keep_noop_when_retained() {
+        let mut source = sources();
+        source.local_roles = vec![Role::Viewer];
+        let mut edit = LocalGrantEdit::new(Some(source));
+        edit.edit_role = true;
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({})
+        );
+        let mut source = sources();
+        source.local_roles = vec![Role::Viewer, Role::Viewer];
+        let mut edit = LocalGrantEdit::new(Some(source));
+        edit.edit_role = true;
+        assert_eq!(edit.role, Some(Role::Viewer));
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({})
+        );
+        edit.role = Some(Role::Operator);
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"role":"Operator", "edit_local_grants":true})
+        );
+        edit.role = None;
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"clear_local_role":true, "edit_local_grants":true})
+        );
+    }
+
+    #[test]
+    fn multiple_local_roles_normalization_still_requires_legacy_acknowledgment() {
+        let mut source = multi_role_source();
+        source.legacy_roles = vec![Role::Operator];
+        let mut edit = LocalGrantEdit::new(Some(source));
+        edit.edit_role = true;
+        assert_eq!(edit.role, Some(Role::Admin));
+        assert!(edit.request(None, None).is_err());
+        edit.acknowledge_legacy_role = true;
+        assert_eq!(
+            to_value(edit.request(None, None).unwrap()).unwrap(),
+            json!({"role":"Admin", "edit_local_grants":true})
+        );
+    }
+
+    #[test]
+    fn unrelated_account_edit_with_multiple_local_roles_omits_role() {
+        let edit = UserEditDraft::from_user(&user(Some(multi_role_source()))).grants;
+        assert_eq!(
+            to_value(edit.request(Some(false), Some("reset".into())).unwrap()).unwrap(),
+            json!({"enabled": false, "password": "reset"})
+        );
+    }
+
+    #[test]
+    fn multiple_local_roles_notice_is_sorted_deduplicated_and_factual() {
+        assert_eq!(multiple_local_roles_notice(&[]), None);
+        assert_eq!(multiple_local_roles_notice(&[Role::Viewer]), None);
+        assert_eq!(
+            multiple_local_roles_notice(&[Role::Viewer, Role::Viewer]),
+            None
+        );
+        assert_eq!(
+            multiple_local_roles_notice(&[Role::Viewer, Role::Admin, Role::Viewer]).as_deref(),
+            Some(
+                "This account has 2 local roles (Admin, Viewer). Saving with the override enabled replaces them with the selected role."
+            )
         );
     }
 

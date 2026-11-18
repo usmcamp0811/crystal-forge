@@ -881,6 +881,13 @@ pub struct AdminUserPatch {
     pub password_hash: Option<String>,
     /// Identifies the authenticated administrator assigning local grants.
     pub actor_user_id: Uuid,
+    /// Identifies the session that authenticated `actor_user_id`.
+    ///
+    /// SECURITY: [`patch_admin_user`] rechecks this session, the actor's
+    /// active status and the actor's current Admin role inside its transaction.
+    /// The caller's earlier authorization is not sufficient because it is not
+    /// serialized with concurrent demotion, disablement or logout.
+    pub actor_session_id: Uuid,
     /// Retains the actor identifier in durable audit records.
     pub actor_identifier: String,
     /// Retains best-effort request origin metadata.
@@ -898,18 +905,98 @@ pub enum AdminUserPatchOutcome {
     InvalidEnvironments,
     /// Leaves all state unchanged to retain the final enabled effective Admin.
     LastAdmin,
+    /// Leaves all state unchanged and writes no audit because the acting
+    /// administrator was no longer authorized when the transaction held its
+    /// locks.
+    ///
+    /// The actor was disabled, lost every Admin role assignment, or the
+    /// authenticating session was missing, invalidated, expired or owned by
+    /// another user. The check precedes target lookup, so this outcome does
+    /// not reveal whether the target exists.
+    ActorNotAuthorized,
+}
+
+/// Locks the distinct actor and target user rows in ascending id order.
+///
+/// CONCURRENCY: A single `ORDER BY id FOR UPDATE` statement locks both rows in
+/// a deterministic order, so two mutations that name the same pair in opposite
+/// roles cannot deadlock. Missing rows are skipped; callers read the rows
+/// afterwards in new statements to learn which of them exist.
+async fn lock_actor_and_target(
+    tx: &mut Transaction<'_, Postgres>,
+    actor_user_id: Uuid,
+    target_user_id: Uuid,
+) -> Result<()> {
+    let mut ids = [actor_user_id, target_user_id];
+    ids.sort();
+    let ids = if ids[0] == ids[1] {
+        &ids[..1]
+    } else {
+        &ids[..]
+    };
+    sqlx::query("SELECT id FROM users WHERE id = ANY($1) ORDER BY id FOR UPDATE")
+        .bind(ids)
+        .fetch_all(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Returns whether the actor is still an active Admin with a live session.
+///
+/// SECURITY: Callers MUST hold the grant advisory lock and the actor row lock.
+/// Each statement starts a new READ COMMITTED snapshot, so it sees changes
+/// committed while the caller waited for those locks. The session row is
+/// share-locked because session invalidation does not take the advisory lock;
+/// the lock holds the session valid until this transaction ends. The expiry
+/// test uses `clock_timestamp()` because `NOW()` is the transaction start,
+/// which precedes any lock wait.
+async fn actor_still_authorized(
+    tx: &mut Transaction<'_, Postgres>,
+    actor_user_id: Uuid,
+    actor_session_id: Uuid,
+) -> Result<bool> {
+    let active_admin = sqlx::query_scalar::<_, bool>(
+        "SELECT u.is_active AND EXISTS(SELECT 1 FROM user_role_assignments ura
+                                       WHERE ura.user_id = u.id AND ura.role = 'admin')
+         FROM users u WHERE u.id = $1",
+    )
+    .bind(actor_user_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if active_admin != Some(true) {
+        return Ok(false);
+    }
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM user_sessions
+         WHERE id = $1 AND user_id = $2 AND invalidated_at IS NULL
+           AND expires_at > clock_timestamp()
+         FOR SHARE",
+    )
+    .bind(actor_session_id)
+    .bind(actor_user_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .is_some())
 }
 
 /// Applies all PATCH categories and audit records in one transaction.
 ///
-/// Acquires the shared grant advisory lock before the target user lock. Validates
-/// all environment names before writes and checks the final effective Admin
-/// union before commit. Rejections and audit failures roll back every category,
-/// source flag and notification-eligibility change.
+/// Acquires the shared grant advisory lock first, then the actor and target
+/// user rows in ascending id order, then rechecks that the actor is still an
+/// active Admin with a valid session. Validates all environment names before
+/// writes and checks the final effective Admin union before commit.
+/// Rejections and audit failures roll back every category, source flag and
+/// notification-eligibility change.
+///
+/// SECURITY: The caller's authorization happened before this transaction and
+/// can be stale when it takes the locks. The in-transaction recheck is the
+/// authoritative authorization; it runs before target lookup, validation and
+/// every write.
 ///
 /// # Errors
 /// Returns an error for conflicting role edits or database failure, with no
-/// partial committed mutation.
+/// partial committed mutation. An unauthorized actor is reported as
+/// [`AdminUserPatchOutcome::ActorNotAuthorized`], not as an error.
 pub async fn patch_admin_user(
     pool: &PgPool,
     user_id: Uuid,
@@ -920,7 +1007,16 @@ pub async fn patch_admin_user(
         "conflicting local role edits"
     );
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: The advisory lock precedes every user row lock, as in all
+    // other guarded mutations. The actor and target rows are then locked in
+    // id order, so the actor check below waits for any in-flight change to
+    // either row and reads only committed state.
     lock_admin_grant_changes(&mut tx).await?;
+    lock_actor_and_target(&mut tx, patch.actor_user_id, user_id).await?;
+    if !actor_still_authorized(&mut tx, patch.actor_user_id, patch.actor_session_id).await? {
+        tx.rollback().await?;
+        return Ok(AdminUserPatchOutcome::ActorNotAuthorized);
+    }
     let Some(prior) = lock_user_guard(&mut tx, user_id).await? else {
         return Ok(AdminUserPatchOutcome::NotFound);
     };

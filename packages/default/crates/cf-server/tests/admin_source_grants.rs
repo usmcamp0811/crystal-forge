@@ -14,9 +14,9 @@ use crystal_forge::auth::session::{
 use crystal_forge::handlers::api::admin::update_user;
 use crystal_forge::models::auth_identity::AuthRole;
 use crystal_forge::queries::admin::{
-    GuardedMutationOutcome, delete_user_with_admin_guard, disable_user_with_admin_guard,
-    list_user_environment_names, replace_user_environment_memberships,
-    replace_user_primary_role_with_admin_guard,
+    AdminUserPatch, AdminUserPatchOutcome, GuardedMutationOutcome, delete_user_with_admin_guard,
+    disable_user_with_admin_guard, list_user_environment_names, patch_admin_user,
+    replace_user_environment_memberships, replace_user_primary_role_with_admin_guard,
 };
 use crystal_forge::queries::oidc_entitlements::{
     ReconciliationOutcome, reconcile, reserve_entitlement_generation,
@@ -607,7 +607,12 @@ async fn patch_fixture(pool: &PgPool) -> Result<(Uuid, Uuid, Uuid, String)> {
     Ok((owner, actor, identity, token))
 }
 
-async fn patch_snapshot(pool: &PgPool, owner: Uuid) -> Result<serde_json::Value> {
+// Generic over the executor so a test can also snapshot inside an open
+// transaction and observe that transaction's own uncommitted changes.
+async fn patch_snapshot<'e>(
+    db: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
+    owner: Uuid,
+) -> Result<serde_json::Value> {
     Ok(sqlx::query_scalar(
         "SELECT jsonb_build_object(
           'user', (SELECT to_jsonb(u) FROM users u WHERE id = $1),
@@ -616,8 +621,9 @@ async fn patch_snapshot(pool: &PgPool, owner: Uuid) -> Result<serde_json::Value>
           'environments', (SELECT coalesce(jsonb_agg(to_jsonb(m) ORDER BY environment_id), '[]'::jsonb)
                            FROM user_environment_memberships m WHERE user_id = $1),
           'preferences', (SELECT to_jsonb(p) FROM user_notification_preferences p WHERE user_id = $1),
+          'initialization_queue', (SELECT to_jsonb(q) FROM user_notification_initialization_queue q WHERE user_id = $1),
           'audits', (SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY id), '[]'::jsonb) FROM admin_audit_events a))",
-    ).bind(owner).fetch_one(pool).await?)
+    ).bind(owner).fetch_one(db).await?)
 }
 
 fn all_fields_patch() -> serde_json::Value {
@@ -1380,6 +1386,303 @@ async fn batched_source_projection_matches_admin_http_and_patch_summary(
     assert_eq!(
         http_source_list(&pool, "invalid-session").await?.0,
         StatusCode::FORBIDDEN
+    );
+    Ok(())
+}
+
+async fn session_id(pool: &PgPool, token: &str) -> Result<Uuid> {
+    Ok(
+        sqlx::query_scalar("SELECT id FROM user_sessions WHERE session_token_hash = $1")
+            .bind(hash_token(token))
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+// A statement waiting on the session row lock, without the grant advisory
+// lock. `pg_stat_activity` names the exact waiting statement, so an unrelated
+// lock wait cannot satisfy this barrier.
+async fn wait_for_session_share_waiter(pool: &PgPool) -> Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                 WHERE datname = current_database() AND pid <> pg_backend_pid()
+                   AND wait_event_type = 'Lock'
+                   AND query LIKE '%FROM user_sessions%FOR SHARE%')",
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+/// A change to the acting Admin that commits while the PATCH is queued.
+#[derive(Clone, Copy, PartialEq)]
+enum ActorChange {
+    /// Removes the Admin role, as a guarded demotion does under the grant lock.
+    Demote,
+    /// Invalidates only the session, under the grant lock.
+    InvalidateSession,
+    /// Disables only the account, under the grant lock.
+    Disable,
+    /// Invalidates only the session without the grant lock, as logout does.
+    Logout,
+    /// Renames the actor, which stays a valid Admin: the positive control.
+    Rename,
+}
+
+struct QueuedPatch {
+    owner: Uuid,
+    actor: Uuid,
+    status: StatusCode,
+    body: serde_json::Value,
+    /// Target and actor state as the controlling transaction committed it.
+    expected: serde_json::Value,
+    /// The same state after the queued request finished.
+    after: serde_json::Value,
+}
+
+// Deterministic interleaving. The Admin actor's PATCH passes the handler
+// authorization, then blocks inside `patch_admin_user`. Only then does the
+// controlling transaction commit `change`. The queued request proceeds after
+// that commit, so it must observe the new committed state.
+async fn queued_patch_race(
+    pool: &PgPool,
+    change: ActorChange,
+    self_target: bool,
+) -> Result<QueuedPatch> {
+    let (owner, actor, _, token) = patch_fixture(pool).await?;
+    // A second enabled Admin keeps the last-admin guard from explaining a
+    // rejection: only the actor recheck can produce 403 here.
+    let other = user(pool).await?;
+    replace_role(pool, other, other, AuthRole::Admin).await?;
+    let session = session_id(pool, &token).await?;
+    let target = if self_target { actor } else { owner };
+    let body = if self_target {
+        json!({"edit_local_grants": true, "role": "Admin"})
+    } else {
+        all_fields_patch()
+    };
+
+    let mut gate = pool.begin().await?;
+    if change != ActorChange::Logout {
+        sqlx::query("SELECT pg_advisory_xact_lock(526, 2)")
+            .execute(&mut *gate)
+            .await?;
+    }
+    match change {
+        ActorChange::Demote => {
+            sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1 AND role = 'admin'")
+                .bind(actor)
+                .execute(&mut *gate)
+                .await?;
+            sqlx::query(
+                "INSERT INTO user_role_assignments
+                 (user_id, role, local_grant, legacy_ownership_unresolved)
+                 VALUES ($1, 'viewer', true, false)",
+            )
+            .bind(actor)
+            .execute(&mut *gate)
+            .await?;
+        }
+        ActorChange::InvalidateSession | ActorChange::Logout => {
+            sqlx::query("UPDATE user_sessions SET invalidated_at = NOW() WHERE id = $1")
+                .bind(session)
+                .execute(&mut *gate)
+                .await?;
+        }
+        ActorChange::Disable => {
+            sqlx::query("UPDATE users SET is_active = false WHERE id = $1")
+                .bind(actor)
+                .execute(&mut *gate)
+                .await?;
+        }
+        ActorChange::Rename => {
+            sqlx::query("UPDATE users SET first_name = 'Renamed' WHERE id = $1")
+                .bind(actor)
+                .execute(&mut *gate)
+                .await?;
+        }
+    }
+    // Read inside the open transaction: this is the state that will commit.
+    let expected = json!({
+        "target": patch_snapshot(&mut *gate, target).await?,
+        "actor": patch_snapshot(&mut *gate, actor).await?,
+    });
+
+    let request_pool = pool.clone();
+    let request =
+        tokio::spawn(async move { http_patch(&request_pool, &token, target, body, true).await });
+    if change == ActorChange::Logout {
+        wait_for_session_share_waiter(pool).await?;
+    } else {
+        wait_for_advisory_waiter(pool, 2).await?;
+    }
+    assert!(
+        !request.is_finished(),
+        "the PATCH must still be queued before the change commits"
+    );
+    gate.commit().await?;
+    let (status, body) =
+        tokio::time::timeout(std::time::Duration::from_secs(15), request).await???;
+    let after = json!({
+        "target": patch_snapshot(pool, target).await?,
+        "actor": patch_snapshot(pool, actor).await?,
+    });
+    Ok(QueuedPatch {
+        owner,
+        actor,
+        status,
+        body,
+        expected,
+        after,
+    })
+}
+
+fn assert_queued_patch_rejected(race: &QueuedPatch) {
+    assert_eq!(race.status, StatusCode::FORBIDDEN, "{}", race.body);
+    // Equal snapshots include roles, source flags, environments, notification
+    // preferences, the initialization queue and every audit row.
+    assert_eq!(race.after, race.expected);
+    assert_eq!(
+        race.after["target"]["audits"],
+        race.expected["target"]["audits"]
+    );
+}
+
+#[sqlx::test]
+async fn queued_patch_rejects_actor_demoted_while_waiting(pool: PgPool) -> Result<()> {
+    let race = queued_patch_race(&pool, ActorChange::Demote, false).await?;
+    assert_queued_patch_rejected(&race);
+    assert_eq!(
+        role_sources(&pool, race.actor).await?,
+        [("viewer".into(), true, None, false)]
+    );
+    assert!(
+        !role_sources(&pool, race.owner)
+            .await?
+            .iter()
+            .any(|(role, ..)| role == "admin"),
+        "the demoted actor must not grant Admin"
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn queued_patch_rejects_actor_session_invalidated_while_waiting(pool: PgPool) -> Result<()> {
+    let race = queued_patch_race(&pool, ActorChange::InvalidateSession, false).await?;
+    assert_queued_patch_rejected(&race);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn queued_patch_rejects_actor_disabled_while_waiting(pool: PgPool) -> Result<()> {
+    let race = queued_patch_race(&pool, ActorChange::Disable, false).await?;
+    assert_queued_patch_rejected(&race);
+    Ok(())
+}
+
+// Logout takes no grant lock. The queued PATCH takes the grant lock at once
+// and must then wait on the share lock of the session row.
+#[sqlx::test]
+async fn queued_patch_rejects_session_logged_out_without_grant_lock(pool: PgPool) -> Result<()> {
+    let race = queued_patch_race(&pool, ActorChange::Logout, false).await?;
+    assert_queued_patch_rejected(&race);
+    Ok(())
+}
+
+#[sqlx::test]
+async fn queued_self_grant_is_rejected_after_actor_demotion(pool: PgPool) -> Result<()> {
+    let race = queued_patch_race(&pool, ActorChange::Demote, true).await?;
+    assert_queued_patch_rejected(&race);
+    assert_eq!(
+        role_sources(&pool, race.actor).await?,
+        [("viewer".into(), true, None, false)]
+    );
+    Ok(())
+}
+
+#[sqlx::test]
+async fn queued_patch_applies_when_actor_remains_valid_admin(pool: PgPool) -> Result<()> {
+    let race = queued_patch_race(&pool, ActorChange::Rename, false).await?;
+    assert_eq!(race.status, StatusCode::OK, "{}", race.body);
+    assert!(
+        role_sources(&pool, race.owner)
+            .await?
+            .contains(&("admin".into(), true, None, false))
+    );
+    assert_eq!(race.after["target"]["audits"].as_array().unwrap().len(), 5);
+    Ok(())
+}
+
+fn minimal_patch(actor: Uuid, session: Uuid) -> AdminUserPatch {
+    AdminUserPatch {
+        enabled: None,
+        role: Some(AuthRole::Admin),
+        clear_local_role: false,
+        environments: None,
+        password_hash: None,
+        actor_user_id: actor,
+        actor_session_id: session,
+        actor_identifier: "actor@example.invalid".into(),
+        request_origin: None,
+    }
+}
+
+#[sqlx::test]
+async fn patch_admin_user_requires_a_valid_session_of_a_current_admin(pool: PgPool) -> Result<()> {
+    let (owner, actor, _, token) = patch_fixture(&pool).await?;
+    let session = session_id(&pool, &token).await?;
+    let viewer = user(&pool).await?;
+    replace_role(&pool, viewer, viewer, AuthRole::Viewer).await?;
+    let viewer_session = session_id(&pool, &patch_session(&pool, viewer).await?).await?;
+    let invalidated = session_id(&pool, &patch_session(&pool, actor).await?).await?;
+    sqlx::query("UPDATE user_sessions SET invalidated_at = NOW() WHERE id = $1")
+        .bind(invalidated)
+        .execute(&pool)
+        .await?;
+    let expired: Uuid = sqlx::query_scalar(
+        "INSERT INTO user_sessions (user_id, session_token_hash, expires_at)
+         VALUES ($1, $2, NOW() - INTERVAL '1 minute') RETURNING id",
+    )
+    .bind(actor)
+    .bind(hash_token("expired-actor-session"))
+    .fetch_one(&pool)
+    .await?;
+
+    let before = patch_snapshot(&pool, owner).await?;
+    for (acting, acting_session) in [
+        (actor, Uuid::new_v4()),
+        (actor, viewer_session),
+        (actor, invalidated),
+        (actor, expired),
+        (viewer, viewer_session),
+    ] {
+        assert_eq!(
+            patch_admin_user(&pool, owner, minimal_patch(acting, acting_session)).await?,
+            AdminUserPatchOutcome::ActorNotAuthorized
+        );
+        assert_eq!(patch_snapshot(&pool, owner).await?, before);
+    }
+    // The actor check precedes target lookup and does not reveal existence.
+    assert_eq!(
+        patch_admin_user(&pool, Uuid::new_v4(), minimal_patch(viewer, viewer_session)).await?,
+        AdminUserPatchOutcome::ActorNotAuthorized
+    );
+    assert_eq!(
+        patch_admin_user(&pool, Uuid::new_v4(), minimal_patch(actor, session)).await?,
+        AdminUserPatchOutcome::NotFound
+    );
+    assert_eq!(
+        patch_admin_user(&pool, owner, minimal_patch(actor, session)).await?,
+        AdminUserPatchOutcome::Applied
     );
     Ok(())
 }

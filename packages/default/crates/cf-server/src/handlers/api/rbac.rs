@@ -7,9 +7,26 @@ use crate::models::auth_identity::AuthRole;
 use crate::queries::auth_identity::{get_session_by_token_hash, get_user_roles, is_user_active};
 
 pub async fn require_admin(pool: &PgPool, headers: &HeaderMap) -> Option<Uuid> {
-    let (user_id, roles) = resolve_authenticated_roles(pool, headers).await?;
+    require_admin_session(pool, headers)
+        .await
+        .map(|(user_id, _)| user_id)
+}
+
+/// Returns the acting Admin and the session that authenticated the request.
+///
+/// Applies the same token, session expiry, session invalidation, active-user
+/// and Admin-role checks as [`require_admin`]. The result is `(user id,
+/// session id)`.
+///
+/// SECURITY: This result is a point-in-time read made without a lock. A
+/// mutation that must not outlive a concurrent demotion, disablement or
+/// logout MUST pass both identifiers to its transaction and repeat the checks
+/// there after it acquires its synchronization locks. Returns `None` when any
+/// check fails.
+pub async fn require_admin_session(pool: &PgPool, headers: &HeaderMap) -> Option<(Uuid, Uuid)> {
+    let (user_id, session_id, roles) = resolve_authenticated_session(pool, headers).await?;
     if has_admin_role(&roles) {
-        Some(user_id)
+        Some((user_id, session_id))
     } else {
         None
     }
@@ -84,6 +101,15 @@ async fn resolve_authenticated_roles(
     pool: &PgPool,
     headers: &HeaderMap,
 ) -> Option<(Uuid, Vec<AuthRole>)> {
+    let (user_id, _, roles) = resolve_authenticated_session(pool, headers).await?;
+    Some((user_id, roles))
+}
+
+/// Resolves `(user id, session id, roles)` for a live session of an active user.
+async fn resolve_authenticated_session(
+    pool: &PgPool,
+    headers: &HeaderMap,
+) -> Option<(Uuid, Uuid, Vec<AuthRole>)> {
     let token = extract_cookie(headers, SESSION_COOKIE_NAME)?;
     let token_hash = hash_token(&token);
     let session = get_session_by_token_hash(pool, &token_hash).await.ok()??;
@@ -103,7 +129,7 @@ async fn resolve_authenticated_roles(
         .map(|assignment| assignment.role)
         .collect::<Vec<_>>();
 
-    Some((session.user_id, roles))
+    Some((session.user_id, session.id, roles))
 }
 
 #[cfg(test)]
