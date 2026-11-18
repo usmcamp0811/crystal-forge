@@ -94,6 +94,49 @@ fix is in `packages/default/crates/cf-server/src/handlers/api/admin.rs`,
 `src/queries/admin.rs` and `src/api/models.rs` (the latter paths relative to that
 crate); the provenance commits above describe the earlier groundwork.
 
+### In-transaction actor recheck scope
+
+`patch_admin_user` (PATCH `/api/v1/admin/users/:id`) uses the lock order below
+inside one transaction. The advisory lock comes first. The actor and target user
+rows follow in ascending id order. The actor recheck comes last.
+
+1. Take the shared grant advisory lock, transaction scoped.
+2. Lock the actor and target `users` rows with one `ORDER BY id FOR UPDATE`
+   statement. Ascending id prevents a deadlock when two requests name the same
+   pair in opposite roles.
+3. Recheck the acting Admin: the actor is active, holds an Admin role
+   assignment, and owns a live session (not invalidated, not expired). The
+   session row is share-locked because logout and session invalidation do not
+   take the advisory lock.
+4. Look up the target and apply the mutation.
+
+A failed recheck returns HTTP `403`, writes no state and no audit event, and
+precedes target lookup. See the
+[PATCH contract](../api/builders-queues-environments-dashboard-admin-api.md#acting-admin-recheck-inside-the-transaction).
+
+**Not yet rechecked in a transaction.** The other administrator mutations still
+authorize before their work starts. A demoted, disabled or logged-out Admin
+whose request already passed that check can still commit these changes:
+
+- `POST /admin/users` (`create_user`): runs as several separate pool
+  statements, not one transaction.
+- `DELETE /admin/users/:id` (`delete_user`): the guarded delete transaction
+  takes the advisory lock and the target row but does not recheck the actor.
+  The audit event is written after commit.
+- `POST` and `DELETE /admin/oidc-mappings`: single pool statements followed by
+  a separate audit write.
+- `PUT /admin/classification-config` and `PUT /admin/automatic-retry-policy`:
+  single pool statements after the early check.
+- `disable_user_with_admin_guard` has no HTTP handler in the current tree
+  (standalone disable is only the PATCH `enabled` field). A future caller
+  would not be rechecked either.
+
+There is no separate environment membership admin route. Membership edits go
+through create user and PATCH. Only PATCH rechecks the actor.
+
+These gaps are **open, not fixed**. They are tracked as the separate Backlog
+follow-up TASK-531. This slice does not claim them as complete.
+
 ## Identity helper and first-creation contract
 
 The MR !345 worktree changes in

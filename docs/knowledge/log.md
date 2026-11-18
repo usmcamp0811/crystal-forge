@@ -1,6 +1,7 @@
 # Bundle Update Log
 
 ## 2026-11-17
+* **TASK-529.2 second review (actor recheck, multi-role editor):** Documented that PATCH `/admin/users/:id` rechecks the acting Admin (active, Admin role, live session) inside its transaction after the advisory lock and ordered actor/target row locks, with 403, no write and no audit on failure. Recorded the lock order and that other admin mutations are not yet rechecked in a transaction (Backlog TASK-531). Documented editor normalization of several local roles and its notice. Server and browser results for these fixes remain pending; no builds ran for this update.
 * **TASK-529.2 OIDC source ownership:** Documented migration 0335's preserved legacy rows, independent local/IdP union, category-specific local reassignment, pre-redirect sequence generations, locking and failure/cancellation fencing. Corrected preserve-on-no-mapping guidance in the OIDC guide and linked a focused ownership/freshness concept with the one-time classification/recovery procedure. Positive configurable 24-hour freshness is future-PAT eligibility, not browser session TTL. Current-source farm checks and documentation validation remain pending; no builds or database operations ran for this documentation update. PAT/MCP endpoints and token-row validation remain absent. Existing collision-renumber provenance below is retained.
 
 ## 2026-11-16

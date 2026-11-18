@@ -51,7 +51,9 @@ full PAT admission gate is not wired; `implementation_status` remains `partial`.
 - Initialize editable values only from local source metadata. Require separate
   opt-in for role and environment edits. Unchanged opt-ins, ordinary no-op save,
   status-only and password-only edits MUST NOT send grant categories or set grant
-  intent. Never round-trip the effective union into local replacement fields.
+  intent. The one role exception is an account with several local roles; see
+  [Multiple local roles](#multiple-local-roles). Never round-trip the effective
+  union into local replacement fields.
 - A changed local role sends `role` with `edit_local_grants: true`. “No local
   role” sends `clear_local_role: true` when removing an existing local override;
   it preserves IdP and unresolved legacy roles. Never send role and clear together.
@@ -73,6 +75,40 @@ full PAT admission gate is not wired; `implementation_status` remains `partial`.
   source metadata, not assume the requested local role is the effective role.
 - Keep source metadata free of raw claims, issuer/subject, identity IDs, tokens,
   credentials and password hashes. Ownership labels are not secret inspection.
+
+## Multiple local roles
+
+An account can hold several local roles, for example Admin and Viewer. The
+editor (`LocalGrantEdit::request` in `packages/web-ui/src/views/admin.rs`)
+handles this case as follows:
+
+- The role selector starts at the highest local role (Admin, then Operator,
+  then Viewer). Zero local roles start at "No local role".
+- The editor compares the selected replacement with the **full deduplicated
+  local role set** from `local_roles`, not only the highest role. Selecting
+  Admin is a change when the local set is Admin and Viewer.
+- With the role override opted in, an account with several local roles that
+  keeps the pre-selected highest role sends `role` and `edit_local_grants:
+  true`. The server replaces **all** local role sources with exactly that one
+  role. Selecting a different role or "No local role" is also a change and
+  follows the normal contract above.
+- IdP role contributions are preserved. The replacement also removes
+  unresolved legacy role contributions, as the PATCH contract states for any
+  `role` replacement. When legacy roles exist, the editor still requires the
+  explicit acknowledgment before it sends the role.
+- Opt-in alone remains a no-op for an account with zero or one local role.
+  The selection equals the local set, so the request omits `role`. The only
+  exception is an acknowledged legacy classification, which is deliberate
+  replacement.
+- The Role section shows a factual notice, `data-testid`
+  `multiple-local-roles-notice`, when the account has more than one local
+  role. The notice states the number and names of the local roles and that
+  saving with the override enabled replaces them with the selected role.
+  Accounts with zero or one local role show no notice.
+
+The notice and the comparison are source-level statements. This update does not
+claim a rendered or browser result for them. Execution of the related
+regressions is recorded in TASK-529.2, not here.
 
 ## Comparison with the single-HTML design
 

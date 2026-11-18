@@ -369,7 +369,9 @@ unresolved legacy category; this acknowledgment is a UI condition, not another
 API field. Clearing only local roles does not classify legacy roles.
 
 The server prepares syntax and the password hash before mutation, then acquires
-the shared grant advisory lock before the target user lock. It validates exact
+the shared grant advisory lock before the user rows. It locks the acting Admin
+and target user rows in ascending id order, rechecks the acting Admin (see
+below), and only then looks up the target. It validates exact
 environment names under locks and commits status, notification eligibility,
 password, role/membership sources, and all corresponding audit records in **one
 transaction**. Invalid environments, database/audit failures and final-enabled-
@@ -377,6 +379,44 @@ Admin rejection roll back every supplied category. The last-Admin guard evaluate
 the combined final effective union; violation returns `409`. Missing users return
 `404`. The response summary is loaded after commit: a summary-load failure can
 return `500` after a successful mutation and must not be treated as proof of rollback.
+
+#### Acting Admin recheck inside the transaction
+
+The `require_admin_session` check in the handler runs before the transaction
+and takes no lock. It is an early rejection only. A concurrent demotion,
+disablement or logout can commit after it passes and before the mutation holds
+its locks. The mutation therefore re-authorizes the acting Admin inside the
+transaction. The order is:
+
+1. Take the shared grant advisory lock.
+2. Lock the actor and target `users` rows with one `ORDER BY id FOR UPDATE`
+   statement (ascending id; one row when actor and target are the same user).
+3. Recheck the actor. Each statement starts a new READ COMMITTED snapshot, so
+   the recheck sees changes committed while the request waited for the locks.
+4. Look up the target and apply the mutation.
+
+The recheck requires all of these conditions:
+
+- The actor row exists and `is_active` is true.
+- The actor holds an Admin role assignment (any source).
+- The session that authenticated the request exists, belongs to the actor, has
+  `invalidated_at` unset, and has `expires_at` later than `clock_timestamp()`.
+
+If any condition fails, the request returns HTTP `403` with the same body as
+the early Admin check. The transaction rolls back. No state changes and no
+audit event is written, even though the request passed the earlier check.
+The recheck precedes target lookup, environment validation and every write, so
+a stale actor receives `403` for any target id and cannot learn whether the
+target exists.
+
+Logout and session invalidation do not take the grant advisory lock. For this
+reason the recheck takes a `FOR SHARE` lock on the session row. The lock keeps
+the session valid until the transaction ends. A concurrent invalidation waits
+for the transaction. It does not run inside the check window.
+
+Scope: this recheck exists only for `PATCH /admin/users/:id`. Other admin
+mutations still authorize before they open their transactions. See the
+[lock order and open follow-up](../security/oidc-entitlement-ownership.md#in-transaction-actor-recheck-scope).
 
 ### Effective authority and source metadata
 

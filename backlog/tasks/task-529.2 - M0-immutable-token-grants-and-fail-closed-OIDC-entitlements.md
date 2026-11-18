@@ -323,3 +323,50 @@ Draft, and this task stays In Progress. A fresh normal core/native check for
 is not substituted for it. GitLab's public pipeline endpoint returned 403, so
 exact-head CI remains externally unverified here. The production cutover/source
 classification/recovery rehearsal remains required before delegated access.
+
+## Second maintainer review
+
+Reviewed head: `063ab5e1`. The reviewer confirmed the four prior findings
+(effective-grant round trip, non-atomic PATCH/audit, mutable identity helper,
+concurrent first-sign-in recovery) as fixed. The review raised two new findings.
+The fixes are in commit `9f9d907e`.
+
+- **P1: the acting Admin was not rechecked inside the PATCH transaction.**
+  `require_admin_session` checked the actor before the transaction and took no
+  lock, so a concurrent demotion, disablement or logout could commit after the
+  check passed. `patch_admin_user` now takes the grant advisory lock, locks the
+  actor and target user rows by ascending id, then rechecks that the actor is
+  active, holds an Admin role assignment and owns a live session. A failed
+  recheck returns 403 with no write and no audit event, before target lookup.
+  The session row is share-locked because logout does not take the advisory lock.
+- **P2: multi-local-role normalization.** The editor compared the selected role
+  with only the highest local role, so an account with several local roles
+  (for example Admin and Viewer) could not be normalized to one role. The editor
+  now compares with the full deduplicated local role set. With the override
+  opted in, keeping the pre-selected highest role sends `role` and
+  `edit_local_grants`, and the server replaces all local role sources with that
+  role. Zero or one local role stays a no-op. The Role section shows
+  `multiple-local-roles-notice` when more than one local role exists.
+
+Deviation recorded: the recheck tests session expiry with `clock_timestamp()`,
+not `NOW()` as the existing session lookup does. `NOW()` is the transaction start
+time, which precedes any lock wait, so it can accept a session that expired while
+the request waited for the locks.
+
+Follow-up: other admin mutations (create user, delete user, OIDC mapping
+upsert/delete, classification and retry-policy writes) still authorize before
+their transactions and are not rechecked in a transaction. TASK-531 tracks that
+work. It is a Backlog capture, not part of this task.
+
+Verification state, with no new farm pass claimed:
+
+- The actor-race and multi-role normalization regressions are static-reviewed and
+  queued. Farm results are **pending** unless the parent adds them below.
+- A fresh core/native farm build at `2c298432` completed with exit 0, output
+  `nj80dnqfmavslb0fvb5zah5vhrckd9di-cf-server-core-0.3.0`. That revision is not
+  the current head, so this build is not current-head evidence.
+- The reviewer reported the exact-head GitLab pipeline for `063ab5e1` as pending.
+  It is unverified here. No pipeline result exists for `9f9d907e` in this record.
+
+MR !345 stays Draft. This task stays In Progress. All six acceptance boxes stay
+unchecked.
