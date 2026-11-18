@@ -25,6 +25,9 @@ pub struct DeploymentStartedRequest {
 pub struct DeploymentStartedResponse {
     pub status: String,
     pub message: String,
+    /// Identifies the matched request for detached activation callbacks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<uuid::Uuid>,
 }
 
 pub async fn report(
@@ -91,6 +94,7 @@ pub async fn report(
         return (
             StatusCode::OK,
             Json(DeploymentStartedResponse {
+                deployment_id: None,
                 status: "ok".to_string(),
                 message: "No matching pending deployment".to_string(),
             }),
@@ -111,9 +115,36 @@ pub async fn report(
     (
         StatusCode::OK,
         Json(DeploymentStartedResponse {
+            deployment_id: Some(pending.id),
             status: "ok".to_string(),
             message: "Deployment start recorded".to_string(),
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn started_response_adds_exact_id_only_for_a_matched_request() {
+        let mut response = DeploymentStartedResponse {
+            status: "ok".into(),
+            message: "No matching pending deployment".into(),
+            deployment_id: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&response).unwrap(),
+            serde_json::json!({
+                "status":"ok", "message":"No matching pending deployment"
+            })
+        );
+        let id = uuid::Uuid::new_v4();
+        response.deployment_id = Some(id);
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["deployment_id"],
+            serde_json::json!(id)
+        );
+    }
 }

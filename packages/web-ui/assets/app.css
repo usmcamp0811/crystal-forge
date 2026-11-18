@@ -2201,6 +2201,22 @@ select option:checked {
   gap: 10px;
 }
 
+/* Failure fields retain the timeline's hierarchy and wrap approved diagnostics. */
+.sd-failure-detail { min-width: 0; margin: 8px 0; font-size: 12px; overflow-wrap: anywhere; }
+.sd-failure-detail dl { display: grid; gap: 6px; margin: 0; }
+.sd-failure-detail dl > div { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 8px; }
+.sd-failure-detail dt { color: var(--cf-text-muted); }
+.sd-failure-detail dd { min-width: 0; margin: 0; color: var(--cf-text-primary); }
+.sd-failure-detail details { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--cf-card-border); }
+.sd-failure-detail summary { cursor: pointer; color: var(--cf-text-secondary); }
+.sd-failure-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; }
+.deploy-pending.failed .deploy-pending-commit { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.sd-logs-card { min-width: 0; }
+.sd-logs-card .sd-logs-controls { flex-wrap: wrap; }
+.sd-logs-card .sd-card-head { flex-wrap: wrap; gap: 10px; }
+.sd-logs-card .sd-log-line { grid-template-columns: 70px 60px minmax(0, 1fr); }
+.sd-logs-card .sd-log-m { min-width: 0; overflow-wrap: anywhere; }
+
 .sd-toggle {
   display: inline-flex;
   align-items: center;
@@ -7155,6 +7171,13 @@ html[data-theme="light"] .sd-log-day { background: #0f172a; }
 .deploy-pending.rollback:not(.done) .deploy-step.current .deploy-step-dot { border-color: #d97706; }
 .deploy-pending.rollback:not(.done) .deploy-step-pulse { background: #d97706; }
 .deploy-pending-main { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.deploy-pending-content { min-width: 0; flex: 1; }
+.deploy-pending-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+@media (max-width: 640px) {
+  .deploy-pending-main { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: start; }
+  .deploy-pending-content, .deploy-pending-actions { grid-column: 2; }
+  .sd-failure-detail dl > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+}
 .deploy-pending-icon { flex-shrink: 0; display: grid; place-items: center; color: var(--cf-brand-purple); }
 .deploy-pending.done .deploy-pending-icon { color: #34d399; }
 .deploy-pending.failed .deploy-pending-icon { color: #f87171; }

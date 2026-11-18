@@ -4,8 +4,19 @@
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 
+// Same-run identities use the existing Admin create-user/login APIs and the
+// harness's authored local-user password. No session or password enters receipts.
+const actors = ["Operator", "Viewer"].map(role => ({
+  role, email: `failure-${role.toLowerCase()}@example.test`, name: `Failure ${role}`,
+}));
+exports.actors = actors;
+
 async function main() {
   const [mode, keyPath, hostname, bodyPath] = process.argv.slice(2);
+  if (mode === "actors") {
+    process.stdout.write(JSON.stringify(actors));
+    return;
+  }
   if (mode === "keygen") {
     const { privateKey, publicKey } = crypto.generateKeyPairSync("ed25519");
     fs.writeFileSync(keyPath, privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
@@ -26,4 +37,6 @@ async function main() {
   });
   process.stdout.write(JSON.stringify({ status: response.status, body: await response.json() }));
 }
-main().catch(() => { console.error("Failure-report fixture failed"); process.exitCode = 1; });
+if (require.main === module) {
+  main().catch(() => { console.error("Failure-report fixture failed"); process.exitCode = 1; });
+}

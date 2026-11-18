@@ -9,6 +9,7 @@ pub(crate) mod config_explorer;
 pub mod deploy_system_modal;
 pub mod deploy_target_picker;
 pub mod edit_system_modal;
+pub(crate) mod failure_detail;
 pub mod flake_position;
 pub mod helpers;
 pub mod info_row;

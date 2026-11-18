@@ -15,4 +15,8 @@
 pub mod agent;
 pub mod builder;
 pub mod cache;
+pub mod deployment_failure;
 pub mod source_artifact;
+
+/// Identifies a server-owned request across wire messages and agent callbacks.
+pub use uuid::Uuid;

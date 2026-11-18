@@ -5491,8 +5491,45 @@ pub struct VerifyGenerationClosureResponse {
     pub last_seen_at: Option<DateTime<Utc>>,
 }
 
+/// Contains server-authorized failure context. The server owns role projection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentFailureView {
+    /// Names the operation that failed.
+    pub stage: String,
+    /// Describes the classified cause or unavailable reason.
+    pub summary: String,
+    /// Distinguishes classified, legacy, and incomplete reporting.
+    pub reason_status: String,
+    /// Supplies the cause identifier when authorized.
+    pub code: Option<String>,
+    /// Supplies operational guidance when authorized.
+    pub remediation_hint: Option<String>,
+    /// Supplies the child exit status when authorized.
+    pub exit_code: Option<i32>,
+    /// Counts started attempts when authorized.
+    pub attempt_count: Option<u32>,
+    /// Supplies the attempt limit when authorized.
+    pub max_attempts: Option<u32>,
+    /// Contains separately authorized diagnostic evidence.
+    pub diagnostics: Option<DeploymentFailureDiagnostics>,
+}
+
+/// Contains masked diagnostic evidence approved by the server for this caller.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentFailureDiagnostics {
+    /// Contains bounded diagnostic lines.
+    pub lines: Vec<String>,
+    /// Identifies the sanitized cache endpoint, when supplied.
+    pub cache_endpoint: Option<String>,
+    /// Explains why diagnostic lines were suppressed.
+    pub suppression_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemDeploymentProgress {
+    /// Contains optional server-projected failure context.
+    #[serde(default)]
+    pub failure: Option<DeploymentFailureView>,
     pub id: Uuid,
     pub stage: String,
     pub kind: String,
@@ -5517,6 +5554,9 @@ pub struct SystemDeploymentProgress {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemHistoryEntry {
+    /// Contains optional server-projected failure context.
+    #[serde(default)]
+    pub failure: Option<DeploymentFailureView>,
     #[serde(default)]
     pub id: Option<Uuid>,
     pub timestamp: DateTime<Utc>,
@@ -5580,6 +5620,15 @@ pub struct SystemHistoryEntry {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemAgentEvent {
+    /// Identifies the persisted event for History-to-Logs correlation.
+    #[serde(default)]
+    pub event_id: Option<Uuid>,
+    /// Identifies the deployment independently of its target commit.
+    #[serde(default)]
+    pub deployment_id: Option<Uuid>,
+    /// Contains optional server-projected failure context.
+    #[serde(default)]
+    pub failure: Option<DeploymentFailureView>,
     pub timestamp: DateTime<Utc>,
     pub level: String,
     pub event_type: String,
@@ -5932,6 +5981,12 @@ pub struct SystemCommitHistory {
 /// Deployment log entry for the Logs tab.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentLogEntry {
+    /// Preserves exact persisted event identity for log anchors and deduplication.
+    #[serde(default)]
+    pub event_id: Option<Uuid>,
+    /// Preserves deployment identity without conflating repeated attempts.
+    #[serde(default)]
+    pub deployment_id: Option<Uuid>,
     /// Log line content.
     pub message: String,
     /// Timestamp of the log entry.

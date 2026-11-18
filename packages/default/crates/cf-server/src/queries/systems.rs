@@ -269,8 +269,15 @@ pub struct SystemHistoryRow {
     pub restart_type: Option<String>,
 }
 
+/// Carries log events and internal metadata for role-aware API projection.
 #[derive(Debug, sqlx::FromRow)]
 pub struct SystemAgentEventRow {
+    /// Identifies persisted events, absent for state and heartbeat telemetry.
+    pub event_id: Option<Uuid>,
+    /// Correlates lifecycle events with the deployment request.
+    pub deployment_id: Option<Uuid>,
+    /// Carries failure data only to the shared role projection.
+    pub failure_metadata: Option<serde_json::Value>,
     pub timestamp: DateTime<Utc>,
     pub level: String,
     pub event_type: String,
@@ -1933,7 +1940,10 @@ pub async fn list_system_agent_event_rows(
                     END,
                     COALESCE(CONCAT(' (', ss.store_path, ')'), '')
                 ) AS message,
-                (ss.change_reason = 'cf_deployment') AS deployment_related
+                (ss.change_reason = 'cf_deployment') AS deployment_related,
+                NULL::uuid AS event_id,
+                NULL::uuid AS deployment_id,
+                NULL::jsonb AS failure_metadata
             FROM target t
             JOIN system_states ss ON ss.hostname = t.hostname
             WHERE ss.change_reason IS DISTINCT FROM 'state_delta'
@@ -1951,14 +1961,13 @@ pub async fn list_system_agent_event_rows(
                 CASE se.event_type
                     WHEN 'cf_deployment_started'  THEN 'Deployment started — applying new configuration'
                     WHEN 'cf_deployment_succeeded' THEN 'Deployment activated successfully'
-                    -- SECURITY: Legacy failure_message is not safe for display.
-                    WHEN 'cf_deployment_failed'    THEN COALESCE(
-                        'Deployment failed: ' || NULLIF(BTRIM(se.metadata->>'display_failure_message'), ''),
-                        'Deployment failed'
-                    )
+                    WHEN 'cf_deployment_failed' THEN 'Deployment failed'
                     ELSE se.event_type
                 END AS message,
-                true AS deployment_related
+                true AS deployment_related,
+                se.id AS event_id,
+                se.deployment_id,
+                CASE WHEN se.event_type = 'cf_deployment_failed' THEN se.metadata END AS failure_metadata
             FROM target t
             JOIN systems s ON s.hostname = t.hostname
             JOIN system_events se ON se.system_id = s.id
@@ -1975,7 +1984,10 @@ pub async fn list_system_agent_event_rows(
                     'agent heartbeat',
                     COALESCE(CONCAT(' version=', ah.agent_version), '')
                 ) AS message,
-                false AS deployment_related
+                false AS deployment_related,
+                NULL::uuid AS event_id,
+                NULL::uuid AS deployment_id,
+                NULL::jsonb AS failure_metadata
             FROM target t
             JOIN system_states ss ON ss.hostname = t.hostname
             JOIN agent_heartbeats ah ON ah.system_state_id = ss.id
