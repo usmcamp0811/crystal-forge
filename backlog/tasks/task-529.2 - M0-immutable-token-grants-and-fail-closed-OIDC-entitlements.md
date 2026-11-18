@@ -370,3 +370,19 @@ Verification state, with no new farm pass claimed:
 
 MR !345 stays Draft. This task stays In Progress. All six acceptance boxes stay
 unchecked.
+
+### Second-review fixes: farm evidence at `9f9d907e`
+
+Both second-review findings are fixed at commit `9f9d907e` (docs follow in `c431dc0b`, which changes no code).
+
+- P1, acting Admin recheck: PASSED on the farm. Pinned database derivation `qwnl38vq5na567lm5kx9da5sdxlq87p8-cf-oidc-authorization-regressions-0.3.0` ran 53 nonignored tests with 0 failures and 0 ignored: 1 restricted-grant, 28 admin-source (21 existing plus 7 new) and 24 OIDC. The new tests are `queued_patch_rejects_actor_demoted_while_waiting`, `..._actor_session_invalidated_while_waiting`, `..._actor_disabled_while_waiting`, `queued_patch_rejects_session_logged_out_without_grant_lock`, `queued_patch_applies_when_actor_remains_valid_admin`, `queued_self_grant_is_rejected_after_actor_demotion` and `patch_admin_user_requires_a_valid_session_of_a_current_admin`. Each queued test proves the request is waiting on the lock before the revocation commits, then asserts HTTP 403 with state, notification queue and audit rows unchanged. The positive control proves the interleaving itself does not reject a valid Admin.
+- P2, multiple local roles: PASSED in the web-ui package unit tests, 893 passed, 0 failed, 1 ignored (887 plus 6 new). Preview smoke on a SQL-created two-local-role fixture sent exactly `{"role":"Viewer","edit_local_grants":true}` and the account ended with only that role.
+- Full Access gate PASSED at source revision `9f9d907e`: 47 of 47 cases, including the three `admin-source-*` cases and `authorization-operator-has-no-usable-admin-mutation-in-ui`. Output `jmny3mnvp3v6q2s9s4zj3cw3i9v9b9dz-cf-it-access-lifecycle-local-bootstrap`.
+- Embedded application build PASSED on retry, output `6c6ih031rl0dzh9cg0fq2ygi6miscqhf-cf-server-0.3.0` (server library 1571 passed, 0 failed, 853 ignored).
+- OKF validation PASSED at the documentation commit (200 concepts).
+
+Not a pass, recorded honestly: the same derivation `i125vc8vzll56iii1wgqvx1y6rhq89yx-cf-server-0.3.0.drv` first FAILED twice (application build and Access dependency) in `handlers::api::builders::tests::niks3_probe_failure_never_polls_success_transition`, with a different expected value each run (`MissingPath`, `Network`, `AuthenticationFailed`) and always `Process` observed, then PASSED on retry with no source change. `builders.rs` is unchanged by this MR. The observed value points at the test's fake `nix` script failing to execute, but the root cause is not established; the test is added to TASK-530. It also failed once on an earlier work-in-progress build and passed on others, so treat it as an existing intermittent failure, not a result for this MR.
+
+Still unverified: exact-head GitLab CI for the new head; a fresh normal core/native check at `9f9d907e` (the completed run was at `2c298432`); narrow-screen, keyboard and error-state UI coverage; an unmocked OIDC provider callback. TASK-531 tracks the other admin mutations that still authorize before their transactions. MR !345 stays Draft, this task stays In Progress, and all six acceptance items stay unchecked.
+
+Preview note: the task-owned preview PostgreSQL lost its shared-memory segment around 21:54 local time on 2026-11-17 (cause not investigated) and was restarted on the same data directory after a backup copy; fixtures and all 317 migrations intact.
