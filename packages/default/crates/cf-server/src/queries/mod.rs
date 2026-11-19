@@ -1,3 +1,4 @@
+pub mod access_tokens;
 pub mod acceptance_register;
 pub mod admin;
 pub mod agent_heartbeat;

@@ -9369,3 +9369,81 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
 .tp-row .tp-sha{position:relative;z-index:1;padding:0;border:0;background:none;font-size:inherit;cursor:pointer}
 .tp-row .tp-sha:focus-visible{outline:2px solid var(--cf-brand-purple);outline-offset:2px;border-radius:3px}
 .tp-unpublished{color:var(--cf-amber)}
+
+/* Access tokens card (Profile). Reuses .card, .sys-table, .chip, .modal and
+   .sd-callout; only the layout pieces below are specific to this card. */
+.cfat-head { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.cfat-head-copy { flex: 1 1 320px; min-width: 0; }
+.cfat-title { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; font-size: 13px; font-weight: 600; }
+.cfat-lead { margin: 0; font-size: 12px; line-height: 1.5; color: var(--cf-text-secondary); }
+.cfat-note { display: flex; align-items: flex-start; gap: 6px; margin: 8px 0 0; }
+.cfat-note svg { flex-shrink: 0; margin-top: 2px; }
+.cfat-live { min-height: 14px; margin-top: 8px; font-size: 11px; color: var(--cf-emerald); }
+.cfat-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.cfat-search { flex: 1 1 200px; max-width: 280px; }
+.cfat-search .input { font-size: 12px; }
+.cfat-filter { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--cf-text-secondary); }
+.cfat-filter .input { width: auto; font-size: 12px; }
+.cfat-banner { margin-top: 12px; align-items: center; justify-content: space-between; }
+.cfat-empty { margin-top: 14px; padding: 28px 16px; display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; border: 1px dashed var(--cf-divider); border-radius: 10px; }
+.cfat-empty-title { font-size: 13px; font-weight: 600; }
+.cfat-table-wrap { margin-top: 12px; overflow-x: auto; }
+.cfat-table-wrap .sys-table tbody tr { cursor: default; }
+.cfat-row-inactive { opacity: 0.7; }
+.cfat-name { font-weight: 600; }
+.cfat-hint { font-size: 10px; color: var(--cf-text-muted); }
+.cfat-status { font-size: 10px; }
+.cfat-row-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+.cfat-danger { color: var(--cf-red); border-color: color-mix(in srgb, var(--cf-red) 40%, transparent); }
+.cfat-more { margin-top: 12px; }
+.cfat-cards { display: none; }
+.cfat-card-item { display: flex; flex-direction: column; gap: 6px; padding: 12px; border-radius: 10px; background: var(--cf-subtle-bg); font-size: 12px; }
+.cfat-card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cfat-error { font-size: 11px; color: var(--cf-red); }
+.cfat-error:empty { display: none; }
+
+/* Dialogs */
+.cfat-modal { width: min(620px, 96vw); max-height: 92vh; }
+.cfat-modal-narrow { width: min(500px, 96vw); }
+.cfat-modal .modal-head h2, .cfat-drawer .modal-head h2 { display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; }
+.cfat-modal .modal-body { overflow-y: auto; }
+.cfat-modal .modal-foot { align-items: center; }
+.cfat-modal .modal-foot .cfat-live { margin: 0 auto 0 0; }
+.cfat-confirm-text { margin: 0; font-size: 12.5px; line-height: 1.5; }
+.cfat-fieldset { display: flex; flex-direction: column; gap: 10px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.cfat-fieldset legend, .cfat-legend { padding: 0; margin-bottom: 8px; font-size: 12px; font-weight: 700; }
+.cfat-fieldset .field { margin-top: 0; }
+.cfat-two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }
+.cfat-check-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+.cfat-check { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--cf-subtle-bg); font-size: 12px; cursor: pointer; }
+.cfat-check input { margin-top: 2px; accent-color: var(--cf-brand-purple); }
+.cfat-check-off { cursor: not-allowed; color: var(--cf-text-secondary); }
+.cfat-check-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cfat-check-title { font-weight: 600; }
+.cfat-review { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--cf-divider); border-radius: 8px; font-size: 12px; }
+.cfat-secret-row { display: flex; gap: 6px; }
+.cfat-secret-row .input { flex: 1; min-width: 0; font-size: 11.5px; }
+.cfat-pre { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--cf-subtle-bg); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+.cfat-subtitle { margin: 4px 0 8px; font-size: 12px; font-weight: 650; }
+.cfat-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.cfat-chip { font-size: 10px; }
+.cfat-chip-off { text-decoration: line-through; }
+.cfat-events { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--cf-text-secondary); }
+
+/* Details drawer: full-height panel at the right edge. */
+.cfat-drawer-backdrop { place-items: stretch end; padding: 0; }
+.cfat-drawer { display: flex; flex-direction: column; width: min(440px, 100vw); height: 100%; background: var(--cf-card-bg); border-left: 1px solid var(--cf-card-border); box-shadow: var(--shadow-pop); }
+.cfat-drawer .modal-body { flex: 1; overflow-y: auto; }
+.cfat-drawer .modal-foot { align-items: center; }
+.cfat-drawer-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+
+@media (max-width: 760px) {
+  .cfat-table-wrap { display: none; }
+  .cfat-cards { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+  .cfat-backdrop { padding: 0; place-items: end stretch; }
+  .cfat-modal, .cfat-modal-narrow { width: 100vw; max-height: 94vh; border-radius: 14px 14px 0 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cfat-backdrop, .cfat-drawer-backdrop { animation: none; }
+}

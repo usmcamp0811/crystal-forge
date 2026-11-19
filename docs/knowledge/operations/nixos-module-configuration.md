@@ -94,6 +94,15 @@ sources:
 }
 ```
 
+## Access token policy
+
+`services.crystal-forge.server.accessTokens.enable` (default `true`),
+`defaultLifetimeDays` (default `30`) and `maxLifetimeDays` (default `90`) set
+the owner access-token policy. Both lifetimes accept 1 to 90, and the module
+asserts `defaultLifetimeDays <= maxLifetimeDays`. They map to the
+`access_tokens_*` keys in `[server]`. See
+[Access token service](../security/access-token-service.md).
+
 ## Private credential permissions and upgrades
 
 The current module manages named state, work and cache directories without

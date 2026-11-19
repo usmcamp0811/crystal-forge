@@ -6557,6 +6557,360 @@ pub struct UserSessionsResponse {
     pub sessions: Vec<UserSessionDto>,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Owner access tokens (`/user/access-token*`, TASK-534.3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lifecycle status of an owner access token, as computed by the server.
+///
+/// `Revoked` and `Expired` are terminal. `ExpiringSoon` is `Active` with seven
+/// days or fewer left. `OwnerSuspended` means the token is valid but the owner
+/// account currently grants it no access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessTokenStatus {
+    /// The token authenticates requests.
+    Active,
+    /// The token is active and expires within seven days.
+    ExpiringSoon,
+    /// The expiry time has passed.
+    Expired,
+    /// The owner or an administrator revoked the token.
+    Revoked,
+    /// The owner account is disabled or lost the permissions behind the grant.
+    OwnerSuspended,
+    /// A status that this client version does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Environment included in a token grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessTokenEnvironmentDto {
+    /// Environment identifier.
+    pub id: Uuid,
+    /// Environment display name.
+    pub name: String,
+    /// `false` when the environment was deactivated after the grant.
+    pub is_active: bool,
+}
+
+/// Access token metadata. Never carries the secret or its hash.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccessTokenDto {
+    /// Public token identifier.
+    pub id: Uuid,
+    /// Owner-chosen name, unique among the owner's non-revoked tokens.
+    pub name: String,
+    /// Token audience. Only `"mcp"` exists in v1.
+    pub audience: String,
+    /// Non-secret token prefix, for example `cfat_v1_8d12…`.
+    pub display_hint: String,
+    /// Granted scopes, sorted.
+    pub scopes: Vec<String>,
+    /// Granted environments.
+    pub environments: Vec<AccessTokenEnvironmentDto>,
+    /// Issue time.
+    pub created_at: DateTime<Utc>,
+    /// Expiry time.
+    pub expires_at: DateTime<Utc>,
+    /// Revocation time, when revoked.
+    pub revoked_at: Option<DateTime<Utc>>,
+    /// Last successful use, when the token was ever used.
+    pub last_used_at: Option<DateTime<Utc>>,
+    /// Server-computed lifecycle status.
+    pub status: AccessTokenStatus,
+}
+
+/// Page of the owner's tokens, newest first.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AccessTokenListResponse {
+    /// Tokens of this page.
+    #[serde(alias = "tokens")]
+    pub items: Vec<AccessTokenDto>,
+    /// Offset of the next page. `None` on the last page.
+    #[serde(default)]
+    pub next_offset: Option<i64>,
+}
+
+/// Environment selectable for a new token.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AccessTokenPolicyEnvironmentDto {
+    /// Environment identifier sent in `environment_ids`.
+    pub id: Uuid,
+    /// Environment display name.
+    pub name: String,
+}
+
+/// Scope offered by the create form.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AccessTokenPolicyScopeDto {
+    /// Scope string sent in `scopes`, for example `cves:read`.
+    pub scope: String,
+    /// Human-readable scope label.
+    pub label: String,
+    /// `false` when the scope cannot be granted to this user now.
+    pub available: bool,
+    /// `true` when the form selects the scope initially.
+    pub default_selected: bool,
+    /// Why the scope is unavailable. Set only when `available` is `false`.
+    #[serde(default)]
+    pub unavailable_reason: Option<String>,
+}
+
+/// MCP server status reported in the token policy.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AccessTokenMcpDto {
+    /// `false` until the MCP server is enabled on this deployment.
+    pub enabled: bool,
+    /// External MCP endpoint, when configured.
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// Reason that the server refuses token creation or rotation for this user.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AccessTokenCreateBlockedDto {
+    /// Machine-readable reason.
+    pub code: String,
+    /// User-facing explanation.
+    pub message: String,
+}
+
+/// Token limits and selectable grants for the signed-in user.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AccessTokenPolicyDto {
+    /// `false` when the server disabled access tokens.
+    pub enabled: bool,
+    /// MCP server status.
+    pub mcp: AccessTokenMcpDto,
+    /// Only audience of v1.
+    pub audience: String,
+    /// Lifetime preselected in the create form, in days.
+    pub default_lifetime_days: u32,
+    /// Longest lifetime the server accepts, in days.
+    pub max_lifetime_days: u32,
+    /// Lifetimes offered by the create form, in days.
+    pub lifetime_options_days: Vec<u32>,
+    /// Maximum number of non-revoked, unexpired tokens per owner.
+    pub max_active_tokens: u32,
+    /// Environments the user may select.
+    pub environments: Vec<AccessTokenPolicyEnvironmentDto>,
+    /// Scopes the form lists, available or not.
+    pub scopes: Vec<AccessTokenPolicyScopeDto>,
+    /// Set when creation is blocked for this user.
+    #[serde(default)]
+    pub create_blocked: Option<AccessTokenCreateBlockedDto>,
+}
+
+/// Granted environment compared with the owner's current access.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AccessTokenEffectiveEnvironmentDto {
+    /// Environment identifier.
+    pub id: Uuid,
+    /// Environment display name.
+    pub name: String,
+    /// `false` when the owner no longer has access to the environment.
+    pub available: bool,
+}
+
+/// Granted scope compared with the owner's current permissions.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AccessTokenEffectiveScopeDto {
+    /// Scope string.
+    pub scope: String,
+    /// `false` when the owner's current role does not permit the scope.
+    pub permitted: bool,
+}
+
+/// Granted access intersected with the owner's current access.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AccessTokenEffectiveDto {
+    /// Granted environments with current availability.
+    pub environments: Vec<AccessTokenEffectiveEnvironmentDto>,
+    /// Granted scopes with current permission.
+    pub scopes: Vec<AccessTokenEffectiveScopeDto>,
+}
+
+/// Audit event recorded for a token.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AccessTokenEventDto {
+    /// Audit action, for example `access_token_created`.
+    pub action: String,
+    /// Event time.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Token metadata plus current effective access and recent events.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AccessTokenDetailDto {
+    /// Token metadata.
+    #[serde(flatten)]
+    pub token: AccessTokenDto,
+    /// Granted versus currently effective access.
+    pub effective: AccessTokenEffectiveDto,
+    /// At most ten recent audit events, newest first.
+    #[serde(default)]
+    pub recent_events: Vec<AccessTokenEventDto>,
+}
+
+/// Request body of `POST /user/access-tokens`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CreateAccessTokenRequest {
+    /// Token name, 1 to 100 characters.
+    pub name: String,
+    /// Always `"mcp"` in v1.
+    pub audience: String,
+    /// Lifetime in days.
+    pub expires_in_days: u32,
+    /// Explicit environments. Never empty.
+    pub environment_ids: Vec<Uuid>,
+    /// Requested scopes. Never empty.
+    pub scopes: Vec<String>,
+}
+
+/// Response of token creation or rotation: the only carrier of the secret.
+///
+/// SECURITY: `token` holds the plaintext credential. This type implements
+/// [`std::fmt::Debug`] by hand to redact it, does not implement `Serialize`,
+/// and must stay in the component state of the reveal view. Never log it,
+/// format it, or store it outside that component.
+#[derive(Clone, PartialEq, Deserialize)]
+pub struct CreatedAccessTokenDto {
+    /// Metadata of the new token.
+    #[serde(flatten)]
+    pub metadata: AccessTokenDto,
+    /// Plaintext secret, shown once.
+    pub token: String,
+    /// Token revoked by this response. Set only by rotation.
+    #[serde(default)]
+    pub replaced_token_id: Option<Uuid>,
+}
+
+impl std::fmt::Debug for CreatedAccessTokenDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreatedAccessTokenDto")
+            .field("metadata", &self.metadata)
+            .field("token", &"<redacted>")
+            .field("replaced_token_id", &self.replaced_token_id)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod access_token_dto_tests {
+    use super::*;
+
+    const TOKEN_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const ENV_ID: &str = "22222222-2222-4222-8222-222222222222";
+    const SECRET: &str = "cfat_v1_SECRETSECRETSECRETSECRETSECRETSECRET";
+
+    fn metadata_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": TOKEN_ID,
+            "name": "OpenCode - Sledge",
+            "audience": "mcp",
+            "display_hint": "cfat_v1_8d12…",
+            "scopes": ["cves:read", "poams:read"],
+            "environments": [{"id": ENV_ID, "name": "staging", "is_active": true}],
+            "created_at": "2026-11-02T10:00:00Z",
+            "expires_at": "2026-12-02T10:00:00Z",
+            "revoked_at": null,
+            "last_used_at": null,
+            "status": "expiring_soon"
+        })
+    }
+
+    #[test]
+    fn policy_payload_decodes() {
+        let policy: AccessTokenPolicyDto = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "mcp": {"enabled": false, "url": null},
+            "audience": "mcp",
+            "default_lifetime_days": 30,
+            "max_lifetime_days": 90,
+            "lifetime_options_days": [7, 30, 90],
+            "max_active_tokens": 20,
+            "environments": [{"id": ENV_ID, "name": "staging"}],
+            "scopes": [
+                {"scope": "cves:read", "label": "Read CVEs and systems",
+                 "available": true, "default_selected": true, "unavailable_reason": null},
+                {"scope": "poams:write", "label": "Update POA&M progress",
+                 "available": false, "default_selected": false,
+                 "unavailable_reason": "Not supported yet"}
+            ],
+            "create_blocked": {"code": "entitlements_stale", "message": "Sign in again."}
+        }))
+        .expect("policy decodes");
+        assert!(policy.enabled && !policy.mcp.enabled && policy.mcp.url.is_none());
+        assert_eq!(policy.lifetime_options_days, vec![7, 30, 90]);
+        assert_eq!(
+            policy.scopes[1].unavailable_reason.as_deref(),
+            Some("Not supported yet")
+        );
+        assert_eq!(
+            policy.create_blocked.map(|blocked| blocked.code),
+            Some("entitlements_stale".to_string())
+        );
+    }
+
+    #[test]
+    fn list_payload_decodes_and_item_has_no_secret_field() {
+        let page: AccessTokenListResponse = serde_json::from_value(serde_json::json!({
+            "items": [metadata_json()],
+            "next_offset": 25
+        }))
+        .expect("list decodes");
+        assert_eq!(page.next_offset, Some(25));
+        assert_eq!(page.items[0].status, AccessTokenStatus::ExpiringSoon);
+        let reencoded = serde_json::to_value(&page.items[0]).expect("item encodes");
+        assert!(reencoded.get("token").is_none());
+        assert!(reencoded.get("secret_hash").is_none());
+    }
+
+    #[test]
+    fn unknown_status_decodes_as_unknown() {
+        let mut value = metadata_json();
+        value["status"] = "paused".into();
+        let token: AccessTokenDto = serde_json::from_value(value).expect("token decodes");
+        assert_eq!(token.status, AccessTokenStatus::Unknown);
+    }
+
+    #[test]
+    fn detail_payload_decodes_effective_access_and_events() {
+        let mut value = metadata_json();
+        value["effective"] = serde_json::json!({
+            "environments": [{"id": ENV_ID, "name": "staging", "available": false}],
+            "scopes": [
+                {"scope": "cves:read", "permitted": true},
+                {"scope": "poams:read", "permitted": false}
+            ]
+        });
+        value["recent_events"] = serde_json::json!([{"action": "access_token_created", "created_at": "2026-11-02T10:00:00Z"}]);
+        let detail: AccessTokenDetailDto = serde_json::from_value(value).expect("detail decodes");
+        assert_eq!(detail.token.name, "OpenCode - Sledge");
+        assert!(!detail.effective.environments[0].available);
+        assert!(!detail.effective.scopes[1].permitted);
+        assert_eq!(detail.recent_events[0].action, "access_token_created");
+    }
+
+    #[test]
+    fn created_payload_decodes_token_and_debug_redacts_it() {
+        let mut value = metadata_json();
+        value["token"] = SECRET.into();
+        value["replaced_token_id"] = "33333333-3333-4333-8333-333333333333".into();
+        let created: CreatedAccessTokenDto =
+            serde_json::from_value(value).expect("created decodes");
+        assert_eq!(created.token, SECRET);
+        assert!(created.replaced_token_id.is_some());
+        let debug = format!("{created:?}");
+        assert!(!debug.contains("SECRET"), "Debug output leaked the secret");
+        assert!(debug.contains("<redacted>"));
+        let pretty = format!("{created:#?}");
+        assert!(!pretty.contains("SECRET"));
+    }
+}
+
 /// Admin users list item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminUserSummary {
@@ -6633,6 +6987,12 @@ pub enum AuditAction {
     BuildComplete,
     CveAccept,
     SystemDeploy,
+    /// An owner created an access token.
+    AccessTokenCreated,
+    /// An owner replaced an access token; the old token is revoked.
+    AccessTokenRotated,
+    /// An owner revoked an access token.
+    AccessTokenRevoked,
     #[serde(other)]
     Unknown,
 }

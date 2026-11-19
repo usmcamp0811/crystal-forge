@@ -318,6 +318,23 @@ pub struct ServerConfig {
     #[serde(default = "default_session_retention_days")]
     pub session_retention_days: i32,
 
+    /// Enables owner access-token management (create, rotate, revoke).
+    /// Tokens stay inert until a consumer such as MCP admits them.
+    /// Default: true. When false, create, rotate, list and detail are rejected;
+    /// the policy endpoint and revoke still work.
+    #[serde(default = "default_access_tokens_enable")]
+    pub access_tokens_enable: bool,
+
+    /// Lifetime in days that the create form preselects. Must satisfy
+    /// `1 <= default <= max`. Default: 30.
+    #[serde(default = "default_access_tokens_default_lifetime_days")]
+    pub access_tokens_default_lifetime_days: u32,
+
+    /// Maximum lifetime in days of any access token. Must satisfy
+    /// `default <= max <= 90`; 90 is the specification ceiling. Default: 90.
+    #[serde(default = "default_access_tokens_max_lifetime_days")]
+    pub access_tokens_max_lifetime_days: u32,
+
     /// CIDR ranges for reverse proxies whose X-Forwarded-For header may be
     /// used to resolve the client IP. Empty by default: record the direct peer.
     #[serde(default)]
@@ -366,6 +383,21 @@ fn default_session_last_seen_throttle_seconds() -> u64 {
 
 fn default_session_retention_days() -> i32 {
     30
+}
+
+/// Absolute access-token lifetime ceiling in days (specification section 5.2).
+pub const ACCESS_TOKENS_LIFETIME_CEILING_DAYS: u32 = 90;
+
+fn default_access_tokens_enable() -> bool {
+    true
+}
+
+fn default_access_tokens_default_lifetime_days() -> u32 {
+    30
+}
+
+fn default_access_tokens_max_lifetime_days() -> u32 {
+    ACCESS_TOKENS_LIFETIME_CEILING_DAYS
 }
 
 // Default value functions for serde
@@ -463,6 +495,9 @@ impl Default for ServerConfig {
             notification_email_digest_schedule: default_notification_email_digest_schedule(),
             session_last_seen_throttle_seconds: default_session_last_seen_throttle_seconds(),
             session_retention_days: default_session_retention_days(),
+            access_tokens_enable: default_access_tokens_enable(),
+            access_tokens_default_lifetime_days: default_access_tokens_default_lifetime_days(),
+            access_tokens_max_lifetime_days: default_access_tokens_max_lifetime_days(),
             trusted_proxy_cidrs: Vec::new(),
         }
     }
@@ -638,6 +673,18 @@ impl ServerConfig {
             return Err("session retention days must be greater than 0".to_string());
         }
 
+        if self.access_tokens_default_lifetime_days < 1
+            || self.access_tokens_default_lifetime_days > self.access_tokens_max_lifetime_days
+            || self.access_tokens_max_lifetime_days > ACCESS_TOKENS_LIFETIME_CEILING_DAYS
+        {
+            return Err(format!(
+                "access token lifetimes must satisfy 1 <= default ({}) <= max ({}) <= {}",
+                self.access_tokens_default_lifetime_days,
+                self.access_tokens_max_lifetime_days,
+                ACCESS_TOKENS_LIFETIME_CEILING_DAYS
+            ));
+        }
+
         if self.execution_mode.is_mock() && self.auth_mode != "local" {
             return Err(
                 "server.execution_mode=mock requires server.auth_mode=local for safety".to_string(),
@@ -753,6 +800,34 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(configured.attic_metrics_endpoints, vec![endpoint]);
+    }
+
+    #[test]
+    fn access_token_policy_defaults_and_omitted_keys() {
+        let omitted: ServerConfig =
+            serde_json::from_str(r#"{"host":"localhost","port":3000}"#).unwrap();
+        for cfg in [&omitted, &ServerConfig::default()] {
+            assert!(cfg.access_tokens_enable);
+            assert_eq!(cfg.access_tokens_default_lifetime_days, 30);
+            assert_eq!(cfg.access_tokens_max_lifetime_days, 90);
+            cfg.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn access_token_lifetimes_validate_bounds() {
+        let with = |default: u32, max: u32| ServerConfig {
+            access_tokens_default_lifetime_days: default,
+            access_tokens_max_lifetime_days: max,
+            ..ServerConfig::default()
+        };
+        for (default, max) in [(1, 1), (1, 90), (30, 30), (30, 90), (90, 90)] {
+            with(default, max).validate().unwrap();
+        }
+        for (default, max) in [(0, 90), (31, 30), (30, 91), (91, 91), (0, 0), (1, 0)] {
+            let err = with(default, max).validate().unwrap_err();
+            assert!(err.contains("access token lifetimes"), "{default}/{max}");
+        }
     }
 
     #[test]

@@ -441,6 +441,7 @@ SQL
     # Preserve the existing targets and Cargo's failure propagation. Separate
     # compilation/linking from execution to identify a silent boundary.
     for testTarget in \
+      access_tokens \
       admin_source_grants \
       already_current_deployment \
       assignment_semantics \

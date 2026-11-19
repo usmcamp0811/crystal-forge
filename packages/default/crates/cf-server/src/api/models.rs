@@ -5259,6 +5259,13 @@ pub enum AuditAction {
     SystemKeyRotated,
     CveScanRequested,
     SessionInvalidated,
+    /// An owner created an access token. The target is the public token id.
+    AccessTokenCreated,
+    /// An owner rotated an access token. The target is the replacement's public
+    /// token id and the metadata names the replaced token.
+    AccessTokenRotated,
+    /// An owner revoked an access token. The target is the public token id.
+    AccessTokenRevoked,
 }
 
 /// Admin audit log entry.
@@ -5380,6 +5387,225 @@ pub struct ApiError {
     /// Optional additional context or structured validation errors.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Owner access tokens (TASK-534.3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Names an environment granted to an access token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessTokenEnvironmentDto {
+    /// Stable environment id used for enforcement.
+    pub id: Uuid,
+    /// Display name; not used for authorization.
+    pub name: String,
+    /// Whether the environment is currently active.
+    pub is_active: bool,
+}
+
+/// Describes one access token without any secret or hash.
+///
+/// `status` is one of `active`, `expiring_soon` (expires within 7 days),
+/// `expired`, `revoked` or `owner_suspended`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessTokenDto {
+    /// Public token id (the database primary key).
+    pub id: Uuid,
+    /// Owner-chosen display name.
+    pub name: String,
+    /// Always `mcp` in this release.
+    pub audience: String,
+    /// Masked hint such as `cfat_v1_8d12…`.
+    pub display_hint: String,
+    /// Granted scopes, sorted.
+    pub scopes: Vec<String>,
+    /// Granted environments, sorted by name.
+    pub environments: Vec<AccessTokenEnvironmentDto>,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
+    /// Expiry time; fixed at issue.
+    pub expires_at: DateTime<Utc>,
+    /// Revocation time, or `null` while not revoked.
+    pub revoked_at: Option<DateTime<Utc>>,
+    /// Coarse last-use time, or `null`. Never a security input.
+    pub last_used_at: Option<DateTime<Utc>>,
+    /// Derived lifecycle status.
+    pub status: String,
+}
+
+/// Returns the one-time create or rotate response: metadata plus the secret.
+///
+/// SECURITY: This type holds the plaintext token. It intentionally does not
+/// implement `Debug` or `Clone` so the secret cannot reach logs by accident.
+#[derive(Serialize)]
+pub struct AccessTokenSecretDto {
+    /// Token metadata, flattened into the response object.
+    #[serde(flatten)]
+    pub metadata: AccessTokenDto,
+    /// Plaintext token, present only in this response.
+    pub token: String,
+    /// Id of the revoked token; present only for a rotation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaced_token_id: Option<Uuid>,
+}
+
+/// Reports whether a granted environment is currently reachable by the owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessTokenEffectiveEnvironmentDto {
+    /// Granted environment id.
+    pub id: Uuid,
+    /// Display name.
+    pub name: String,
+    /// `true` when the environment is active and the owner may still use it.
+    pub available: bool,
+}
+
+/// Reports whether a granted scope is currently permitted for the owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessTokenEffectiveScopeDto {
+    /// Granted scope.
+    pub scope: String,
+    /// `true` when the owner's current role still permits the scope.
+    pub permitted: bool,
+}
+
+/// Compares the immutable grant with the owner's current permissions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessTokenEffectiveDto {
+    /// Granted environments with current availability.
+    pub environments: Vec<AccessTokenEffectiveEnvironmentDto>,
+    /// Granted scopes with current permission.
+    pub scopes: Vec<AccessTokenEffectiveScopeDto>,
+}
+
+/// Names one audit event for a token, without actor or metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessTokenEventDto {
+    /// `access_token_created`, `access_token_rotated` or `access_token_revoked`.
+    pub action: String,
+    /// Event time.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Returns token metadata plus effective access and at most 10 recent events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessTokenDetailDto {
+    /// Token metadata, flattened into the response object.
+    #[serde(flatten)]
+    pub metadata: AccessTokenDto,
+    /// Granted versus currently effective access.
+    pub effective: AccessTokenEffectiveDto,
+    /// Newest first, at most 10.
+    pub recent_events: Vec<AccessTokenEventDto>,
+}
+
+/// Returns one page of the owner's tokens, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessTokenListDto {
+    /// Tokens on this page.
+    pub items: Vec<AccessTokenDto>,
+    /// Applied page size.
+    pub limit: i64,
+    /// Applied offset.
+    pub offset: i64,
+    /// `true` when more tokens follow this page.
+    pub has_more: bool,
+    /// Offset of the next page, or `null` when `has_more` is false.
+    pub next_offset: Option<i64>,
+}
+
+/// Describes the MCP consumer; always disabled until the MCP milestone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessTokenMcpDto {
+    /// `false` until MCP ships.
+    pub enabled: bool,
+    /// Public MCP URL, or `null` when not configured.
+    pub url: Option<String>,
+}
+
+/// Names an environment the owner may select.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessTokenPolicyEnvironmentDto {
+    /// Environment id.
+    pub id: Uuid,
+    /// Display name.
+    pub name: String,
+}
+
+/// Describes one scope in the policy catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessTokenPolicyScopeDto {
+    /// Scope string.
+    pub scope: String,
+    /// Human-readable label.
+    pub label: String,
+    /// `true` when the owner may select the scope now.
+    pub available: bool,
+    /// `true` when the create form preselects the scope.
+    pub default_selected: bool,
+    /// Why the scope is unavailable, or `null` when available.
+    pub unavailable_reason: Option<String>,
+}
+
+/// Explains why the owner cannot create a token now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessTokenCreateBlockedDto {
+    /// `entitlements_stale` or `ownership_unresolved`.
+    pub code: String,
+    /// Safe explanation for display.
+    pub message: String,
+}
+
+/// Returns the owner's effective access-token policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessTokenPolicyDto {
+    /// `false` when `access_tokens_enable` is off.
+    pub enabled: bool,
+    /// MCP consumer status.
+    pub mcp: AccessTokenMcpDto,
+    /// Always `mcp`.
+    pub audience: String,
+    /// Preselected lifetime in days.
+    pub default_lifetime_days: u32,
+    /// Maximum lifetime in days.
+    pub max_lifetime_days: u32,
+    /// Lifetime choices in days, ascending.
+    pub lifetime_options_days: Vec<u32>,
+    /// Maximum non-revoked unexpired tokens per owner.
+    pub max_active_tokens: u32,
+    /// Active environments the owner may select, sorted by name.
+    pub environments: Vec<AccessTokenPolicyEnvironmentDto>,
+    /// Full scope catalog with availability for this owner.
+    pub scopes: Vec<AccessTokenPolicyScopeDto>,
+    /// Set when the owner cannot create a token now.
+    pub create_blocked: Option<AccessTokenCreateBlockedDto>,
+}
+
+/// Carries the create request body.
+///
+/// Every field is optional at parse time so a missing field becomes a
+/// field-level validation message. Unknown fields are rejected. Environment
+/// ids stay text until validation so a malformed id also becomes a field
+/// message.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateAccessTokenRequest {
+    /// Display name, 1 to 100 characters after trimming.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Must be `mcp`.
+    #[serde(default)]
+    pub audience: Option<String>,
+    /// Lifetime in days, `1..=max_lifetime_days`.
+    #[serde(default)]
+    pub expires_in_days: Option<i64>,
+    /// Explicit environment ids; never empty, at most 50.
+    #[serde(default)]
+    pub environment_ids: Option<Vec<String>>,
+    /// Explicit scopes; never empty.
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

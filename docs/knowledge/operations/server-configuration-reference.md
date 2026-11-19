@@ -120,6 +120,20 @@ service limits. See [Adaptive recovery](../evaluation/bulk-evaluator-adaptive-re
 for sustained-pressure evidence, CPU-qualified idle waivers, one shared overall
 deadline, quarantine, and failure-only retention of verified partial outcomes.
 
+### Access tokens
+
+The `[server]` table holds the owner access-token policy. See
+[Access token service](../security/access-token-service.md) for behavior.
+
+| Key | Default | Rule |
+| --- | --- | --- |
+| `access_tokens_enable` | `true` | When `false`, create, rotate, list and detail return `403 access_tokens_disabled`. The policy endpoint (`enabled: false`) and revoke remain available. |
+| `access_tokens_default_lifetime_days` | `30` | Must satisfy `1 <= default <= max`. |
+| `access_tokens_max_lifetime_days` | `90` | Must satisfy `default <= max <= 90`. |
+
+Startup validation rejects any other combination. The NixOS module sets these
+keys from `services.crystal-forge.server.accessTokens.{enable,defaultLifetimeDays,maxLifetimeDays}`.
+
 ### Environment Variables
 
 - `CRYSTAL_FORGE_CONFIG` - Path to config file. Default `/var/lib/crystal_forge/config.toml`. The file is optional.

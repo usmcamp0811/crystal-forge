@@ -5,6 +5,7 @@
 //!
 //! # Organization
 //!
+//! - `access_tokens` - Owner access-token card of the Profile view
 //! - `charts` - Data visualization (donut charts, etc.)
 //! - `cve` - CVE vulnerability display components
 //! - `dashboard` - Dashboard panels (fleet health, build queue, etc.)
@@ -23,6 +24,7 @@
 //! - `poam` - POA&M remediation workflow components
 
 // Domain-specific component modules
+pub mod access_tokens;
 pub mod builders;
 pub mod builds;
 pub mod charts;

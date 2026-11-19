@@ -731,6 +731,9 @@ fn parse_audit_action(value: &str) -> Option<AuditAction> {
         "system_updated" => Some(AuditAction::SystemUpdated),
         "cve_scan_requested" => Some(AuditAction::CveScanRequested),
         "session_invalidated" => Some(AuditAction::SessionInvalidated),
+        "access_token_created" => Some(AuditAction::AccessTokenCreated),
+        "access_token_rotated" => Some(AuditAction::AccessTokenRotated),
+        "access_token_revoked" => Some(AuditAction::AccessTokenRevoked),
         _ => None,
     }
 }
@@ -1005,6 +1008,9 @@ fn action_to_str(action: AuditAction) -> &'static str {
         AuditAction::SystemUpdated => "system_updated",
         AuditAction::CveScanRequested => "cve_scan_requested",
         AuditAction::SessionInvalidated => "session_invalidated",
+        AuditAction::AccessTokenCreated => "access_token_created",
+        AuditAction::AccessTokenRotated => "access_token_rotated",
+        AuditAction::AccessTokenRevoked => "access_token_revoked",
     }
 }
 
@@ -1365,6 +1371,18 @@ mod tests {
             action_to_str(AuditAction::SessionInvalidated),
             "session_invalidated"
         );
+        for (action, text) in [
+            (AuditAction::AccessTokenCreated, "access_token_created"),
+            (AuditAction::AccessTokenRotated, "access_token_rotated"),
+            (AuditAction::AccessTokenRevoked, "access_token_revoked"),
+        ] {
+            assert_eq!(action_to_str(action), text);
+            assert_eq!(parse_audit_action(text), Some(action));
+            assert_eq!(
+                serde_json::to_value(action).unwrap(),
+                serde_json::Value::String(text.to_string())
+            );
+        }
     }
 
     fn lazy_pool() -> PgPool {

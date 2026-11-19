@@ -74,6 +74,11 @@
           session_last_seen_throttle_seconds =
             cfg.server.sessionLastSeenThrottleSeconds;
           session_retention_days = cfg.server.sessionRetentionDays;
+          access_tokens_enable = cfg.server.accessTokens.enable;
+          access_tokens_default_lifetime_days =
+            cfg.server.accessTokens.defaultLifetimeDays;
+          access_tokens_max_lifetime_days =
+            cfg.server.accessTokens.maxLifetimeDays;
           trusted_proxy_cidrs = cfg.server.trustedProxyCidrs;
           remote_build_execution_strategy = cfg.build.remote_execution_strategy;
           source_delivery_mode = cfg.build.source_delivery_mode;
@@ -2112,6 +2117,37 @@ in {
         description = "Retention period for expired or revoked account session records.";
       };
 
+      accessTokens = {
+        enable = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = lib.mdDoc ''
+            Allow signed-in users to create, rotate and revoke their own access
+            tokens. Tokens stay inert until a consumer such as MCP admits them.
+            When false, create, rotate, list and detail are rejected; the policy
+            endpoint and revoking existing tokens still work.
+          '';
+        };
+
+        defaultLifetimeDays = lib.mkOption {
+          type = lib.types.ints.between 1 90;
+          default = 30;
+          description = lib.mdDoc ''
+            Lifetime in days preselected when creating an access token. Must not
+            exceed `maxLifetimeDays`.
+          '';
+        };
+
+        maxLifetimeDays = lib.mkOption {
+          type = lib.types.ints.between 1 90;
+          default = 90;
+          description = lib.mdDoc ''
+            Maximum lifetime in days of any access token. 90 is the ceiling set
+            by the access-token specification.
+          '';
+        };
+      };
+
       trustedProxyCidrs = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [];
@@ -3196,6 +3232,12 @@ in {
           (cfg.server.enable && cfg.server.trust_forwarded_builder_https)
           -> cfg.server.trustedProxyCidrs != [];
         message = "services.crystal-forge.server.trust_forwarded_builder_https requires nonempty services.crystal-forge.server.trustedProxyCidrs when services.crystal-forge.enable and services.crystal-forge.server.enable are true. Set narrow CIDRs for the reverse proxy's direct backend socket peer (Traefik peer IP /32 or /128), not builder/client IPs; no automatic or broad CIDR fallback is provided.";
+      }
+      {
+        assertion =
+          cfg.server.accessTokens.defaultLifetimeDays
+          <= cfg.server.accessTokens.maxLifetimeDays;
+        message = "services.crystal-forge.server.accessTokens.defaultLifetimeDays must not exceed maxLifetimeDays";
       }
       {
         assertion = cfg.client.enable -> (cfg.client.private_key != null);

@@ -21,11 +21,11 @@ use crystal_forge::{
         agent::{deployment_failed, deployment_started, heartbeat, state},
         agent_request::CFState,
         api::{
-            acceptance_register, admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status,
-            auth_whoami, builders, caches, commits, compliance, config_health, cves, dashboard,
-            deployment_policies, deployments, environments, flakes, framework_requirements,
-            hardening, navigation, nixos_options, poam, register_export, scanning, setup_wizard,
-            systems, user_notifications, user_preferences, user_sessions,
+            acceptance_register, access_tokens, admin, auth_dev, auth_local, auth_oidc,
+            auth_session, auth_status, auth_whoami, builders, caches, commits, compliance,
+            config_health, cves, dashboard, deployment_policies, deployments, environments, flakes,
+            framework_requirements, hardening, navigation, nixos_options, poam, register_export,
+            scanning, setup_wizard, systems, user_notifications, user_preferences, user_sessions,
         },
         status,
         webhook::webhook_handler,
@@ -427,6 +427,22 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/user/sessions/:session_id",
             delete(user_sessions::revoke_session),
+        )
+        .route(
+            "/api/v1/user/access-token-policy",
+            get(access_tokens::get_policy),
+        )
+        .route(
+            "/api/v1/user/access-tokens",
+            get(access_tokens::list_access_tokens).post(access_tokens::create_access_token),
+        )
+        .route(
+            "/api/v1/user/access-tokens/:id",
+            get(access_tokens::get_access_token).delete(access_tokens::revoke_access_token),
+        )
+        .route(
+            "/api/v1/user/access-tokens/:id/rotate",
+            post(access_tokens::rotate_access_token),
         )
         .route("/api/v1/cves", get(cves::list_cves))
         .route("/api/v1/cves/grouped", get(cves::list_cves_grouped))
