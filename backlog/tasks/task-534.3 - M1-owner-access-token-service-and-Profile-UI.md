@@ -36,8 +36,8 @@ M2 (MCP) only has to call it.
 - MCP transport, tools, `/mcp` route, MCP status card, MCP server option.
   The policy endpoint reports `mcp.enabled = false` until M2.
 - Admin Access Tokens tab, admin list/revoke/revoke-all endpoints, Access Inspector
-  (spec 10.5 and 10.7). Follow-up task.
-- Connect agent shortcut on Fleet CVEs and POA&M views (spec 10.1.1). Follow-up task.
+  (spec 10.5 and 10.7). Admin tab: TASK-537; Inspector: M2.
+- Connect agent shortcut on Fleet CVEs and POA&M views (spec 10.1.1). TASK-537.
 - Write or operational scopes. Only `cves:read`, `poams:read`, `provenance:read`
   are selectable; `scans:request`, `poams:write`, `poams:verify`, `poams:close`
   are listed as unavailable (`Not supported yet`).
@@ -165,3 +165,19 @@ LOCK: OpenCode on vm-agent in /home/mcamp/code/crystal-forge/TASK-534.3-access-t
 
 Selected by the user on 2026-11-19: stack on the !345 branch and deliver the full owner workflow first. Branch `TASK-534.3-access-token-lifecycle` starts at `a2a61991`.
 <!-- SECTION:NOTES:END -->
+
+## Verification at head `db85d668`
+
+All results are for source revision `db85d6682445eb6e591f076a97348ea93e77bc45`. Acceptance items stay unchecked until the maintainer reviews the MR.
+
+- PostgreSQL/HTTP regressions PASSED on the farm: `access_tokens` 41 passed, `admin_source_grants` 28, `oidc_entitlements` 24; 0 failed, 0 ignored (harness `/tmp/opencode/task-534-3-regression.nix`, 0336 applied by `sqlx::test`).
+- Embedded application build PASSED (`default.cf-server-drv`): server library 1607 passed, 0 failed, 856 ignored. Web UI derivation: 938 passed, 0 failed, 1 ignored.
+- `integration-access` scenario `lifecycle-local-bootstrap` PASSED: 56 of 56 cases (47 existing plus 9 token cases), 643 s. The evidence `meta.json` records `db85d668`. Timeout raised from 900 to 1500 s: a run at the earlier head hit 900 s during an existing fragment on a loaded farm (cases ran about 1.5 times slower) and so did not reach the token cases; that run is not a result.
+- OKF validation PASSED (`nix build .#okf-knowledge`).
+- Not run for this head: the core package native post-checks and the `cf-config` unit tests as a separate target (the config tests run inside the core package build, which was not rebuilt for this head). Exact-head GitLab CI is unverified.
+
+Defects found and fixed by review of the preview and gate evidence: the Expiration select displayed "7 days" while state and request used 30 (a `value` on a select applies before its options exist); the create and reveal dialog headings were squeezed beside their descriptions.
+
+An independent security review found no bypass of owner scoping, CSRF or hash-only storage. Fixed: kill switch now stops admission (`validate_presented_token` takes settings), list and detail work while disabled so an owner can still revoke, rotate rejects an empty environment set and admission fails closed on it, revoke takes the owner row lock first (deadlock with user delete), unique-index violation maps to 409, name search rejects control characters, bearer detection tolerates whitespace and case, validation failure logging no longer uses `Debug`, `recent_events` avoids a full scan. Deferred and documented as known limits: TASK-536 (audit window flooding, OIDC eligibility under the owner lock, session validity in the transaction, smaller items). Admin tab and Connect agent shortcut: TASK-537.
+
+Preview (isolated): http://127.0.0.1:8529 serves this build; `preview-operator` (Operator, `dev` only), `preview-viewer`, `preview-admin`; see `/tmp/opencode/task529-preview/HANDOFF.md` round 5.
