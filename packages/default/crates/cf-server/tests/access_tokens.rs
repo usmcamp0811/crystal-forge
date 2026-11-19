@@ -1044,7 +1044,7 @@ async fn name_and_lifetime_boundaries_are_inclusive_and_names_are_trimmed(pool: 
         .await
         .expect("read server encoding");
     eprintln!("server_encoding={encoding}");
-    let probe = if encoding == "UTF8" { "\u{e9}" } else { "n" };
+    let probe = if encoding == "UTF8" { "\u{e9}" } else { "m" };
     let unicode = api
         .create(
             &operator,
