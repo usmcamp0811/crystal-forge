@@ -8,6 +8,43 @@ def receiver_metadata(store, path):
     return raw[0] if isinstance(raw, list) else raw[path]
 
 
+def receiver_copy(command, label):
+    # Preserve process/daemon/resource evidence before the global VM deadline
+    # destroys the machines. The command and signature policy are unchanged.
+    directory = "/tmp/cf-it/receiver-copy-" + label
+    services.succeed("mkdir -p " + shlex.quote(directory))
+    services.succeed("systemd-run --unit=cf-it-receiver-copy --collect "
+        "--setenv=PATH=/run/wrappers/bin:/run/current-system/sw/bin "
+        "--property=Type=exec /bin/sh -c " + shlex.quote(
+            command + " > " + directory + "/copy.log 2>&1; status=$?; "
+            "printf '%s' \"$status\" > " + directory + "/status; exit \"$status\""))
+    sample = 0
+    # The scenario's existing 1800-second deadline remains the only timeout.
+    # Large but progressing batches must not fail on a diagnostic deadline.
+    while True:
+        time.sleep(1)
+        status, _ = services.execute("test -f " + directory + "/status")
+        if status == 0:
+            result = services.succeed("cat " + directory + "/status").strip()
+            print(services.succeed("cat " + directory + "/copy.log"))
+            expect_equal(result, "0", "receiver dependency copy " + label)
+            return
+        if sample == 0 or sample % 60 == 59:
+            # Evidence is best-effort. A sampling command that fails (for
+            # example journalctl with nothing to report) must never decide the
+            # outcome; only the copy's own recorded status does. `execute`
+            # returns instead of raising, and `|| true` keeps each part isolated.
+            _, diagnostic = services.execute(
+                "{ date -Ins; ps -eLo pid,tid,ppid,user,stat,wchan:32,etimes,pcpu,args; "
+                "df -h; df -i; free -m; cat /proc/pressure/io /proc/pressure/memory; "
+                "du -sh /var/lib/cf-it-signature-receiver; "
+                "journalctl -u cf-it-signature-receiver -u nix-daemon --no-pager -n 100; "
+                "tail -n 20 " + directory + "/copy.log; } 2>&1 || true")
+            _vm_write(services, directory + "/sample-" + str(sample) + ".log", diagnostic)
+            print(diagnostic)
+        sample += 1
+
+
 with case("publication-rejects-untrusted-signature-then-accepts-same-signed-output"):
     output_path = receipts()["delivery.outputPath"]
     output = shlex.quote(output_path)
@@ -48,8 +85,8 @@ with case("publication-rejects-untrusted-signature-then-accepts-same-signed-outp
         # Do not sign recursively: only dependencies may gain receiver trust
         # before the target's rejection. No privileged destination preseed.
         services.succeed(nix + " store sign --store daemon --key-file " + key + " " + paths)
-        services.succeed("runuser -u cache -- " + nix + " copy --from daemon --to " +
-                         shlex.quote(receiver) + " " + paths)
+        receiver_copy("runuser -u cache -- " + nix + " copy --from daemon --to " +
+                      shlex.quote(receiver) + " " + paths, str(offset))
         services.succeed("runuser -u cache -- " + nix_store + " --store " +
                          shlex.quote(receiver) + " --check-validity " + paths)
 

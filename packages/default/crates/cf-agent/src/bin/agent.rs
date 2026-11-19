@@ -1,9 +1,12 @@
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use cf_agent::deployment::agent::{AgentDeploymentManager, DeploymentResult, readlink_path};
+use cf_agent::deployment::agent::{
+    AgentDeploymentManager, DeploymentResult, readlink_path, report_activation_result,
+};
 use cf_agent::system_state::gather_system_state;
 use cf_config::config::CrystalForgeConfig;
+use cf_protocol::Uuid;
 use cf_protocol::agent::{LogResponse, SystemState};
 use ed25519_dalek::{Signer, SigningKey};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
@@ -82,12 +85,51 @@ impl AgentState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // ExecStopPost must survive the original agent service restarting. Dispatch
+    // before logging, configuration probes, state collection or heartbeat setup.
+    if let Some((target, deployment_id)) = activation_report_target(std::env::args_os().skip(1))? {
+        return report_activation_result(&target, deployment_id).await;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
     // Initialize agent state with deployment manager
     let agent_state = Arc::new(Mutex::new(AgentState::new()?));
     watch_system(agent_state).await
+}
+
+fn activation_report_target(
+    arguments: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<Option<(String, Option<Uuid>)>> {
+    let arguments: Vec<_> = arguments.into_iter().collect();
+    if arguments
+        .first()
+        .is_none_or(|argument| argument != "--report-activation-result")
+    {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        matches!(arguments.len(), 3 | 5) && arguments[1] == "--target",
+        "Invalid activation report arguments"
+    );
+    let target = arguments[2]
+        .to_str()
+        .context("Invalid activation report target encoding")?;
+    // The reporting helper validates the path too. Never interpolate CLI text
+    // or systemd outcome strings into diagnostic messages.
+    let deployment_id = if arguments.len() == 5 {
+        anyhow::ensure!(
+            arguments[3] == "--deployment-id",
+            "Invalid activation report arguments"
+        );
+        let value = arguments[4]
+            .to_str()
+            .context("Invalid deployment ID encoding")?;
+        Some(Uuid::parse_str(value).map_err(|_| anyhow::anyhow!("Invalid deployment ID"))?)
+    } else {
+        None
+    };
+    Ok(Some((target.to_owned(), deployment_id)))
 }
 
 fn deriver_drv(path: &OsStr) -> Result<String> {
@@ -698,6 +740,77 @@ pub async fn watch_system(agent_state: Arc<Mutex<AgentState>>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activation_reporting_cli_dispatches_only_the_narrow_helper_mode() {
+        fn parse(arguments: &[&str]) -> Result<Option<(String, Option<Uuid>)>> {
+            activation_report_target(
+                arguments
+                    .iter()
+                    .map(|argument| std::ffi::OsString::from(*argument)),
+            )
+        }
+        assert_eq!(parse(&[]).unwrap(), None);
+        assert_eq!(parse(&["normal-existing-argument"]).unwrap(), None);
+        // An older server returns no request ID, so the argument is absent.
+        assert_eq!(
+            parse(&[
+                "--report-activation-result",
+                "--target",
+                "/nix/store/system"
+            ])
+            .unwrap(),
+            Some(("/nix/store/system".into(), None))
+        );
+        let id = Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap();
+        assert_eq!(
+            parse(&[
+                "--report-activation-result",
+                "--target",
+                "/nix/store/system",
+                "--deployment-id",
+                "11111111-2222-4333-8444-555555555555",
+            ])
+            .unwrap(),
+            Some(("/nix/store/system".into(), Some(id)))
+        );
+        for arguments in [
+            vec!["--report-activation-result"],
+            vec!["--report-activation-result", "--other", "/nix/store/system"],
+            vec![
+                "--report-activation-result",
+                "--target",
+                "/nix/store/system",
+                "extra",
+            ],
+            // A malformed ID or a wrong flag name must not degrade to "no ID".
+            vec![
+                "--report-activation-result",
+                "--target",
+                "/nix/store/system",
+                "--deployment-id",
+                "not-a-uuid",
+            ],
+            vec![
+                "--report-activation-result",
+                "--target",
+                "/nix/store/system",
+                "--request-id",
+                "11111111-2222-4333-8444-555555555555",
+            ],
+        ] {
+            assert!(parse(&arguments).is_err());
+        }
+        use std::os::unix::ffi::OsStringExt;
+        assert!(
+            activation_report_target([
+                "--report-activation-result".into(),
+                "--target".into(),
+                std::ffi::OsString::from_vec(vec![0xff]),
+            ])
+            .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn niks3_basic_capability_requires_actual_runtime_setting() {

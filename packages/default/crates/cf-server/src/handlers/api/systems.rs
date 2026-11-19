@@ -1757,7 +1757,11 @@ pub async fn get_system_cve_inventory_page(
     let triage_states: HashMap<(String, String), String> = if keys.is_empty() {
         HashMap::new()
     } else {
-        let cve_ids = inventory.rows.iter().map(|row| row.cve_id.clone()).collect::<Vec<_>>();
+        let cve_ids = inventory
+            .rows
+            .iter()
+            .map(|row| row.cve_id.clone())
+            .collect::<Vec<_>>();
         let packages = inventory
             .rows
             .iter()
@@ -1781,7 +1785,9 @@ pub async fn get_system_cve_inventory_page(
         {
             Ok(rows) => rows
                 .into_iter()
-                .filter_map(|(cve_id, package, state)| state.map(|state| ((cve_id, package), state)))
+                .filter_map(|(cve_id, package, state)| {
+                    state.map(|state| ((cve_id, package), state))
+                })
                 .collect(),
             Err(_) => return internal_error("Failed to load CVE triage state"),
         }
@@ -4793,9 +4799,21 @@ pub async fn get_system_deployment_status(
         return StatusCode::NO_CONTENT.into_response();
     };
 
+    let failure = (progress_row.status == "failed").then(|| {
+        crate::api::models::project_failure(
+            progress_row
+                .failure_metadata
+                .as_ref()
+                .unwrap_or(&serde_json::Value::Null),
+            caller_role,
+        )
+    });
+
     (
         StatusCode::OK,
         Json(SystemDeploymentProgress {
+            failure_message: failure.as_ref().map(|failure| failure.message()),
+            failure,
             id: progress_row.id,
             stage: stage.to_string(),
             kind: deployment_progress_kind(&progress_row.source).to_string(),
@@ -4808,7 +4826,6 @@ pub async fn get_system_deployment_status(
             applying_at: progress_row.applying_at,
             completed_at: progress_row.completed_at,
             failed_at: progress_row.failed_at,
-            failure_message: progress_row.failure_message,
         }),
     )
         .into_response()
@@ -4863,12 +4880,22 @@ fn event_history_title(event_type: &str) -> &'static str {
     match event_type {
         "cf_deployment_started" => "Deployment started",
         "cf_deployment_succeeded" => "Deployed through Crystal Forge",
-        "cf_deployment_failed" => "Deploy failed to activate",
+        "cf_deployment_failed" => "Deployment failed",
         "local_rebuild_detected" => "nixos-rebuild switch on host",
         "system_reboot" => "System restarted",
         "agent_restart" => "Agent restarted",
         _ => "State updated",
     }
+}
+
+/// Projects failure metadata without trusting historical display strings.
+fn event_history_failure(
+    event_type: &str,
+    metadata: &serde_json::Value,
+    role: Role,
+) -> Option<crate::api::models::DeploymentFailureView> {
+    (event_type == "cf_deployment_failed")
+        .then(|| crate::api::models::project_failure(metadata, role))
 }
 
 pub async fn get_system_history(
@@ -4909,7 +4936,16 @@ pub async fn get_system_history(
             .into_iter()
             .map(|row| {
                 let (event_kind, default_actor, outcome) = event_history_kind(&row.event_type);
-                let title = event_history_title(&row.event_type).to_string();
+                let failure = event_history_failure(&row.event_type, &row.metadata, caller_role);
+                let title = failure
+                    .as_ref()
+                    .map(|failure| failure.message())
+                    .unwrap_or_else(|| event_history_title(&row.event_type).to_string());
+                let metadata = if failure.is_some() {
+                    crate::api::models::failure_metadata(&row.metadata)
+                } else {
+                    row.metadata
+                };
                 let actor = row
                     .actor
                     .clone()
@@ -4926,6 +4962,7 @@ pub async fn get_system_history(
                 };
 
                 SystemHistoryEntry {
+                    failure,
                     id: Some(row.id),
                     timestamp: row.occurred_at,
                     occurred_at: Some(row.occurred_at),
@@ -4953,7 +4990,7 @@ pub async fn get_system_history(
                     desired_target_id: row.desired_target_id,
                     source: Some(row.source),
                     correlation_id: row.correlation_id,
-                    metadata: row.metadata,
+                    metadata,
                     reconciled,
                     generation_matches_current_store_path: None,
                     restart_type,
@@ -5004,6 +5041,7 @@ pub async fn get_system_history(
             let reconciled = row.commit_hash.is_some();
 
             SystemHistoryEntry {
+                failure: None,
                 id: None,
                 timestamp: row.timestamp,
                 occurred_at: Some(row.timestamp),
@@ -5077,12 +5115,27 @@ pub async fn get_system_agent_events(
 
     let entries = rows
         .into_iter()
-        .map(|row| SystemAgentEvent {
-            timestamp: row.timestamp,
-            level: row.level,
-            event_type: row.event_type,
-            message: row.message,
-            deployment_related: row.deployment_related,
+        .map(|row| {
+            let failure = event_history_failure(
+                &row.event_type,
+                row.failure_metadata
+                    .as_ref()
+                    .unwrap_or(&serde_json::Value::Null),
+                caller_role,
+            );
+            SystemAgentEvent {
+                event_id: row.event_id,
+                deployment_id: row.deployment_id,
+                message: failure
+                    .as_ref()
+                    .map(|failure| failure.message())
+                    .unwrap_or(row.message),
+                failure,
+                timestamp: row.timestamp,
+                level: row.level,
+                event_type: row.event_type,
+                deployment_related: row.deployment_related,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -5356,6 +5409,26 @@ mod tests {
     }
 
     #[test]
+    fn event_history_failure_ignores_all_legacy_text_for_every_role() {
+        let metadata = serde_json::json!({
+            "display_failure_message": "  copy failed (DNS)  ",
+            "failure_message": "legacy private diagnostic"
+        });
+        for role in [Role::Viewer, Role::Operator, Role::Admin] {
+            let failure = event_history_failure("cf_deployment_failed", &metadata, role).unwrap();
+            assert_eq!(failure.reason_status, "legacy_agent");
+            let json = serde_json::to_string(&failure).unwrap();
+            assert!(!json.contains("private"));
+            assert!(!json.contains("DNS"));
+            assert!(event_history_failure("cf_deployment_succeeded", &metadata, role).is_none());
+        }
+        assert_eq!(
+            event_history_title("cf_deployment_failed"),
+            "Deployment failed"
+        );
+    }
+
+    #[test]
     fn event_history_kind_maps_event_backed_contract() {
         assert_eq!(
             event_history_kind("cf_deployment_succeeded"),
@@ -5408,6 +5481,210 @@ mod tests {
 
         params.environment = Some("staging".to_string());
         assert!(!matches_filters(&row, &params));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn deployment_failure_api_role_projection_and_scope(pool: PgPool) {
+        let environment: Uuid = sqlx::query_scalar(
+            "INSERT INTO environments(name) VALUES('failure-projection') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let system: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems(hostname,public_key,derivation,environment_id) VALUES('failure-projection','test-key','',$1) RETURNING id",
+        ).bind(environment).fetch_one(&pool).await.unwrap();
+        let deployment: Uuid = sqlx::query_scalar(
+            "INSERT INTO pending_system_deployments(system_id,target_store_path,status,completed_at,failed_at,failure_message) VALUES($1,'/nix/store/test-system','failed',now(),now(),'pending-private') RETURNING id",
+        ).bind(system).fetch_one(&pool).await.unwrap();
+        let event: Uuid = sqlx::query_scalar(
+            "INSERT INTO system_events(system_id,event_type,dedupe_key,occurred_at,deployment_id,source) VALUES($1,'cf_deployment_failed','projection',now(),$2,'agent_report') RETURNING id",
+        ).bind(system).bind(deployment).fetch_one(&pool).await.unwrap();
+
+        let admin = mutation_headers(&pool, AuthRole::Admin, "failure-admin").await;
+        let operator = mutation_headers(&pool, AuthRole::Operator, "failure-operator").await;
+        let viewer = mutation_headers(&pool, AuthRole::Viewer, "failure-viewer").await;
+        for headers in [&operator, &viewer] {
+            let (user, _) = authenticated_user_roles(&pool, headers).await.unwrap();
+            sqlx::query(
+                "INSERT INTO user_environment_memberships(user_id,environment_id) VALUES($1,$2)",
+            )
+            .bind(user)
+            .bind(environment)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let outsider = mutation_headers(&pool, AuthRole::Operator, "failure-outsider").await;
+        // Every endpoint preserves unauthenticated 403 and nondisclosing 404.
+        for (headers, expected) in [
+            (HeaderMap::new(), StatusCode::FORBIDDEN),
+            (outsider, StatusCode::NOT_FOUND),
+        ] {
+            assert_eq!(
+                get_system_history(State(pool.clone()), headers.clone(), Path(system))
+                    .await
+                    .into_response()
+                    .status(),
+                expected
+            );
+            assert_eq!(
+                get_system_agent_events(State(pool.clone()), headers.clone(), Path(system))
+                    .await
+                    .into_response()
+                    .status(),
+                expected
+            );
+            assert_eq!(
+                get_system_deployment_status(State(pool.clone()), headers, Path(system))
+                    .await
+                    .into_response()
+                    .status(),
+                expected
+            );
+        }
+
+        for structured in [
+            serde_json::Value::Null,
+            serde_json::json!({"stage":"activation"}),
+            serde_json::json!({"stage":"activation","code":"unknown"}),
+            serde_json::json!({"stage":"cache_acquisition","code":"dns","exit_code":1,"attempt_count":3,"max_attempts":3,
+                "diagnostics":{"lines":["error: admin-only-detail https://user:password@cache.test/p?token=url-private"],"cache_endpoint":"https://user:password@cache.test/p?token=url-private","suppression_reason":null}}),
+        ] {
+            let metadata = serde_json::json!({"deployment_failure":structured,
+                "display_failure_message":"display-private", "failure_message":"raw-private",
+                "unrecognized":"future-private", "pending_deployment_id":deployment});
+            sqlx::query("UPDATE system_events SET metadata=$1 WHERE id=$2")
+                .bind(&metadata)
+                .bind(event)
+                .execute(&pool)
+                .await
+                .unwrap();
+            for (role, headers) in [
+                (Role::Admin, &admin),
+                (Role::Operator, &operator),
+                (Role::Viewer, &viewer),
+            ] {
+                let history: serde_json::Value = response_json(
+                    get_system_history(State(pool.clone()), headers.clone(), Path(system))
+                        .await
+                        .into_response(),
+                )
+                .await;
+                let events: serde_json::Value = response_json(
+                    get_system_agent_events(State(pool.clone()), headers.clone(), Path(system))
+                        .await
+                        .into_response(),
+                )
+                .await;
+                let progress: serde_json::Value = response_json(
+                    get_system_deployment_status(
+                        State(pool.clone()),
+                        headers.clone(),
+                        Path(system),
+                    )
+                    .await
+                    .into_response(),
+                )
+                .await;
+                let failure = crate::api::models::project_failure(&metadata, role);
+                let expected = serde_json::to_value(&failure).unwrap();
+                assert_eq!(history[0]["failure"], expected);
+                assert_eq!(events[0]["failure"], expected);
+                assert_eq!(progress["failure"], expected);
+                assert_eq!(history[0]["title"], failure.message());
+                assert_eq!(history[0]["change_reason"], failure.message());
+                assert_eq!(events[0]["message"], failure.message());
+                assert_eq!(events[0]["level"], "error");
+                assert_eq!(progress["failure_message"], failure.message());
+                assert_eq!(events[0]["event_id"], serde_json::json!(event));
+                assert_eq!(events[0]["deployment_id"], serde_json::json!(deployment));
+                assert_eq!(
+                    history[0]["metadata"],
+                    serde_json::json!({"pending_deployment_id":deployment})
+                );
+                // Check entire serialized responses, including legacy messages
+                // and metadata, rather than checking only the new failure DTO.
+                for response in [&history, &events, &progress] {
+                    let text = response.to_string();
+                    for secret in [
+                        "display-private",
+                        "raw-private",
+                        "pending-private",
+                        "future-private",
+                        "password",
+                        "url-private",
+                    ] {
+                        assert!(!text.contains(secret), "unexpected disclosure: {secret}");
+                    }
+                    if role != Role::Admin {
+                        assert!(!text.contains("admin-only-detail"));
+                        assert!(!text.contains("diagnostics"));
+                    }
+                    if role == Role::Viewer {
+                        for field in [
+                            "code",
+                            "exit_code",
+                            "attempt_count",
+                            "max_attempts",
+                            "remediation_hint",
+                        ] {
+                            assert!(response.to_string().find(&format!("\"{field}\"")).is_none());
+                        }
+                    }
+                }
+            }
+        }
+        for status in ["pending", "succeeded"] {
+            sqlx::query("UPDATE pending_system_deployments SET status=$1 WHERE id=$2")
+                .bind(status)
+                .bind(deployment)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let progress: serde_json::Value = response_json(
+                get_system_deployment_status(State(pool.clone()), admin.clone(), Path(system))
+                    .await
+                    .into_response(),
+            )
+            .await;
+            assert!(progress.get("failure").is_none());
+            assert!(progress["failure_message"].is_null());
+        }
+        // Admin access remains global even after the system loses its scope.
+        sqlx::query("UPDATE systems SET environment_id=NULL WHERE id=$1")
+            .bind(system)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (headers, expected) in [
+            (admin, StatusCode::OK),
+            (operator, StatusCode::NOT_FOUND),
+            (viewer, StatusCode::NOT_FOUND),
+        ] {
+            assert_eq!(
+                get_system_history(State(pool.clone()), headers.clone(), Path(system))
+                    .await
+                    .into_response()
+                    .status(),
+                expected
+            );
+            assert_eq!(
+                get_system_agent_events(State(pool.clone()), headers.clone(), Path(system))
+                    .await
+                    .into_response()
+                    .status(),
+                expected
+            );
+            assert_eq!(
+                get_system_deployment_status(State(pool.clone()), headers, Path(system))
+                    .await
+                    .into_response()
+                    .status(),
+                expected
+            );
+        }
     }
 
     fn test_cf_state() -> CFState {

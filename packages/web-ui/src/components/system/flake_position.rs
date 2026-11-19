@@ -1319,6 +1319,7 @@ mod tests {
 
     fn deploy_to(commit: Option<&str>) -> SystemDeploymentProgress {
         SystemDeploymentProgress {
+            failure: None,
             id: uuid::Uuid::from_u128(1),
             stage: "queued".to_string(),
             kind: "deploy".to_string(),

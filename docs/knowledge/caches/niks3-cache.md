@@ -909,21 +909,225 @@ storage migration.
 
 ## Troubleshooting a failed agent cache copy
 
-An older agent logs only `Authenticated cache copy failed with status exit
-status: 1`. That text does not identify the cause. A current agent adds one fixed
-reason to the failure, for example:
+Agents report typed failure stages and cause codes. The server derives summary
+and remediation text from the fixed vocabulary in
+`cf-protocol/src/deployment_failure.rs`, not arbitrary process output.
+An illustrative cache timeout can appear as:
 
 ```text
-Authenticated cache copy failed (signature verification failed: the path is not
-signed by a configured trusted signing key (check the cache signing public key));
-exit status: 1
+Stage: Cache acquisition
+Summary: the operation timed out
+Attempts: 3/3
 ```
 
-The agent keeps at most the last 64 KiB of Nix stderr in memory and maps it to
-one reason. It never logs or reports the Nix text, because that text can contain
-cache URLs and credential file paths. Output that matches no known pattern gives
-`Nix failed for an unrecognized reason; details are redacted`. Timeout,
-cancellation, `require-sigs`, and credential cleanup are unchanged.
+This is an example, not an assertion about a particular host. A current agent
+that cannot classify a cause uses code `unknown`, retains its known stage,
+and reports `Deployment failed for an unrecognized reason; details are redacted`.
+
+The agent keeps at most the last 64 KiB of cache-command stderr. When the complete
+stream is retained and has no response-body delimiter, optional diagnostics
+contain at most the last three `error:` lines, each cut to 300 characters.
+Before the agent reports detail, it removes secrets:
+
+- It replaces each value that the agent gave to Nix for this read with `****`.
+  These values are the configured and prepared cache URLs, the Basic username
+  and password, and each credential file path and its parent directory.
+  All nonempty credentials are masked, including one-character credentials.
+  Readability is secondary to masking secrets.
+- It replaces every value that the child inherits from the agent's environment.
+  The child starts with an empty environment and inherits only `PATH`,
+  `NIX_REMOTE`, `SSL_CERT_FILE` and `SSL_CERT_DIR`. `NIX_REMOTE` can be a store
+  URL that carries credentials, and the certificate variables are local paths.
+  The agent masks each whole value, each `:`-separated element of `PATH` and
+  `SSL_CERT_DIR`, and the parent directory of each certificate path. It never
+  masks the root directory `/`. One table in the agent source drives both the
+  child's environment and this inventory, so a variable cannot be inherited
+  without also being masked.
+- It removes user information (`user:password@`) from every URL.
+- It replaces every URL query string with `?****`. This removes signed
+  redirect parameters that the agent does not know.
+
+An `error:` prefix alone does not prove that a line is a Nix diagnostic: HTTP
+response bodies can contain that prefix too. If stderr contains `response body:`
+anywhere (case-insensitive), the agent suppresses the entire detail, including
+lines before or after the delimiter. It does not attempt to find the body's end.
+If the stream exceeds 64 KiB, fails to read, or fails to finish draining, the
+agent also suppresses detail: a retained tail may begin inside a body after its
+delimiter. The fixed category, stage, available exit status and attempt counts
+remain. Suppression is identified as `provider_response_body` or
+`incomplete_capture`; suppressed diagnostics contain no lines or endpoint.
+Ordinary cache copies can inherit credentials from the environment and Nix
+configuration. Their complete credential inventory is unavailable, so their
+technical lines and endpoint are suppressed with
+`credential_inventory_unavailable` unless a body/incomplete-capture reason
+already applies. Their fixed stage, cause, status and retry data remain useful.
+The authenticated read path keeps its isolated credential environment and can
+return masked technical lines when the other suppression rules permit them.
+
+The fixed category is chosen only from text before the first response-body
+delimiter. Text after it is provider-controlled and can imitate a Nix line, for
+example a forged `lacks a signature` after an HTTP 500. The agent searches for
+the delimiter across the whole stream as it arrives, including across read
+boundaries, not only in the retained tail. Truncation therefore cannot evict the
+delimiter and leave body text to be classified. When no body occurs, the last
+64 KiB of output are classified even if earlier output was truncated, so a
+genuine signature failure after a large output is still named. A body with no
+diagnostic before it gives the category `unknown`. Local command failures
+(generation creation, activation submission) apply the same cut to their
+complete output.
+
+For a complete stream without that delimiter, lines that do not start with
+`error:` are dropped. Public store path names can appear in the masked detail.
+Timeout, cancellation, `require-sigs`, and credential cleanup are unchanged.
+
+### Reporting and role-based API contract
+
+The signed `/agent/deployment-failed` report adds optional `failure` containing
+typed `stage`, `code`, optional `exit_code`, `attempt_count`, `max_attempts`, and
+optional `diagnostics`. Compatibility `error` and `display_error` contain only a
+fixed summary, not outer error contexts or detailed diagnostics. The server
+stores structured data as event `metadata.deployment_failure`; JSON storage
+requires no schema migration.
+
+An authenticated agent is not trusted to bound or sanitize what the server
+stores, so the server normalizes the report before it writes anything:
+
+- A report larger than 8 KiB when serialized is not stored. A valid report is
+  under 2 KiB.
+- Unknown fields and free-form strings are dropped. Only the stage and cause
+  enums, the numeric fields and the diagnostics survive.
+- Diagnostics are sanitized and bounded before storage, with the same rules the
+  server applies at display time. Diagnostics that fail those rules, or that
+  carry a completeness flag, are not stored.
+- A report that declares itself incomplete with a top-level `"incomplete":
+  true` stays incomplete. The marker is checked before typed deserialization,
+  because serde would otherwise drop it as an unknown field. Only the JSON
+  boolean `true` counts; another value is an unknown field and is dropped by
+  both normalization and the projection.
+- A report that is oversized or cannot be read as a typed report becomes
+  `{"incomplete": true}` plus only an enum-valid `stage` and `code`. The
+  projection reports it as `incomplete_report`. A report of this kind never
+  decides a state change, so it cannot turn a `succeeded` request into `failed`.
+- The legacy `error` and `display_error` fields are never stored. The pending
+  row stores only the fixed summary of the normalized report.
+
+The role projection of the stored form equals that of the reported form, except
+that an oversized report becomes incomplete. Rows stored by earlier builds are
+not rewritten; the projection still treats them defensively at read time.
+
+History, agent-events and deployment-status return an optional `failure` view.
+Existing title/message fields derive from that same role-filtered view.
+Roles are global assignments: Admin bypasses environment membership, whereas
+Operator and Viewer still require access to the system's current environment.
+Deployment permission never grants Admin diagnostics. Unauthenticated reads
+retain HTTP 403; out-of-scope systems retain HTTP 404.
+
+| Role | Fields in the failure view |
+| --- | --- |
+| Viewer | `stage`, fixed `summary`, `reason_status` |
+| Operator | Viewer fields plus `code`, known `remediation_hint`, available `exit_code`, `attempt_count`, `max_attempts` |
+| Admin | Operator fields plus optional bounded `diagnostics`: masked `lines`, sanitized `cache_endpoint`, fixed `suppression_reason` |
+
+Restricted fields are omitted from JSON, not hidden only by the UI. Failure
+metadata is allowlisted to correlation identity; neither raw `failure_message`,
+old `display_failure_message`, nor arbitrary extra keys are returned. Admin
+diagnostic URLs also lose userinfo, query and fragments on the server. Invalid
+detail is omitted. Agent-side masking of known secrets remains mandatory; the
+server cannot discover every opaque credential in arbitrary text.
+
+`reason_status` distinguishes `classified` (including current-agent `unknown`),
+`legacy_agent` (structured data absent), and `incomplete_report` (partial or
+invalid structured data). Partial reports retain an independently valid known
+stage and code where available. Old free-form messages are never promoted into
+summaries, even for Admin. Older agents and the intermediate MR protocol remain
+accepted, but need an agent update for structured information.
+
+The progress API reads only the matching structured failure event, with a
+failed-status guard that avoids event scans for pending/successful deployments.
+History-to-Logs navigation uses persisted event identity. A recorded deployment
+start, success or failure that has a real agent event with the same event ID is
+shown through that event alone. Matching uses the event ID only, never the commit
+or the time. Independent events and repeated failures remain. Downloads use the
+same server-projected data, including Admin detail only for Admin responses.
+
+The History records an outcome and its reason, not the steps between. The Logs tab
+therefore never reconstructs evaluation, build, activation or rollback steps for a
+deployment. A legacy History row with no real agent event gets one reconstructed
+line, labelled `[reconstructed timeline]`, that restates only the recorded outcome
+(`deploy succeeded @ <sha>` or `deploy failed @ <sha>`) and its message.
+
+Reconstructed lines for agent restarts, reboots and on-host rebuilds are a separate
+case and are unchanged. Each derives from a recorded History event and carries the
+same label, but a few restate steps (for example a service start or an
+out-of-band activation) that the History did not record. They are outside
+TASK-529 and need their own decision.
+
+### Failure stages and codes
+
+| Stage | Observed boundary and representative codes |
+| --- | --- |
+| Cache configuration | Missing/unsupported settings: `missing_cache_configuration`, `invalid_cache_configuration` |
+| Cache acquisition | Authenticated and ordinary copies: transport/trust codes below, `timeout`, `spawn`, `wait`, `capture`, `unknown` |
+| Generation creation | Profile generation command: `generation_creation`, process or observed fixed Nix causes |
+| Generation verification | Symlink resolution/convergence: `generation_verification`, with actual verification attempt count |
+| Activation | Missing script or systemd submission: `missing_activation_script`, `activation`, process causes; observed detached-unit failure: `activation_execution` |
+| Deployment | Setup/current target: `current_system`, `invalid_target`, `unknown` |
+
+Transport/trust codes are `untrusted_user`, `signature_verification`,
+`client_certificate`, `server_certificate`, `authorization`, `missing_path`,
+`rate_limited`, `server_error`, `dns`, `connection`, `interrupted_transfer`,
+`hash_mismatch`, `disk_full`, `nix_daemon`, and `permission_denied`. The table below
+explains their fixed summaries and operational checks. HTTP server classification
+covers 500–599. Summary and hint strings live with the enum. Retries retain the
+existing policy; only actual started attempts are counted.
+
+Activation remains detached after successful `systemd-run` submission. An
+`ExecStopPost` callback runs the originating agent executable in report-only mode,
+independent of the heartbeat service. It reports an observed non-success unit
+result as `activation_execution`, retaining a numeric exit code when systemd
+provides one. It sends no request on success. It never copies systemd result
+strings or journal output into diagnostic fields. Configuration overrides are
+imported by environment-variable name, not exposed as credential-bearing argv.
+The `/agent/deployment-started` response returns the matched request as an
+optional `deployment_id`. The agent passes it to the callback as
+`--deployment-id`, and the callback includes it in its signed failure report.
+A heartbeat can finalize a request as `succeeded` while the switch restarts the
+agent, before the unit exits nonzero. For that ordering only, a report with a
+valid ID, stage `activation` and code `activation_execution` may change the exact
+`succeeded` request (system, target and ID all match) to `failed`. The earlier
+success event stays as evidence. An ID never falls back to target matching. A
+foreign, unknown or already-failed ID is a recorded no-op. Every other report type
+keeps pending-only matching. The failure cleanup also keeps a newer pending
+request, including one for the same target, and its desired target. An older
+server does not return an ID. A callback without one keeps pending-only matching
+and cannot correct an already-succeeded request.
+Callback delivery uses the existing signed request and five-second deadline;
+systemd ignores reporter failure so it cannot change activation outcome. Host
+loss, callback launch failure, and report delivery failure remain best-effort
+limitations, not evidence of a particular activation cause.
+
+Non-Niks3 local-journal cleanup remains TASK-507 scope. Remote structured reports
+do not add raw stdout/stderr exposure. Agent tests cover stage and process error
+mapping, timeouts, masking and suppression. The independent Delivery
+`failure-reporting` scenario covers signed persistence, role/API projections,
+HTTP 403 for an unauthenticated caller, HTTP 404 for an Operator without
+environment membership, identity/deduplication, downloads, viewport checks and a
+real systemd callback. It does not replace the required full `delivery-lifecycle`
+publication/activation gate.
+
+### Progress-query measurement
+
+The `failure-reporting` fixture runs the exact progress query with
+`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` against 20,001 deployment rows and
+100,000 historical failure events, then one current failure event. The
+failure-event scan ran zero loops for pending and succeeded deployments and one
+loop for a failed deployment, using the existing
+`system_events_deployment_failure_bootstrap_idx`. That structural result was the
+same in every run. Wall-clock time varied with farm load: execution ranged from
+3.0 to 17.1 ms across runs, so treat the times as an upper bound, not a benchmark.
+No new index and no speedup against the earlier query are claimed, because no
+baseline was measured. Each scenario run retains its SQL, plans and counts in
+`progress-query-performance/`. TASK-529 records the artifact paths.
 
 | Reason | Meaning | Check first |
 | --- | --- | --- |
@@ -932,7 +1136,18 @@ cancellation, `require-sigs`, and credential cleanup are unchanged.
 | the cache rejected or could not use the client certificate | mTLS authentication failed. | The read client certificate and key (step 3) |
 | the cache denied read authorization (HTTP 401 or 403) | The cache refused the read identity. | The Basic or mTLS identity (step 3) |
 | the store path or its NAR is missing from the cache | The metadata or NAR is absent at the read endpoint. | Steps 2 and 4 |
-| Nix failed for an unrecognized reason | No known pattern matched. | Run the whole sequence |
+| the agent user is not a trusted Nix user | The Nix daemon ignored the cache signing key, so signature verification failed. | Add the agent user to `nix.settings.trusted-users` |
+| the cache rate-limited the read (HTTP 429) | The cache refused requests because of rate limits. | Cache provider limits |
+| the cache server returned a server error (HTTP 5xx) | The cache or a proxy in front of it failed. | Cache server logs |
+| DNS resolution of the cache host failed | The agent host cannot resolve the read URL host. | DNS on the agent host |
+| could not connect to the cache server | The connection was refused or the host is unreachable. | Firewall, routing, and the read URL port |
+| the operation timed out | The cache acquisition deadline or network request timed out. | Network path, cache health and timeout settings |
+| the transfer from the cache was interrupted | The connection closed during a download. | Proxies and cache server stability |
+| the downloaded data did not match its expected hash | The NAR differs from its narinfo. | Re-push the path (step 4) |
+| the agent host is out of disk space | The local Nix store cannot store the path. | Free space or run garbage collection on the agent host |
+| the agent could not reach the local Nix daemon | The daemon socket is unavailable. | `nix-daemon.service` on the agent host |
+| a local Nix operation was denied permission | The agent user cannot use the daemon or its cache directory. | Agent user permissions |
+| Deployment failed for an unrecognized reason | No known fixed category matched. | Admins can inspect available masked diagnostics; otherwise run the whole sequence |
 
 Diagnostic sequence. Run the `curl` and `nix` commands from an administrator
 workstation. Do not install credentials on the agent. Replace each `<placeholder>`
