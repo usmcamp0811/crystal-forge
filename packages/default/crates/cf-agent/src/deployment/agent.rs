@@ -1659,16 +1659,107 @@ const REDACTED_DETAIL_MAX_LINES: usize = 3;
 const REDACTED_DETAIL_MAX_LINE_CHARS: usize = 300;
 const REDACTED: &str = "****";
 
+/// One environment variable that the authenticated read child inherits.
+struct InheritedVariable {
+    name: &'static str,
+    /// The value is a `:`-separated list. Mask each element as well.
+    list: bool,
+    /// The value names filesystem paths. Mask each path's parent directory too.
+    parents: bool,
+}
+
+/// The only variables the authenticated read child inherits after `env_clear`.
+///
+/// SECURITY: This is the single source for both the child's environment and
+/// the masking inventory. A variable cannot be inherited without being masked,
+/// so the inventory is complete by construction. `NIX_REMOTE` can be a store
+/// URL that carries credentials, and certificate locations are local paths.
+const AUTHENTICATED_COPY_INHERITED_ENV: [InheritedVariable; 4] = [
+    InheritedVariable {
+        name: "PATH",
+        list: true,
+        parents: false,
+    },
+    InheritedVariable {
+        name: "NIX_REMOTE",
+        list: false,
+        parents: false,
+    },
+    InheritedVariable {
+        name: "SSL_CERT_FILE",
+        list: false,
+        parents: true,
+    },
+    InheritedVariable {
+        name: "SSL_CERT_DIR",
+        list: true,
+        parents: true,
+    },
+];
+
+/// Inherited variable names and values, as passed to one authenticated read.
+type InheritedEnvironment = Vec<(&'static str, std::ffi::OsString)>;
+
+/// Reads the inherited variables that are set, using `lookup` for each name.
+fn inherited_environment(
+    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> InheritedEnvironment {
+    AUTHENTICATED_COPY_INHERITED_ENV
+        .iter()
+        .filter_map(|variable| lookup(variable.name).map(|value| (variable.name, value)))
+        .collect()
+}
+
+/// Returns every value and path that the inherited environment can reveal.
+///
+/// Masks the whole value, each list element, and each path's parent directory
+/// as [`AUTHENTICATED_COPY_INHERITED_ENV`] specifies. The root directory and an
+/// empty parent are skipped: masking `/` would destroy every path separator.
+fn inherited_environment_secrets(inherited: &InheritedEnvironment) -> Vec<String> {
+    let mut secrets = Vec::new();
+    for (name, value) in inherited {
+        let value = value.to_string_lossy().into_owned();
+        // A name outside the table cannot occur. Use the strictest rule if one does.
+        let (list, parents) = AUTHENTICATED_COPY_INHERITED_ENV
+            .iter()
+            .find(|variable| variable.name == *name)
+            .map_or((true, true), |variable| (variable.list, variable.parents));
+        let elements: Vec<String> = if list {
+            value
+                .split(':')
+                .filter(|element| !element.is_empty())
+                .map(str::to_owned)
+                .collect()
+        } else {
+            vec![value.clone()]
+        };
+        for element in elements {
+            if parents && let Some(parent) = std::path::Path::new(&element).parent() {
+                let parent = parent.to_string_lossy();
+                if !parent.is_empty() && parent != "/" {
+                    secrets.push(parent.into_owned());
+                }
+            }
+            secrets.push(element);
+        }
+        secrets.push(value);
+    }
+    secrets
+}
+
 /// Returns every credential-bearing value this agent passed to one Nix read.
 ///
 /// SECURITY: The list contains the configured and prepared cache URLs, Basic
-/// credentials, and every local credential file path and its parent directory.
+/// credentials, every local credential file path and its parent directory, and
+/// every inherited environment value (see [`AUTHENTICATED_COPY_INHERITED_ENV`]).
 /// [`redact_nix_error_lines`] masks each value by exact match.
 fn known_read_secrets(
     cache: &RuntimeCacheConfig,
     read: &cf_config::cache_credentials::PreparedCacheRead,
+    inherited: &InheritedEnvironment,
 ) -> Vec<String> {
     let mut secrets = known_cache_secrets(cache);
+    secrets.extend(inherited_environment_secrets(inherited));
     secrets.push(read.url.clone());
     let mut paths: Vec<std::path::PathBuf> = read.ca_certificate_path.iter().cloned().collect();
     paths.extend(
@@ -1995,6 +2086,27 @@ async fn copy_authenticated_cache(
     timeout: Duration,
     program: std::ffi::OsString,
 ) -> Result<()> {
+    copy_authenticated_cache_with_environment(
+        cache,
+        store_path,
+        refresh,
+        timeout,
+        program,
+        inherited_environment(|name| std::env::var_os(name)),
+    )
+    .await
+}
+
+// The inherited environment is a parameter so tests can supply one without
+// mutating the process-global environment. Production reads the real one.
+async fn copy_authenticated_cache_with_environment(
+    cache: RuntimeCacheConfig,
+    store_path: String,
+    refresh: bool,
+    timeout: Duration,
+    program: std::ffi::OsString,
+    inherited: InheritedEnvironment,
+) -> Result<()> {
     tokio::spawn(async move {
         if cache.cache_type == "Niks3" && cache.cache_public_keys.is_empty() {
             return Err(DeploymentFailureError(failure(
@@ -2034,10 +2146,9 @@ async fn copy_authenticated_cache(
         // SECURITY: Only read auth is available to this child. Ambient write
         // tokens, AWS credentials, and Nix access-token config are excluded.
         command.env_clear();
-        for key in ["PATH", "NIX_REMOTE", "SSL_CERT_FILE", "SSL_CERT_DIR"] {
-            if let Some(value) = std::env::var_os(key) {
-                command.env(key, value);
-            }
+        // The same table drives the masking inventory below.
+        for (name, value) in &inherited {
+            command.env(name, value);
         }
         command.args([
             "copy",
@@ -2059,7 +2170,7 @@ async fn copy_authenticated_cache(
         let result = run_cache_copy(
             command,
             &cache,
-            &known_read_secrets(&cache, &read),
+            &known_read_secrets(&cache, &read, &inherited),
             timeout,
             true,
         )
@@ -2561,6 +2672,111 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
         };
         assert_eq!(incomplete.display_detail(&[]), "");
         assert_eq!(ReadDiagnostics::default().display_detail(&[]), "");
+    }
+
+    // Reproduces the review finding: the child inherits these variables after
+    // env_clear, so a Nix error that names one must not reach Admin diagnostics.
+    #[tokio::test]
+    async fn inherited_environment_values_never_enter_admin_diagnostics() {
+        use std::ffi::OsString;
+        let fixture = Fixture::new(&format!(
+            "{PRIVATE_SCRIPT}\n\
+             printf \"error: unable to load CA bundle '/opt/private-ca/bundle.crt'\\n\" >&2\n\
+             printf 'error: cannot open /opt/private-ca-dir/certs: Permission denied\\n' >&2\n\
+             printf 'error: bad store ssh-ng://nixuser:hunter22@cache.internal/?ssh-key=/opt/private-ca/id\\n' >&2\n\
+             exit 1\n"
+        ));
+        // The real PATH is required so the fake script finds its tools.
+        let mut inherited = inherited_environment(|name| {
+            (name == "PATH").then(|| std::env::var_os("PATH")).flatten()
+        });
+        inherited.extend([
+            (
+                "SSL_CERT_FILE",
+                OsString::from("/opt/private-ca/bundle.crt"),
+            ),
+            (
+                "SSL_CERT_DIR",
+                OsString::from("/opt/private-ca-dir/certs:/srv/other/certs"),
+            ),
+            (
+                "NIX_REMOTE",
+                OsString::from(
+                    "ssh-ng://nixuser:hunter22@cache.internal/?ssh-key=/opt/private-ca/id",
+                ),
+            ),
+        ]);
+        let error = copy_authenticated_cache_with_environment(
+            cache(true),
+            "/nix/store/output".into(),
+            false,
+            Duration::from_secs(10),
+            fixture.program(),
+            inherited,
+        )
+        .await
+        .unwrap_err();
+        let typed = report_failure(&error);
+        assert_eq!(typed.stage, FailureStage::CacheAcquisition);
+        let diagnostics = typed
+            .diagnostics
+            .expect("authenticated copy reports diagnostics");
+        // Masking, not suppression, must be what protects these lines.
+        assert_eq!(diagnostics.suppression_reason, None);
+        assert!(!diagnostics.lines.is_empty());
+        let shown = diagnostics.lines.join("\n");
+        assert!(shown.contains("****"), "{shown}");
+        for private in [
+            "/opt/private-ca",
+            "/opt/private-ca-dir",
+            "/srv/other",
+            "bundle.crt",
+            "hunter22",
+            "nixuser",
+            "ssh-key",
+        ] {
+            assert!(!shown.contains(private), "{private} leaked into: {shown}");
+        }
+        let directory = std::fs::read_to_string(fixture.0.join("credentials")).unwrap();
+        assert!(!std::path::Path::new(&directory).exists());
+    }
+
+    // The child's environment and the masking inventory share one table, so a
+    // newly inherited variable cannot be omitted from masking.
+    #[test]
+    fn every_inherited_variable_is_masked_by_construction() {
+        let inherited: InheritedEnvironment = AUTHENTICATED_COPY_INHERITED_ENV
+            .iter()
+            .map(|variable| {
+                (
+                    variable.name,
+                    std::ffi::OsString::from(format!(
+                        "/zz-{}/inner/value",
+                        variable.name.to_lowercase()
+                    )),
+                )
+            })
+            .collect();
+        assert_eq!(inherited.len(), AUTHENTICATED_COPY_INHERITED_ENV.len());
+        let secrets = inherited_environment_secrets(&inherited);
+        for (name, value) in &inherited {
+            let line = format!("error: cannot use {}", value.to_string_lossy());
+            let shown = redact_nix_error_lines(line.as_bytes(), &secrets).join(" ");
+            assert!(
+                !shown.contains(&format!("zz-{}", name.to_lowercase())),
+                "{name} value leaked: {shown}"
+            );
+        }
+        // The root directory must never become a secret: masking "/" would erase
+        // every path separator.
+        let root = vec![("SSL_CERT_FILE", std::ffi::OsString::from("/cert.pem"))];
+        let secrets = inherited_environment_secrets(&root);
+        assert!(
+            secrets
+                .iter()
+                .all(|secret| secret != "/" && !secret.is_empty())
+        );
+        assert!(secrets.contains(&"/cert.pem".to_owned()));
     }
 
     #[tokio::test]

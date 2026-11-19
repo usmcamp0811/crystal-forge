@@ -934,6 +934,15 @@ Before the agent reports detail, it removes secrets:
   and password, and each credential file path and its parent directory.
   All nonempty credentials are masked, including one-character credentials.
   Readability is secondary to masking secrets.
+- It replaces every value that the child inherits from the agent's environment.
+  The child starts with an empty environment and inherits only `PATH`,
+  `NIX_REMOTE`, `SSL_CERT_FILE` and `SSL_CERT_DIR`. `NIX_REMOTE` can be a store
+  URL that carries credentials, and the certificate variables are local paths.
+  The agent masks each whole value, each `:`-separated element of `PATH` and
+  `SSL_CERT_DIR`, and the parent directory of each certificate path. It never
+  masks the root directory `/`. One table in the agent source drives both the
+  child's environment and this inventory, so a variable cannot be inherited
+  without also being masked.
 - It removes user information (`user:password@`) from every URL.
 - It replaces every URL query string with `?****`. This removes signed
   redirect parameters that the agent does not know.
@@ -968,6 +977,27 @@ fixed summary, not outer error contexts or detailed diagnostics. The server
 stores structured data as event `metadata.deployment_failure`; JSON storage
 requires no schema migration.
 
+An authenticated agent is not trusted to bound or sanitize what the server
+stores, so the server normalizes the report before it writes anything:
+
+- A report larger than 8 KiB when serialized is not stored. A valid report is
+  under 2 KiB.
+- Unknown fields and free-form strings are dropped. Only the stage and cause
+  enums, the numeric fields and the diagnostics survive.
+- Diagnostics are sanitized and bounded before storage, with the same rules the
+  server applies at display time. Diagnostics that fail those rules, or that
+  carry a completeness flag, are not stored.
+- A report that is oversized or cannot be read as a typed report becomes
+  `{"incomplete": true}` plus only an enum-valid `stage` and `code`. The
+  projection reports it as `incomplete_report`. A report of this kind never
+  decides a state change, so it cannot turn a `succeeded` request into `failed`.
+- The legacy `error` and `display_error` fields are never stored. The pending
+  row stores only the fixed summary of the normalized report.
+
+The role projection of the stored form equals that of the reported form, except
+that an oversized report becomes incomplete. Rows stored by earlier builds are
+not rewritten; the projection still treats them defensively at read time.
+
 History, agent-events and deployment-status return an optional `failure` view.
 Existing title/message fields derive from that same role-filtered view.
 Roles are global assignments: Admin bypasses environment membership, whereas
@@ -997,10 +1027,23 @@ accepted, but need an agent update for structured information.
 
 The progress API reads only the matching structured failure event, with a
 failed-status guard that avoids event scans for pending/successful deployments.
-History-to-Logs navigation uses persisted event identity. Logs prefer the real
-agent-event entry over reconstruction only when event IDs match; independent
-events and repeated failures remain. Downloads use the same server-projected
-data, including Admin detail only for Admin responses.
+History-to-Logs navigation uses persisted event identity. A recorded deployment
+start, success or failure that has a real agent event with the same event ID is
+shown through that event alone. Matching uses the event ID only, never the commit
+or the time. Independent events and repeated failures remain. Downloads use the
+same server-projected data, including Admin detail only for Admin responses.
+
+The History records an outcome and its reason, not the steps between. The Logs tab
+therefore never reconstructs evaluation, build, activation or rollback steps for a
+deployment. A legacy History row with no real agent event gets one reconstructed
+line, labelled `[reconstructed timeline]`, that restates only the recorded outcome
+(`deploy succeeded @ <sha>` or `deploy failed @ <sha>`) and its message.
+
+Reconstructed lines for agent restarts, reboots and on-host rebuilds are a separate
+case and are unchanged. Each derives from a recorded History event and carries the
+same label, but a few restate steps (for example a service start or an
+out-of-band activation) that the History did not record. They are outside
+TASK-529 and need their own decision.
 
 ### Failure stages and codes
 

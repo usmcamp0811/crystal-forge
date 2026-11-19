@@ -42,6 +42,18 @@ def expected_failure_projection(failure, role):
     return view
 
 
+def expected_stored_failure(failure):
+    # Independently authored ingress contract, not copied from the stored rows.
+    # No report is stored for a legacy agent. A report without a readable cause
+    # keeps only a valid stage plus the incomplete marker. A typed report is
+    # stored with every typed field present, including empty optional ones.
+    if failure is None:
+        return None
+    if failure == {"stage": "activation"}:
+        return {"incomplete": True, "stage": "activation"}
+    return {"exit_code": None, "attempt_count": None, "max_attempts": None, "diagnostics": None, **failure}
+
+
 def expected_failure_message(view):
     if view["summary"].startswith("Deployment failed"):
         message = view["summary"] if view["stage"] == "Deployment" else view["stage"] + ": " + view["summary"]
@@ -127,7 +139,10 @@ with case("authenticated-failure-report-persists-only-safe-display-diagnostics")
         expect_equal(event["event_type"], "cf_deployment_failed", "persisted failure type")
         expect_equal(event["new_store_path"], payload["target_store_path"], "failure target identity")
         expect_equal(event["new_generation"], None, "no generation activated")
-        expect_equal(event["metadata"].get("deployment_failure"), failure, "typed report retained separately")
+        expect_equal(event["metadata"].get("deployment_failure"), expected_stored_failure(failure),
+                     "normalized report persisted, nothing else")
+        expect(set(event["metadata"]) <= {"target_store_path", "pending_deployment_id", "deployment_failure"},
+               "event metadata gained unexpected keys: " + str(sorted(event["metadata"])))
         expect(raw not in json.dumps(event) and legacy_display not in json.dumps(event), "event persisted legacy free-form diagnostic")
         progress = delivery_api("GET", "/api/v1/systems/" + probe["id"] + "/deployment-status")
         admin_view = expected_failure_projection(failure, "Admin")

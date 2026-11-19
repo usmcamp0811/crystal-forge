@@ -17,7 +17,9 @@ use uuid::Uuid;
 #[path = "deployment_failure.rs"]
 mod failure_projection;
 pub use failure_projection::DeploymentFailureView;
-pub(crate) use failure_projection::{failure_metadata, project_failure};
+pub(crate) use failure_projection::{
+    failure_metadata, normalize_reported_failure, project_failure,
+};
 
 /// Tri-state value for PATCH-style update payloads.
 ///

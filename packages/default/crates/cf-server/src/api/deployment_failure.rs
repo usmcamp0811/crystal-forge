@@ -117,7 +117,14 @@ pub(crate) fn project_failure(metadata: &Value, role: Role) -> DeploymentFailure
             view.remediation_hint = code.remediation().map(str::to_owned);
         }
     }
-    if let Some(failure) = parsed {
+    // Ingress normalization marks a report whose optional content it dropped.
+    // Such a report stays `incomplete_report` even though the typed fields that
+    // remain would parse as a complete one.
+    let marked_incomplete = structured
+        .and_then(|value| value.get("incomplete"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    if let (Some(failure), false) = (parsed, marked_incomplete) {
         view.reason_status = "classified".into();
         if matches!(role, Role::Operator | Role::Admin) {
             view.exit_code = failure.exit_code;
@@ -125,23 +132,107 @@ pub(crate) fn project_failure(metadata: &Value, role: Role) -> DeploymentFailure
             view.max_attempts = failure.max_attempts;
         }
         if role == Role::Admin {
-            // SECURITY: Older/future captures may carry explicit completeness
-            // flags that serde's protocol type would otherwise ignore.
             let raw = structured.and_then(|value| value.get("diagnostics"));
-            let incomplete = raw.is_some_and(|value| {
-                ["incomplete", "truncated"]
-                    .iter()
-                    .any(|key| value.get(key) == Some(&json!(true)))
-                    || ["complete", "capture_complete"]
-                        .iter()
-                        .any(|key| value.get(key) == Some(&json!(false)))
-            });
-            if !incomplete {
+            if !raw.is_some_and(diagnostics_flagged_incomplete) {
                 view.diagnostics = failure.diagnostics.and_then(sanitize_diagnostics);
             }
         }
     }
     view
+}
+
+// SECURITY: Older or future captures may carry explicit completeness flags that
+// serde's protocol type would otherwise ignore. Diagnostics so flagged are never
+// displayed or stored.
+fn diagnostics_flagged_incomplete(raw: &Value) -> bool {
+    ["incomplete", "truncated"]
+        .iter()
+        .any(|key| raw.get(key) == Some(&json!(true)))
+        || ["complete", "capture_complete"]
+            .iter()
+            .any(|key| raw.get(key) == Some(&json!(false)))
+}
+
+/// Bounds the serialized failure report that the server persists.
+///
+/// A valid report is under 2 KiB: at most three 300-character lines, one
+/// 300-character endpoint and a few fixed fields. A larger report carries
+/// content that the server would never display, so it is not stored.
+pub(crate) const MAX_REPORTED_FAILURE_BYTES: usize = 8 * 1024;
+
+/// A reported failure after ingress normalization.
+pub(crate) struct NormalizedFailure {
+    /// The only failure JSON that is persisted, under `deployment_failure`.
+    ///
+    /// `Null` marks a legacy agent. `{"incomplete": true, ...}` carries only an
+    /// enum-valid stage and cause. Otherwise it is the typed report with
+    /// sanitized diagnostics.
+    pub(crate) stored: Value,
+    /// The complete typed cause, used for terminal-state decisions. `None` for a
+    /// legacy or incomplete report.
+    pub(crate) typed: Option<DeploymentFailure>,
+}
+
+/// Normalizes an agent's reported failure before it is persisted.
+///
+/// SECURITY: An authenticated agent is not trusted to bound or sanitize what it
+/// stores. Unknown fields, free-form strings and oversized diagnostics are
+/// dropped here, not only at display time. Persisted content is limited to the
+/// stage and cause enums, numeric fields, and diagnostics that pass
+/// [`sanitize_diagnostics`]. The role projection of the stored form equals that
+/// of the reported form, except that an oversized report becomes incomplete.
+pub(crate) fn normalize_reported_failure(reported: Option<&Value>) -> NormalizedFailure {
+    let Some(raw) = reported.filter(|value| !value.is_null()) else {
+        return NormalizedFailure {
+            stored: Value::Null,
+            typed: None,
+        };
+    };
+    let oversized =
+        serde_json::to_vec(raw).map_or(true, |bytes| bytes.len() > MAX_REPORTED_FAILURE_BYTES);
+    if oversized {
+        return incomplete_failure(raw);
+    }
+    let Ok(mut failure) = serde_json::from_value::<DeploymentFailure>(raw.clone()) else {
+        return incomplete_failure(raw);
+    };
+    failure.diagnostics = if raw
+        .get("diagnostics")
+        .is_some_and(diagnostics_flagged_incomplete)
+    {
+        None
+    } else {
+        failure.diagnostics.and_then(sanitize_diagnostics)
+    };
+    match serde_json::to_value(&failure) {
+        Ok(stored) => NormalizedFailure {
+            stored,
+            typed: Some(failure),
+        },
+        Err(_) => incomplete_failure(raw),
+    }
+}
+
+// Keeps only enum-valid values, recovered independently, so that a known
+// operation or fixed cause survives while arbitrary invalid content does not.
+fn incomplete_failure(raw: &Value) -> NormalizedFailure {
+    let mut stored = json!({ "incomplete": true });
+    if let Some(stage) = raw
+        .get("stage")
+        .and_then(|value| serde_json::from_value::<FailureStage>(value.clone()).ok())
+    {
+        stored["stage"] = json!(stage);
+    }
+    if let Some(code) = raw
+        .get("code")
+        .and_then(|value| serde_json::from_value::<FailureCode>(value.clone()).ok())
+    {
+        stored["code"] = json!(code);
+    }
+    NormalizedFailure {
+        stored,
+        typed: None,
+    }
 }
 
 // SECURITY: Only protocol-sized masked diagnostics are eligible for display.
@@ -460,6 +551,167 @@ mod tests {
         assert_eq!(
             sanitize_urls("error: https://user:pass@cache.test/p?token=secret#fragment failed"),
             "error: https://cache.test/p failed"
+        );
+    }
+
+    fn view(raw: &Value, role: Role) -> Value {
+        serde_json::to_value(project_failure(&json!({ "deployment_failure": raw }), role)).unwrap()
+    }
+
+    // Normalization must not change what any role sees. Oversized reports are the
+    // one deliberate exception and are covered separately.
+    #[test]
+    fn normalization_preserves_every_role_projection() {
+        let samples = [
+            metadata()["deployment_failure"].clone(),
+            json!({"stage":"activation","code":"activation_execution","exit_code":17,
+                   "attempt_count":1,"max_attempts":1}),
+            json!({"stage":"cache_acquisition","code":"dns","future_field":"x",
+                   "diagnostics":{"lines":["error: lookup"],"cache_endpoint":null,
+                                  "suppression_reason":null,"extra":"y"}}),
+            json!({"stage":"cache_acquisition","code":"dns",
+                   "diagnostics":{"lines":["error: a","error: b","error: c","error: d"],
+                                  "cache_endpoint":null,"suppression_reason":null}}),
+            json!({"stage":"cache_acquisition","code":"dns",
+                   "diagnostics":{"lines":["error: secret"],"cache_endpoint":null,
+                                  "suppression_reason":null,"incomplete":true}}),
+            json!({"stage":"cache_acquisition","code":"dns",
+                   "diagnostics":{"lines":[],"cache_endpoint":null,
+                                  "suppression_reason":"provider_response_body"}}),
+            // Valid stage and cause with malformed optional content stay incomplete.
+            json!({"stage":"cache_acquisition","code":"dns","diagnostics":"not-an-object"}),
+            json!({"stage":"activation","code":"activation_execution","exit_code":"seventeen"}),
+            json!({"stage":"activation"}),
+            json!({"code":"dns"}),
+            json!({"stage":"bogus","code":"dns"}),
+            json!({"stage":"activation","code":"bogus"}),
+            json!({}),
+            json!("a string"),
+            json!(["an", "array"]),
+            json!(42),
+        ];
+        for raw in samples {
+            let normalized = normalize_reported_failure(Some(&raw));
+            for role in [Role::Viewer, Role::Operator, Role::Admin] {
+                assert_eq!(
+                    view(&raw, role),
+                    view(&normalized.stored, role),
+                    "{role:?} projection changed for {raw}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_reports_normalize_to_null() {
+        for reported in [None, Some(&Value::Null)] {
+            let normalized = normalize_reported_failure(reported);
+            assert_eq!(normalized.stored, Value::Null);
+            assert!(normalized.typed.is_none());
+            assert_eq!(
+                view(&normalized.stored, Role::Admin)["reason_status"],
+                "legacy_agent"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_fields_and_free_form_strings_are_not_stored() {
+        let raw = json!({
+            "stage": "cache_acquisition", "code": "dns", "future_field": "SECRET-FUTURE",
+            "diagnostics": {"lines": ["error: lookup"], "cache_endpoint": null,
+                            "suppression_reason": null, "extra": "SECRET-DIAGNOSTIC"},
+            "error": "SECRET-ERROR"
+        });
+        let normalized = normalize_reported_failure(Some(&raw));
+        let stored = normalized.stored.to_string();
+        for private in [
+            "SECRET-FUTURE",
+            "SECRET-DIAGNOSTIC",
+            "SECRET-ERROR",
+            "future_field",
+        ] {
+            assert!(!stored.contains(private), "{private} stored in {stored}");
+        }
+        // Only the typed report's own fields remain.
+        let keys: std::collections::BTreeSet<_> = normalized
+            .stored
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let expected: std::collections::BTreeSet<_> = [
+            "stage",
+            "code",
+            "exit_code",
+            "attempt_count",
+            "max_attempts",
+            "diagnostics",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(keys, expected);
+        assert!(normalized.typed.is_some());
+    }
+
+    #[test]
+    fn stored_diagnostics_are_sanitized_before_persistence() {
+        let raw = json!({"stage":"cache_acquisition","code":"dns","diagnostics":{
+            "lines": ["error: https://user:pw@cache.test/p?token=secret#frag failed"],
+            "cache_endpoint": "https://user:pw@cache.test/path?token=secret",
+            "suppression_reason": null}});
+        let stored = normalize_reported_failure(Some(&raw)).stored.to_string();
+        for private in ["user:pw", "pw@", "token=secret", "#frag"] {
+            assert!(!stored.contains(private), "{private} stored in {stored}");
+        }
+        assert!(stored.contains("cache.test"));
+    }
+
+    #[test]
+    fn oversized_reports_are_stored_as_a_small_fixed_incomplete_marker() {
+        let huge = "x".repeat(MAX_REPORTED_FAILURE_BYTES * 4);
+        for raw in [
+            json!({"stage":"cache_acquisition","code":"dns","diagnostics":{
+                "lines":[format!("error: {huge}")],"cache_endpoint":null,"suppression_reason":null}}),
+            json!({"stage":"cache_acquisition","code":"dns","unknown": huge}),
+        ] {
+            let normalized = normalize_reported_failure(Some(&raw));
+            let stored = normalized.stored.to_string();
+            assert!(
+                stored.len() < 200,
+                "oversized report stored {} bytes",
+                stored.len()
+            );
+            assert!(!stored.contains("xxxx"));
+            assert!(
+                normalized.typed.is_none(),
+                "an oversized report decides no state"
+            );
+            // The known operation and cause survive; nothing else does.
+            let admin = view(&normalized.stored, Role::Admin);
+            assert_eq!(admin["reason_status"], "incomplete_report");
+            assert_eq!(admin["stage"], "Cache acquisition");
+            assert_eq!(admin["summary"], "DNS resolution of the cache host failed");
+            assert!(admin.get("diagnostics").is_none());
+        }
+    }
+
+    #[test]
+    fn incomplete_reports_never_carry_a_typed_cause_for_terminal_decisions() {
+        // A complete activation_execution report may override a succeeded request.
+        let complete = json!({"stage":"activation","code":"activation_execution","exit_code":17});
+        assert!(normalize_reported_failure(Some(&complete)).typed.is_some());
+        // The same cause with malformed optional content must not.
+        let malformed =
+            json!({"stage":"activation","code":"activation_execution","diagnostics":"x"});
+        let normalized = normalize_reported_failure(Some(&malformed));
+        assert!(normalized.typed.is_none());
+        assert_eq!(normalized.stored["incomplete"], true);
+        assert_eq!(
+            view(&normalized.stored, Role::Viewer)["reason_status"],
+            "incomplete_report"
         );
     }
 }

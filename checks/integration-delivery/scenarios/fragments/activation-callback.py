@@ -211,3 +211,74 @@ with case("callback-with-foreign-or-terminal-deployment-id-never-mutates"):
             "status": "ok", "message": "No matching pending deployment"}}, label + " ID is a recorded no-op")
         expect_equal(callback_snapshot(), before, label + " ID leaves every protected record unchanged")
     expect_equal(callback_request_count(), requests + 2, "both no-match reports reached the real endpoint")
+
+with case("signed-failure-reports-are-normalized-before-persistence"):
+    # An authenticated agent is not trusted to bound or sanitize what the server
+    # stores. Send real signed reports and inspect the rows that PostgreSQL holds,
+    # not only what the API would display. The marker is planted in every field,
+    # including the legacy `error` and `display_error`, and must reach no row.
+    system = receipts()["callback.systemId"]
+    hostname = receipts()["callback.hostname"]
+    marker = "PERSISTED-SECRET-MARKER"
+    huge = "x" * 40000
+    allowed_metadata = {"target_store_path", "pending_deployment_id", "deployment_failure"}
+    reports = {
+        "unknown-fields": ({"stage": "cache_acquisition", "code": "dns", "exit_code": 1,
+            "attempt_count": 3, "max_attempts": 3, "future_field": marker,
+            "diagnostics": {"lines": ["error: lookup failed"], "cache_endpoint": None,
+                            "suppression_reason": None, "extra": marker}}, "classified"),
+        "userinfo": ({"stage": "cache_acquisition", "code": "dns", "diagnostics": {
+            "lines": ["error: unable https://user:pw@cache.test/p?token=" + marker + " failed"],
+            "cache_endpoint": "https://user:pw@cache.test/path?token=" + marker,
+            "suppression_reason": None}}, "classified"),
+        "oversized-diagnostics": ({"stage": "cache_acquisition", "code": "dns", "diagnostics": {
+            "lines": ["error: " + huge], "cache_endpoint": None, "suppression_reason": None}},
+            "incomplete_report"),
+        "oversized-unknown": ({"stage": "cache_acquisition", "code": "dns", "junk": huge},
+            "incomplete_report"),
+        "malformed": ({"stage": "activation", "code": "activation_execution",
+            "exit_code": marker, "diagnostics": "not-an-object"}, "incomplete_report"),
+    }
+    for label, (failure, expected_status) in reports.items():
+        deployment_id = delivery_api("POST", "/api/v1/systems/" + system + "/deploy", {
+            "commit_sha": FACTS["sourceRevision"], "action": "deploy", "request_id": str(uuid.uuid4()),
+        }, expected=202)["deployment_id"]
+        _vm_write(controller, "/tmp/cf-it/ingress-report.json", json.dumps({
+            "hostname": hostname, "target_store_path": FACTS["outputPath"],
+            "error": marker, "display_error": marker, "failure": failure}))
+        result = json.loads(controller.succeed("node /etc/cf-it/failure-report.cjs report " + shlex.join([
+            "/run/cf-it-callback/private.pem", hostname, "/tmp/cf-it/ingress-report.json"])))
+        expect_equal(result, {"status": 200, "body": {"status": "ok", "message": "Deployment failure recorded"}},
+                     label + ": signed report accepted")
+        rows = sql_json(controller, "SELECT metadata, octet_length(metadata::text) AS size FROM system_events "
+            "WHERE deployment_id=" + literal(deployment_id) + "::uuid AND event_type='cf_deployment_failed'")
+        expect_equal(len(rows), 1, label + ": one failure event")
+        metadata, size = rows[0]["metadata"], rows[0]["size"]
+        expect(set(metadata) <= allowed_metadata, label + ": unexpected metadata keys " + str(sorted(metadata)))
+        stored = json.dumps(metadata)
+        for private in (marker, "future_field", "junk", "xxxx", "pw@", "not-an-object"):
+            expect(private not in stored, label + ": " + private + " was persisted")
+        expect(size < 2048, label + ": stored " + str(size) + " bytes")
+        history = delivery_api("GET", "/api/v1/systems/" + system + "/history")
+        entry = next(row for row in history if row["deployment_id"] == deployment_id
+                     and row["event_type"] == "cf_deployment_failed")
+        expect_equal(entry["failure"]["reason_status"], expected_status, label + ": fixed status survives normalization")
+        pending = sql_json(controller, "SELECT failure_message FROM pending_system_deployments WHERE id="
+                           + literal(deployment_id) + "::uuid")
+        expect_equal(pending[0]["failure_message"], entry["failure"]["summary"],
+                     label + ": pending row stores only the fixed summary")
+        diagnostics = entry["failure"].get("diagnostics")
+        if label == "unknown-fields":
+            expect_equal(diagnostics["lines"], ["error: lookup failed"], label + ": diagnostics keep only known fields")
+        if label == "userinfo":
+            expect_equal(diagnostics["lines"], ["error: unable https://cache.test/p failed"], label + ": URL secrets removed")
+            expect_equal(diagnostics["cache_endpoint"], "https://cache.test/path", label + ": endpoint sanitized")
+        if expected_status == "incomplete_report":
+            expect(diagnostics is None, label + ": incomplete report keeps no diagnostics")
+        if label.startswith("oversized"):
+            expect(size < 400, label + ": oversized report left a small fixed marker (" + str(size) + " bytes)")
+    # Whole-table scan: the marker must not appear in any column of either table.
+    for table in ("system_events", "pending_system_deployments"):
+        found = sql_json(controller, "SELECT count(*) AS n FROM " + table + " t WHERE to_jsonb(t)::text LIKE "
+                         + literal("%" + marker + "%"))
+        expect_equal(found[0]["n"], 0, "marker persisted in " + table)

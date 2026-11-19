@@ -75,9 +75,12 @@ pub async fn report(
     if payload.error.trim().is_empty() {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    // SECURITY: Neither legacy error field proves redaction. Persist only a
-    // server-derived summary; role-specific diagnostics use structured metadata.
-    let metadata = serde_json::json!({ "deployment_failure": payload.failure });
+    // SECURITY: Neither legacy error field proves redaction, and an authenticated
+    // agent is not trusted to bound what it stores. Persist only the normalized
+    // report and a server-derived summary; role-specific diagnostics are
+    // projected from the normalized metadata at read time.
+    let normalized = crate::api::models::normalize_reported_failure(payload.failure.as_ref());
+    let metadata = serde_json::json!({ "deployment_failure": normalized.stored });
     let failure = crate::api::models::project_failure(&metadata, crate::auth::models::Role::Viewer);
     let failure_message = failure.summary.as_str();
 
@@ -89,17 +92,14 @@ pub async fn report(
         }
     };
 
-    let structured_failure = payload.failure.as_ref().and_then(|value| {
-        serde_json::from_value::<cf_protocol::deployment_failure::DeploymentFailure>(value.clone())
-            .ok()
-    });
+    // Only a complete typed report may decide a terminal-state override.
     let pending = match mark_reported_deployment_failed_tx(
         &mut tx,
         agent_request.system.id,
         payload.target_store_path.trim(),
         failure_message,
         payload.deployment_id,
-        structured_failure.as_ref(),
+        normalized.typed.as_ref(),
     )
     .await
     {
@@ -130,7 +130,7 @@ pub async fn report(
     };
 
     if let Err(error) =
-        insert_deployment_failed_event_tx(&mut tx, &pending, payload.failure.as_ref()).await
+        insert_deployment_failed_event_tx(&mut tx, &pending, Some(&normalized.stored)).await
     {
         debug!(?error, "failed to insert deployment-failed event");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();

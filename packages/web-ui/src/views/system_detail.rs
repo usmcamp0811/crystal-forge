@@ -5859,9 +5859,9 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         for (idx, entry) in history_entries.iter().enumerate() {
             let event_id = history_event_id(entry, idx);
             let kind = classify_history_entry(entry);
-            // INVARIANT: Only exact persisted event identity replaces a failed
+            // INVARIANT: Only exact persisted event identity replaces a
             // reconstruction. Commits and timestamps can be shared by retries.
-            if failure_has_agent_log(entry, &logs) {
+            if deployment_event_has_agent_log(entry, &logs) {
                 continue;
             }
             let base = entry.timestamp;
@@ -5998,58 +5998,14 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                         false,
                     );
                 }
-                // The agent reports only that the deploy failed and why. It
-                // does not report evaluation, activation, or rollback steps, so
-                // the timeline does not invent them.
-                HistoryEventKind::DeployFailed => {
-                    push(
-                        0,
-                        "error",
-                        format!(
-                            "[reconstructed timeline] deploy failed @ {sha}: {}",
-                            entry
-                                .failure
-                                .as_ref()
-                                .map(failure_log_message)
-                                .unwrap_or_else(|| history_event_message(entry, &kind))
-                        ),
-                        true,
-                    );
-                }
-                HistoryEventKind::Deploy => {
-                    push(
-                        0,
-                        "info",
-                        format!(
-                            "[reconstructed timeline] deploy: evaluating configuration @ {sha}"
-                        ),
-                        false,
-                    );
-                    push(
-                        2,
-                        "info",
-                        "[reconstructed timeline] eval: success — derivations resolved, building"
-                            .into(),
-                        false,
-                    );
-                    push(
-                        5,
-                        "info",
-                        "[reconstructed timeline] build: completed".into(),
-                        false,
-                    );
-                    push(
-                        7,
-                        "info",
-                        "[reconstructed timeline] deploy: activating configuration".into(),
-                        false,
-                    );
-                    push(
-                        9,
-                        "info",
-                        format!("[reconstructed timeline] deploy: generation activated ({sha})"),
-                        true,
-                    );
+                // The history records only an outcome and its reason. It does not
+                // record evaluation, build, activation or rollback steps, so the
+                // timeline does not invent them for a failure or a success.
+                HistoryEventKind::DeployFailed | HistoryEventKind::Deploy => {
+                    if let Some((level, message)) = recorded_deploy_outcome_line(entry, &kind, &sha)
+                    {
+                        push(0, level, message, true);
+                    }
                 }
                 HistoryEventKind::StateChange => {}
             }
@@ -6371,11 +6327,46 @@ fn display_log_date(timestamp: chrono::DateTime<Utc>, use_utc: bool) -> chrono::
 
 // INVARIANT: Independent attempts remain visible even at the same commit and
 // timestamp. An absent History ID cannot match an unidentified telemetry line.
-fn failure_has_agent_log(entry: &SystemHistoryEntry, logs: &[DeploymentLogEntry]) -> bool {
-    classify_history_entry(entry) == HistoryEventKind::DeployFailed
-        && entry
-            .id
-            .is_some_and(|id| logs.iter().any(|log| log.event_id == Some(id)))
+// A recorded deployment start, success or failure that has its real agent event
+// is shown through that event alone, never through a reconstruction as well.
+fn deployment_event_has_agent_log(entry: &SystemHistoryEntry, logs: &[DeploymentLogEntry]) -> bool {
+    matches!(
+        classify_history_entry(entry),
+        HistoryEventKind::DeployStarted | HistoryEventKind::Deploy | HistoryEventKind::DeployFailed
+    ) && entry
+        .id
+        .is_some_and(|id| logs.iter().any(|log| log.event_id == Some(id)))
+}
+
+// INVARIANT: The line restates only what the recorded History event holds, its
+// outcome and message. Evaluation, build, activation and rollback steps are not
+// recorded, so none is reconstructed. Returns `None` for other event kinds.
+fn recorded_deploy_outcome_line(
+    entry: &SystemHistoryEntry,
+    kind: &HistoryEventKind,
+    sha: &str,
+) -> Option<(&'static str, String)> {
+    match kind {
+        HistoryEventKind::DeployFailed => Some((
+            "error",
+            format!(
+                "[reconstructed timeline] deploy failed @ {sha}: {}",
+                entry
+                    .failure
+                    .as_ref()
+                    .map(failure_log_message)
+                    .unwrap_or_else(|| history_event_message(entry, kind))
+            ),
+        )),
+        HistoryEventKind::Deploy => Some((
+            "info",
+            format!(
+                "[reconstructed timeline] deploy succeeded @ {sha}: {}",
+                history_event_message(entry, kind)
+            ),
+        )),
+        _ => None,
+    }
 }
 
 fn format_log_time(timestamp: chrono::DateTime<Utc>, use_utc: bool) -> String {
@@ -13659,14 +13650,116 @@ mod tests {
             phase: Some("Deployment".into()),
         };
         // Same deployment, timestamp and message still represent different events.
-        assert!(!super::failure_has_agent_log(&failed, &[real.clone()]));
-        assert!(!super::failure_has_agent_log(&failed, &[]));
+        assert!(!super::deployment_event_has_agent_log(
+            &failed,
+            &[real.clone()]
+        ));
+        assert!(!super::deployment_event_has_agent_log(&failed, &[]));
         real.event_id = failed.id;
-        assert!(super::failure_has_agent_log(&failed, &[real.clone()]));
+        assert!(super::deployment_event_has_agent_log(
+            &failed,
+            &[real.clone()]
+        ));
         real.event_id = None;
-        assert!(!super::failure_has_agent_log(&failed, &[real.clone()]));
+        assert!(!super::deployment_event_has_agent_log(
+            &failed,
+            &[real.clone()]
+        ));
         failed.id = None;
-        assert!(!super::failure_has_agent_log(&failed, &[real]));
+        assert!(!super::deployment_event_has_agent_log(&failed, &[real]));
+    }
+
+    // The history records an outcome, not how the deployment got there. A
+    // reconstruction must not invent evaluation, build, activation or rollback.
+    #[test]
+    fn deploy_reconstruction_restates_only_the_recorded_outcome() {
+        const INVENTED: [&str; 8] = [
+            "evaluating",
+            "eval:",
+            "derivations resolved",
+            "build:",
+            "activating",
+            "generation activated",
+            "rolled back",
+            "rollback",
+        ];
+        let mut success = history_entry("cf_deployment_succeeded", "agent", "cf_deployment");
+        success.event_type = "cf_deployment_succeeded".into();
+        let (level, message) =
+            super::recorded_deploy_outcome_line(&success, &HistoryEventKind::Deploy, "abc1234")
+                .expect("a recorded success yields one line");
+        assert_eq!(level, "info");
+        assert!(message.starts_with("[reconstructed timeline] deploy succeeded @ abc1234:"));
+
+        let mut failed = history_entry("cf_deployment_failed", "agent", "cf_deployment");
+        failed.event_type = "cf_deployment_failed".into();
+        let (level, failed_message) = super::recorded_deploy_outcome_line(
+            &failed,
+            &HistoryEventKind::DeployFailed,
+            "abc1234",
+        )
+        .expect("a recorded failure yields one line");
+        assert_eq!(level, "error");
+        assert!(failed_message.starts_with("[reconstructed timeline] deploy failed @ abc1234:"));
+
+        for text in [message, failed_message] {
+            for invented in INVENTED {
+                assert!(
+                    !text.to_lowercase().contains(invented),
+                    "invented step {invented:?} in {text:?}"
+                );
+            }
+        }
+        // Other kinds have their own reconstruction and yield nothing here.
+        for kind in [
+            HistoryEventKind::DeployStarted,
+            HistoryEventKind::Restart,
+            HistoryEventKind::AgentRestart,
+            HistoryEventKind::LocalRebuildMatched,
+            HistoryEventKind::LocalRebuildUntracked,
+            HistoryEventKind::StateChange,
+        ] {
+            assert!(super::recorded_deploy_outcome_line(&success, &kind, "abc1234").is_none());
+        }
+    }
+
+    #[test]
+    fn recorded_deployment_events_with_a_real_agent_event_are_not_reconstructed() {
+        let real = |id| crate::api::models::DeploymentLogEntry {
+            event_id: Some(id),
+            deployment_id: None,
+            message: "Deployment activated successfully".into(),
+            timestamp: Utc::now(),
+            level: crate::api::models::LogLevel::Info,
+            phase: Some("Deployment".into()),
+        };
+        for event_type in [
+            "cf_deployment_started",
+            "cf_deployment_succeeded",
+            "cf_deployment_failed",
+        ] {
+            let mut entry = history_entry(event_type, "agent", "cf_deployment");
+            entry.event_type = event_type.into();
+            entry.id = Some(Uuid::from_u128(7));
+            assert!(
+                super::deployment_event_has_agent_log(&entry, &[real(Uuid::from_u128(7))]),
+                "{event_type} with its real event must not be reconstructed"
+            );
+            // A different event, or none, keeps the reconstruction.
+            assert!(!super::deployment_event_has_agent_log(
+                &entry,
+                &[real(Uuid::from_u128(8))]
+            ));
+            assert!(!super::deployment_event_has_agent_log(&entry, &[]));
+        }
+        // Restarts and local rebuilds have no real event of this kind to prefer.
+        let mut restart = history_entry("system_reboot", "agent", "restart");
+        restart.event_type = "system_reboot".into();
+        restart.id = Some(Uuid::from_u128(7));
+        assert!(!super::deployment_event_has_agent_log(
+            &restart,
+            &[real(Uuid::from_u128(7))]
+        ));
     }
 
     #[test]
