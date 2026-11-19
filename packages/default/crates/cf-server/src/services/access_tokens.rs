@@ -1043,7 +1043,7 @@ pub async fn validate_presented_token(
         Ok(Some(validated)) => Ok(validated),
         Ok(None) => Err(TokenRejected),
         Err(err) => {
-            tracing::error!(error = %err, "access token validation failed closed");
+            tracing::error!(error = ?err, "access token validation failed closed");
             Err(TokenRejected)
         }
     }
