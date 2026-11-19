@@ -9,6 +9,7 @@
 # Security Model
 
 * [Credential grant boundaries in POA&M services](credential-grant-groundwork.md) - Partial M0 implementation in TASK-534.2: immutable restricted grants survive read refresh without Admin wildcard expansion; source-aware OIDC groundwork exists, while PAT admission, token-row validation and acceptance evidence remain release gates.
+* [Owner access token service](access-token-service.md) - Partial M1 owner slice in TASK-534.3: self-service `cfat_v1_` issue, list, inspect, rotate and revoke with hash-only storage, per-owner serialization, limits and audit; no MCP transport, admin tab or Connect agent shortcut yet; farm results are recorded in the task
 * [OIDC entitlement ownership and freshness](oidc-entitlement-ownership.md) - Local/IdP union, legacy classification, ordered reconciliation, failure fencing, future-PAT eligibility and upgrade/recovery; checkpoint database and Access tests passed, while PAT admission wiring and review-revision CI remain release gates.
 
 * [API authentication, sessions, and role-based authorization](api-authentication-and-authorization.md) - Explains cookie-session login, dev-mode login, the Viewer/Operator/Admin roles, authorization middleware, and environment scoping with non-disclosing not-found behavior; open it when changing who may call an API endpoint.
