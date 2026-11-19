@@ -342,5 +342,8 @@ in
       access-token-rotate = ./fragments/access-tokens.cjs;
       access-token-revoke = ./fragments/access-tokens.cjs;
     };
-    timeout = 900;
+    # TASK-534.3: 900 s was exceeded on a loaded farm run (the existing cases alone
+    # took about 870 s; an unloaded run took 610 s). The access-token fragment adds
+    # nine cases and three browser launches.
+    timeout = 1500;
   }
