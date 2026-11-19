@@ -2124,8 +2124,9 @@ in {
           description = lib.mdDoc ''
             Allow signed-in users to create, rotate and revoke their own access
             tokens. Tokens stay inert until a consumer such as MCP admits them.
-            When false, create, rotate, list and detail are rejected; the policy
-            endpoint and revoking existing tokens still work.
+            When false, create and rotate are rejected and existing tokens are
+            not admitted; the policy endpoint, list, detail and revoking
+            existing tokens still work.
           '';
         };
 

@@ -1375,6 +1375,22 @@ async fn list_filters_by_status_and_case_insensitive_name_query(pool: PgPool) {
     );
 }
 
+#[sqlx::test]
+async fn list_rejects_control_characters_in_the_name_query_with_400(pool: PgPool) {
+    let api = start(&pool).await;
+    let (owner, env) = operator_with_environment(&pool).await;
+    create_token(&api, &owner, "alpha", &[env]).await;
+
+    // A NUL byte used to reach PostgreSQL and fail as a 500.
+    for query in ["q=%00", "q=a%00b", "q=%07", "q=a%09b", "q=%7F"] {
+        let reply = api.list(&owner, query).await;
+        assert_field_error(&reply, "q");
+        assert_ne!(reply.status, 500, "{query}");
+        assert_ne!(reply.body["error"], "internal_error", "{query}");
+    }
+    assert_eq!(item_names(&api.list(&owner, "q=alph").await), ["alpha"]);
+}
+
 // ---------------------------------------------------------------------------
 // Revoke
 // ---------------------------------------------------------------------------
@@ -1391,7 +1407,7 @@ async fn lifetime_seconds(pool: &PgPool, id: Uuid) -> f64 {
 }
 
 async fn admitted(pool: &PgPool, secret: &str) -> bool {
-    validate_presented_token(pool, secret, Utc::now(), MAX_AGE)
+    validate_presented_token(pool, secret, Utc::now(), &settings(MAX_AGE))
         .await
         .is_ok()
 }
@@ -1469,6 +1485,34 @@ async fn expired_token_reports_expired_status_is_rejected_and_can_be_revoked(poo
     assert_eq!(token_audit_count(&pool, "access_token_revoked").await, 1);
 }
 
+#[sqlx::test]
+async fn revoke_takes_the_owner_row_lock_before_the_token_row_lock(pool: PgPool) {
+    let api = start(&pool).await;
+    let (owner, env) = operator_with_environment(&pool).await;
+    let (id, _) = create_token(&api, &owner, "lock-order", &[env]).await;
+
+    // A transaction that holds the user row `FOR UPDATE`, as a user deletion
+    // does, must make revoke wait. A revoke that locked only the token row
+    // would not wait here, and could deadlock with that deletion.
+    let mut holder = pool.begin().await.expect("begin lock holder");
+    sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+        .bind(owner.id)
+        .fetch_one(&mut *holder)
+        .await
+        .expect("lock owner row");
+    let revoke = service::revoke(&pool, owner.id, id);
+    tokio::pin!(revoke);
+    let early = tokio::time::timeout(std::time::Duration::from_millis(500), &mut revoke).await;
+    assert!(early.is_err(), "revoke must wait for the owner row lock");
+    assert!(!is_revoked(&pool, id).await);
+
+    holder.commit().await.expect("release owner row lock");
+    let revoked = revoke.await.expect("revoke completes after the release");
+    assert_eq!(revoked.status, "revoked");
+    assert!(is_revoked(&pool, id).await);
+    assert_eq!(token_audit_count(&pool, "access_token_revoked").await, 1);
+}
+
 // ---------------------------------------------------------------------------
 // Rotate
 // ---------------------------------------------------------------------------
@@ -1516,7 +1560,7 @@ async fn rotate_replaces_the_token_with_the_same_grant_and_revokes_the_old_one(p
     .expect("count live tokens");
     assert_eq!(live, 1);
     assert!(!admitted(&pool, &old_secret).await);
-    let validated = validate_presented_token(&pool, &new_secret, Utc::now(), MAX_AGE)
+    let validated = validate_presented_token(&pool, &new_secret, Utc::now(), &settings(MAX_AGE))
         .await
         .expect("replacement is admitted");
     assert_eq!(validated.grant.token_id(), new_id);
@@ -1658,7 +1702,7 @@ async fn rotate_after_the_owner_lost_an_environment_conflicts_and_keeps_the_old_
     for (environment_id, available) in availability {
         assert_eq!(available, environment_id == env_a.to_string());
     }
-    let validated = validate_presented_token(&pool, &secret, Utc::now(), MAX_AGE)
+    let validated = validate_presented_token(&pool, &secret, Utc::now(), &settings(MAX_AGE))
         .await
         .expect("grant is still admitted");
     let readable = CredentialIdentity::Restricted(validated.grant).reading_environments(
@@ -1717,9 +1761,192 @@ async fn concurrent_rotations_of_one_token_have_one_winner_and_one_active_replac
     assert_eq!(token_audit_count(&pool, "access_token_rotated").await, 1);
 }
 
+async fn delete_token_environments(pool: &PgPool, token: Uuid) {
+    sqlx::query("DELETE FROM api_access_token_environments WHERE token_id = $1")
+        .bind(token)
+        .execute(pool)
+        .await
+        .expect("delete token environment rows");
+}
+
+#[sqlx::test]
+async fn rotate_of_a_token_with_no_remaining_environments_conflicts_and_changes_nothing(
+    pool: PgPool,
+) {
+    let api = start(&pool).await;
+    let (owner, env) = operator_with_environment(&pool).await;
+    let (id, _) = create_token(&api, &owner, "no-environments", &[env]).await;
+
+    // Environment rows deleted: the junction rows cascade away.
+    delete_token_environments(&pool, id).await;
+
+    let reply = api.rotate(&owner, id).await;
+    assert_error(&reply, 409, "conflict");
+    assert!(
+        reply.body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("no remaining environments")),
+        "unexpected message: {}",
+        reply.text
+    );
+    assert_eq!(token_count(&pool).await, 1);
+    assert!(!is_revoked(&pool, id).await);
+    assert_eq!(token_audit_count(&pool, "access_token_rotated").await, 0);
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM api_access_token_environments").await,
+        0
+    );
+
+    // Revocation still works for such a token.
+    assert_eq!(api.revoke(&owner, id).await.status, 200);
+}
+
+#[sqlx::test]
+async fn recent_events_include_target_and_replaced_token_events_newest_first(pool: PgPool) {
+    let api = start(&pool).await;
+    let (owner, env) = operator_with_environment(&pool).await;
+    let (first_id, _) = create_token(&api, &owner, "event-order", &[env]).await;
+    let (second_id, _) = issued(&api.rotate(&owner, first_id).await);
+    assert_eq!(api.revoke(&owner, second_id).await.status, 200);
+    // An unrelated token must not leak events into either list.
+    create_token(&api, &owner, "event-other", &[env]).await;
+
+    let actions = |reply: &Reply| -> Vec<String> {
+        reply.body["recent_events"]
+            .as_array()
+            .expect("recent events")
+            .iter()
+            .map(|event| event["action"].as_str().expect("action").to_owned())
+            .collect()
+    };
+    // The first token has its creation (target) and the rotation that names it
+    // as `replaced_token_id`.
+    let first = api.detail(&owner, first_id).await;
+    assert_eq!(
+        actions(&first),
+        ["access_token_rotated", "access_token_created"]
+    );
+    // The replacement has the rotation (target) and its later revocation.
+    let second = api.detail(&owner, second_id).await;
+    assert_eq!(
+        actions(&second),
+        ["access_token_revoked", "access_token_rotated"]
+    );
+}
+
+/// Runs `request` while another transaction holds an uncommitted live token
+/// named `name` for `owner`, then commits that transaction.
+///
+/// The service name check cannot see the uncommitted row, so a request for the
+/// same name passes the check and then waits at the unique index insert. The
+/// commit makes that insert fail with a unique violation. The helper polls
+/// `pg_stat_activity` for the waiting insert and falls back to committing
+/// after five seconds, in which case the name check sees the row instead.
+async fn with_competing_name_insert<T>(
+    pool: &PgPool,
+    owner: Uuid,
+    name: &str,
+    request: impl std::future::Future<Output = T>,
+) -> T {
+    let mut competing = pool.begin().await.expect("begin competing transaction");
+    sqlx::query(
+        "INSERT INTO api_access_tokens
+             (user_id, name, audience, secret_hash, display_hint, created_at, expires_at)
+         VALUES ($1, $2, 'mcp', sha256(convert_to(gen_random_uuid()::text, 'UTF8')),
+                 'cfat_v1_race', now() - interval '2 hours', now() + interval '30 days')",
+    )
+    .bind(owner)
+    .bind(name)
+    .execute(&mut *competing)
+    .await
+    .expect("insert competing token");
+    let release = async {
+        for _ in 0..50 {
+            let waiting = count(
+                pool,
+                "SELECT COUNT(*) FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'
+                   AND query LIKE 'INSERT INTO api_access_tokens%'",
+            )
+            .await;
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        competing
+            .commit()
+            .await
+            .expect("commit competing transaction");
+    };
+    let (reply, ()) = futures::future::join(request, release).await;
+    reply
+}
+
+#[sqlx::test]
+async fn create_losing_a_name_race_at_the_unique_index_is_a_conflict_not_a_500(pool: PgPool) {
+    let api = start(&pool).await;
+    let (owner, env) = operator_with_environment(&pool).await;
+
+    let reply = with_competing_name_insert(
+        &pool,
+        owner.id,
+        "race-name",
+        api.create(&owner, &read_body("Race-Name", &[env])),
+    )
+    .await;
+
+    assert_error(&reply, 409, "conflict");
+    assert!(
+        reply.body["details"]["fields"]["name"].is_string(),
+        "expected details.fields.name: {}",
+        reply.text
+    );
+    // Only the competing token exists; the failed create left nothing behind.
+    assert_eq!(token_count(&pool).await, 1);
+    assert_eq!(token_audit_count(&pool, "access_token_created").await, 0);
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM api_access_token_scopes").await,
+        0
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Server-side validation of a presented token
 // ---------------------------------------------------------------------------
+
+#[sqlx::test]
+async fn a_token_with_no_environments_is_not_admitted(pool: PgPool) {
+    let api = start(&pool).await;
+    let (owner, env) = operator_with_environment(&pool).await;
+    let (id, secret) = create_token(&api, &owner, "empty-grant", &[env]).await;
+    assert!(admitted(&pool, &secret).await);
+
+    delete_token_environments(&pool, id).await;
+    let rejected = validate_presented_token(&pool, &secret, Utc::now(), &settings(MAX_AGE))
+        .await
+        .expect_err("a token without environments fails closed");
+    let unknown = validate_presented_token(&pool, "garbage", Utc::now(), &settings(MAX_AGE))
+        .await
+        .expect_err("garbage is rejected");
+    assert_eq!(rejected, unknown);
+}
+
+#[tokio::test]
+async fn a_database_failure_during_admission_is_rejected_like_any_other_failure() {
+    // No database listens on port 1, so the lookup fails with an internal
+    // error. The caller still sees only the one non-disclosing rejection.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_secs(2))
+        .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+        .expect("build a lazy pool");
+    let token = generate_access_token(Uuid::new_v4());
+    let rejected =
+        validate_presented_token(&pool, token.token.expose(), Utc::now(), &settings(MAX_AGE))
+            .await
+            .expect_err("a database failure fails closed");
+    assert_eq!(rejected.to_string(), "access token rejected");
+}
 
 #[sqlx::test]
 async fn validate_presented_token_admits_a_good_token_and_reports_the_bounded_grant(pool: PgPool) {
@@ -1735,7 +1962,7 @@ async fn validate_presented_token_admits_a_good_token_and_reports_the_bounded_gr
         .await;
     let (id, secret) = issued(&created);
 
-    let validated = validate_presented_token(&pool, &secret, Utc::now(), MAX_AGE)
+    let validated = validate_presented_token(&pool, &secret, Utc::now(), &settings(MAX_AGE))
         .await
         .expect("good token is admitted");
     assert_eq!(validated.owner_user_id, owner.id);
@@ -1774,7 +2001,7 @@ async fn validate_presented_token_admits_a_good_token_and_reports_the_bounded_gr
         None
     );
     assert!(
-        validate_presented_token(&pool, &secret, after_expiry, MAX_AGE)
+        validate_presented_token(&pool, &secret, after_expiry, &settings(MAX_AGE))
             .await
             .is_err()
     );
@@ -1830,7 +2057,7 @@ async fn validate_presented_token_rejects_every_bad_token_with_one_error(pool: P
 
     let mut errors: Vec<(&str, TokenRejected)> = Vec::new();
     for (label, presented) in &cases {
-        match validate_presented_token(&pool, presented, Utc::now(), MAX_AGE).await {
+        match validate_presented_token(&pool, presented, Utc::now(), &settings(MAX_AGE)).await {
             Ok(_) => panic!("{label} token was admitted"),
             Err(error) => errors.push((*label, error)),
         }
@@ -1850,7 +2077,7 @@ async fn validate_presented_token_rejects_every_bad_token_with_one_error(pool: P
         &pool,
         &good,
         Utc::now() + chrono::Duration::days(31),
-        MAX_AGE,
+        &settings(MAX_AGE),
     )
     .await
     .expect_err("expired by clock");
@@ -1871,7 +2098,7 @@ async fn admin_owned_token_for_one_environment_cannot_read_another_environment(p
         .await;
     let (_, secret) = issued(&created);
 
-    let validated = validate_presented_token(&pool, &secret, Utc::now(), MAX_AGE)
+    let validated = validate_presented_token(&pool, &secret, Utc::now(), &settings(MAX_AGE))
         .await
         .expect("admin token is admitted");
     assert!(validated.owner_is_admin);
@@ -2095,11 +2322,11 @@ async fn stale_or_unresolved_oidc_owner_tokens_are_not_admitted(pool: PgPool) {
     let secret = issued.secret.expose().to_owned();
     assert!(admitted(&pool, &secret).await);
 
-    let zero = validate_presented_token(&pool, &secret, Utc::now(), 0)
+    let zero = validate_presented_token(&pool, &secret, Utc::now(), &settings(0))
         .await
         .expect_err("zero bound denies");
     make_entitlements_stale(&pool, identity).await;
-    let stale = validate_presented_token(&pool, &secret, Utc::now(), MAX_AGE)
+    let stale = validate_presented_token(&pool, &secret, Utc::now(), &settings(MAX_AGE))
         .await
         .expect_err("stale owner is not admitted");
     assert_eq!(stale, zero);
@@ -2115,7 +2342,7 @@ async fn stale_or_unresolved_oidc_owner_tokens_are_not_admitted(pool: PgPool) {
     .execute(&pool)
     .await
     .expect("mark ownership unresolved");
-    let unresolved = validate_presented_token(&pool, &secret, Utc::now(), MAX_AGE)
+    let unresolved = validate_presented_token(&pool, &secret, Utc::now(), &settings(MAX_AGE))
         .await
         .expect_err("unresolved owner is not admitted");
     assert_eq!(unresolved, zero);
@@ -2185,7 +2412,9 @@ async fn token_audit_events_are_visible_to_an_admin_in_the_audit_log(pool: PgPoo
 }
 
 #[sqlx::test]
-async fn disabled_server_rejects_issue_list_and_detail_but_keeps_policy_and_revoke(pool: PgPool) {
+async fn disabled_server_blocks_issue_rotate_and_admission_but_keeps_read_policy_and_revoke(
+    pool: PgPool,
+) {
     let enabled = start(&pool).await;
     let disabled = start_with(
         &pool,
@@ -2196,7 +2425,25 @@ async fn disabled_server_rejects_issue_list_and_detail_but_keeps_policy_and_revo
     )
     .await;
     let (owner, env) = operator_with_environment(&pool).await;
-    let (id, _) = create_token(&enabled, &owner, "pre-existing", &[env]).await;
+    let (id, secret) = create_token(&enabled, &owner, "pre-existing", &[env]).await;
+
+    // The kill switch stops admission, not only issuing. The rejection is the
+    // same non-disclosing error as for an unknown token.
+    let on = settings(MAX_AGE);
+    let off = AccessTokenSettings {
+        enabled: false,
+        ..on
+    };
+    validate_presented_token(&pool, &secret, Utc::now(), &on)
+        .await
+        .expect("enabled server admits the good token");
+    let rejected = validate_presented_token(&pool, &secret, Utc::now(), &off)
+        .await
+        .expect_err("disabled server does not admit a good token");
+    let unknown = validate_presented_token(&pool, "garbage", Utc::now(), &on)
+        .await
+        .expect_err("garbage is rejected");
+    assert_eq!(rejected, unknown);
 
     assert_error(
         &disabled.create(&owner, &read_body("blocked", &[env])).await,
@@ -2208,28 +2455,34 @@ async fn disabled_server_rejects_issue_list_and_detail_but_keeps_policy_and_revo
         403,
         "access_tokens_disabled",
     );
-    assert_error(
-        &disabled.list(&owner, "").await,
-        403,
-        "access_tokens_disabled",
-    );
-    assert_error(
-        &disabled.detail(&owner, id).await,
-        403,
-        "access_tokens_disabled",
-    );
     assert_eq!(token_count(&pool).await, 1);
     assert!(!is_revoked(&pool, id).await);
+
+    // List and detail are read-only, so an owner can still see what to revoke.
+    let listed = disabled.list(&owner, "").await;
+    assert_eq!(listed.status, 200, "{}", listed.text);
+    assert_eq!(listed.cache_control.as_deref(), Some("no-store"));
+    assert_eq!(item_names(&listed), ["pre-existing"]);
+    let detail = disabled.detail(&owner, id).await;
+    assert_eq!(detail.status, 200, "{}", detail.text);
+    assert_eq!(detail.body["id"], id.to_string());
+    assert_eq!(detail.body["status"], "active");
 
     let policy = disabled.policy(&owner).await;
     assert_eq!(policy.status, 200, "{}", policy.text);
     assert_eq!(policy.body["enabled"], false);
     assert!(policy.body["create_blocked"].is_null());
 
+    // Nothing changed the token, so enabling the server admits it again.
+    validate_presented_token(&pool, &secret, Utc::now(), &on)
+        .await
+        .expect("re-enabled server admits the token again");
+
     // An owner can always revoke a credential, even when issuing is off.
     let revoked = disabled.revoke(&owner, id).await;
     assert_eq!(revoked.status, 200, "{}", revoked.text);
     assert_eq!(revoked.body["status"], "revoked");
+    assert!(!admitted(&pool, &secret).await);
 }
 
 fn policy_environment_ids(reply: &Reply) -> Vec<String> {

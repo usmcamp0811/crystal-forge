@@ -320,8 +320,11 @@ pub struct ServerConfig {
 
     /// Enables owner access-token management (create, rotate, revoke).
     /// Tokens stay inert until a consumer such as MCP admits them.
-    /// Default: true. When false, create, rotate, list and detail are rejected;
-    /// the policy endpoint and revoke still work.
+    /// Default: true. This is a kill switch. When false, create and rotate
+    /// return 403 `access_tokens_disabled`, and the server does not admit a
+    /// presented token (every existing token is rejected). The policy
+    /// endpoint (`enabled: false`), list, detail and revoke still work, so an
+    /// owner can see and revoke tokens.
     #[serde(default = "default_access_tokens_enable")]
     pub access_tokens_enable: bool,
 

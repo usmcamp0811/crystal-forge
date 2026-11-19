@@ -8,10 +8,19 @@
 //! guard applies; Viewer, Operator and Admin manage their own tokens. A
 //! `cfat_` bearer credential never authenticates here, and a request that
 //! carries one is rejected with 401 even when it also carries a cookie.
-//! `POST` and `DELETE` also require the double-submit CSRF pair. Every response,
-//! including errors, sets `Cache-Control: no-store`, because the create and
-//! rotate responses carry the only plaintext copy of a secret. No code here
-//! logs a request body or a response body.
+//! `POST` and `DELETE` also require the double-submit CSRF pair. Every
+//! response that these handlers build, including their error responses, sets
+//! `Cache-Control: no-store`, because the create and rotate responses carry the
+//! only plaintext copy of a secret. Responses that the framework builds before
+//! a handler runs or without one do not carry the header: extractor
+//! rejections (for example an unreadable request body) and router 404 and 405
+//! responses. None of those responses contains a secret, because a secret
+//! appears only in the 201 response of a successful create or rotate. No code
+//! here logs a request body or a response body.
+//!
+//! Kill switch: when `access_tokens_enable` is `false`, create and rotate
+//! return 403 `access_tokens_disabled`. Policy, list, detail and revoke keep
+//! working so an owner can still see and revoke tokens.
 //!
 //! Error bodies are `{"error": code, "message": text, "details": null|object}`.
 
@@ -37,6 +46,9 @@ use crate::services::access_tokens::{
     self as service, AccessTokenError, AccessTokenSettings, IssuedAccessToken, ListQuery,
 };
 
+/// Sets `Cache-Control: no-store` on a response that a handler in this module
+/// builds. The framework does not call it for extractor rejections or router
+/// 404 and 405 responses.
 fn no_store(mut response: Response) -> Response {
     response
         .headers_mut()
@@ -144,15 +156,31 @@ fn service_error(err: AccessTokenError) -> Response {
     }
 }
 
-/// Reports whether the request carries a `cfat_` bearer credential.
+/// Reports whether the request presents an access token in any
+/// `Authorization` header.
+///
+/// SECURITY: This check fails closed. The value is split on ASCII whitespace,
+/// so repeated spaces and tabs do not hide a credential. A value counts as
+/// presented when any part starts with `cfat_`, ignoring ASCII case. That
+/// covers the `Bearer` scheme in any letter case and a credential that has no
+/// scheme. A value that is not visible ASCII also counts as presented, because
+/// the check cannot show that it holds no token. The caller answers 401.
 fn bearer_access_token_presented(headers: &HeaderMap) -> bool {
-    headers.get_all(header::AUTHORIZATION).iter().any(|value| {
-        value.to_str().is_ok_and(|text| {
-            text.trim_start()
-                .to_ascii_lowercase()
-                .starts_with("bearer cfat_")
+    headers
+        .get_all(header::AUTHORIZATION)
+        .iter()
+        .any(|value| match value.to_str() {
+            Ok(text) => text.split_ascii_whitespace().any(starts_with_token_prefix),
+            Err(_) => true,
         })
-    })
+}
+
+/// Reports whether `part` starts with the access-token prefix `cfat_`,
+/// ignoring ASCII case.
+fn starts_with_token_prefix(part: &str) -> bool {
+    part.as_bytes()
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"cfat_"))
 }
 
 /// Authenticates the browser session and returns the owner id.
@@ -210,10 +238,10 @@ pub async fn get_policy(
     }
 }
 
-/// Lists the owner's tokens. Query: `status`, `q`, `limit`, `offset`.
+/// Lists the owner's tokens. Query: `status`, `q`, `limit`, `offset`. Readable
+/// when tokens are disabled.
 pub async fn list_access_tokens(
     State(pool): State<PgPool>,
-    State(config): State<ServerConfig>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
@@ -245,7 +273,7 @@ pub async fn list_access_tokens(
         limit,
         offset,
     };
-    match service::list(&pool, owner, &settings(&config), &query).await {
+    match service::list(&pool, owner, &query).await {
         Ok(page) => respond(StatusCode::OK, &page),
         Err(err) => service_error(err),
     }
@@ -278,10 +306,9 @@ pub async fn create_access_token(
 }
 
 /// Returns one of the owner's tokens with effective access and recent events.
-/// Another user's token returns 404.
+/// Another user's token returns 404. Readable when tokens are disabled.
 pub async fn get_access_token(
     State(pool): State<PgPool>,
-    State(config): State<ServerConfig>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
@@ -292,7 +319,7 @@ pub async fn get_access_token(
     let Some(id) = token_id(&id) else {
         return not_found();
     };
-    match service::detail(&pool, owner, id, &settings(&config)).await {
+    match service::detail(&pool, owner, id).await {
         Ok(detail) => respond(StatusCode::OK, &detail),
         Err(err) => service_error(err),
     }
@@ -360,6 +387,48 @@ mod tests {
             "Bearer something-else"
         )));
         assert!(!bearer_access_token_presented(&HeaderMap::new()));
+        assert!(!bearer_access_token_presented(&headers_with(
+            "Basic dXNlcjpwYXNz"
+        )));
+    }
+
+    #[test]
+    fn detects_a_bearer_credential_despite_whitespace_and_case() {
+        for value in [
+            "Bearer  cfat_v1_abc",
+            "Bearer   cfat_v1_abc",
+            "Bearer\tcfat_v1_abc",
+            "Bearer \t cfat_v1_abc",
+            "BEARER cfat_v1_abc",
+            "bEaReR cfat_v1_abc",
+            "Bearer CFAT_V1_ABC",
+            "cfat_v1_abc",
+        ] {
+            assert!(
+                bearer_access_token_presented(&headers_with(value)),
+                "{value:?} was not detected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_utf8_authorization_value_counts_as_presented() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_bytes(b"Bearer \xff\xfe").unwrap(),
+        );
+        assert!(bearer_access_token_presented(&headers));
+    }
+
+    #[test]
+    fn any_authorization_header_value_can_present_a_token() {
+        let mut headers = headers_with("Basic dXNlcjpwYXNz");
+        headers.append(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer  cfat_v1_abc"),
+        );
+        assert!(bearer_access_token_presented(&headers));
     }
 
     #[test]

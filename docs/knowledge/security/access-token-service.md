@@ -45,8 +45,12 @@ Not implemented in this slice:
 
 ## Contract
 
-All endpoints are under `/api/v1`. Every response, including errors, carries
-`Cache-Control: no-store`. No endpoint requires the Admin role.
+All endpoints are under `/api/v1`. Every response that these handlers build,
+including their error responses, carries `Cache-Control: no-store`. Responses
+that the framework builds do not carry it: extractor rejections (for example an
+unreadable request body) and router 404 and 405 responses. No secret appears in
+those responses. A secret appears only in the 201 response of a successful
+create or rotate. No endpoint requires the Admin role.
 
 | Method | Path | Behavior |
 | --- | --- | --- |
@@ -58,9 +62,14 @@ All endpoints are under `/api/v1`. Every response, including errors, carries
 | POST | `/user/access-tokens/:id/rotate` | Replaces an active token; the response carries the new secret once |
 
 Authentication is a browser session. POST and DELETE also require CSRF. A
-request that carries an `Authorization: Bearer cfat_...` header is never
-authenticated by that header. Another user's token returns `404
-resource_not_found`.
+request that carries an `Authorization` header with a `cfat_` credential is
+never authenticated by that header, and the request returns 401 even when it
+also carries a session cookie. Detection splits the value on ASCII whitespace,
+ignores letter case, and treats a value that is not visible ASCII as presented.
+Another user's token returns `404 resource_not_found`.
+
+The list filter `q` must not contain a control character (including NUL); the
+endpoint returns 400 `validation_failed` with `details.fields.q`.
 
 Errors use `{"error", "message", "details"}`. `validation_failed` (400) lists
 field messages in `details.fields`. Other codes are `unauthorized`, `forbidden`,
@@ -121,15 +130,24 @@ grant lock `(526, 2)`. Lock order is the owner advisory lock, then the owner
 row, then token rows. Create and rotate read role and membership state inside
 the transaction. They never use values captured before the transaction.
 
-Revoke locks the token row. A rotation that races a revocation or another
-rotation of the same token has one winner. A failed rotate changes nothing and
-leaves the old token active.
+Revoke locks the owner row `FOR SHARE` and then the token row, the same order
+as create and rotate. It does not take the owner advisory lock. This order
+avoids a deadlock with a concurrent deletion of the user. A rotation that races
+a revocation or another rotation of the same token has one winner. A failed
+rotate changes nothing and leaves the old token active.
+
+A unique violation on the owner and name index at insert time returns the same
+409 name conflict as the name check, in create and rotate. Other database errors
+return 500 `internal_error`.
 
 ## Rotation
 
 Rotation applies only to an active token. It revalidates the same grant against
 the owner's current role and assignments. If the grant is no longer permitted,
-the request returns 409 and the old token stays active. The replacement keeps
+the request returns 409 and the old token stays active. A token that has no
+remaining environments (the environment rows were deleted and the junction rows
+cascaded) also returns 409 and changes nothing; the owner creates a new token.
+The replacement keeps
 name, audience, scopes and environments. It expires after the original lifetime,
 reduced to the current maximum when needed. The old token is revoked in the same
 transaction.
@@ -144,10 +162,14 @@ environment ids and expiry. The Admin Audit Log lists these events.
 ## Validation for future bearer admission
 
 `validate_presented_token` is the server function that milestone M2 calls. It
-parses the bounded token format, finds the row by public id, compares the hash
-in constant time, and requires an unrevoked, unexpired token and an active
-owner. It returns a `RestrictedGrant` for the M0 boundary together with the owner
-id. Every failure returns the same non-disclosing error.
+takes the access-token settings. When `access_tokens_enable` is false it rejects
+every token before any database access. Otherwise it parses the bounded token
+format, finds the row by public id, compares the hash in constant time, and
+requires an unrevoked, unexpired token, an active owner and at least one
+granted environment. A token with an empty environment set is rejected (fail
+closed). It returns a `RestrictedGrant` for the M0 boundary together with the
+owner id. Every failure returns the same non-disclosing error. A database error
+is logged as error text only; any other failure logs a fixed kind string.
 
 An owner is OIDC-owned when an external identity row exists for the user. Such an
 owner also needs fresh, resolved entitlements under the M0 freshness rule and the
@@ -161,9 +183,31 @@ request time. A role promotion never widens a token.
 
 `services.crystal-forge.server.accessTokens` has `enable` (default true),
 `defaultLifetimeDays` (30) and `maxLifetimeDays` (90). Startup rejects a default
-below 1, a default above the maximum, or a maximum above 90. With `enable`
-false, create, list, detail and rotate return 403 `access_tokens_disabled`. The
-policy endpoint still answers and revoke stays available.
+below 1, a default above the maximum, or a maximum above 90.
+
+`enable` is a kill switch. With `enable` false, create and rotate return 403
+`access_tokens_disabled`, and `validate_presented_token` rejects every token, so
+no existing token is admitted. The policy endpoint (`enabled: false`), list,
+detail and revoke stay available, so an owner can still see and revoke tokens.
+Turning `enable` back on admits tokens that are still valid.
+
+## Known limits
+
+- **Audit window.** The Audit Log shows only the newest 300 events. A Viewer
+  can create, rotate and revoke tokens, so a Viewer's token events can push
+  older events out of that window. Tracked as follow-up TASK-536.
+- **OIDC eligibility timing.** Create and rotate check OIDC eligibility before
+  they take the owner lock. A change between the check and the lock is not seen
+  by that request. The M0 boundary intersects the grant with the owner's state
+  at use time, so a stale token does not widen access. Tracked as TASK-536.
+- **Expired tokens keep their name.** An expired token that is not revoked keeps
+  its name, and counts toward name uniqueness, until the owner revokes it.
+- **`owner_suspended` status.** The status exists in the query, but the browser
+  API does not return it today. The session check rejects an inactive owner
+  with 401, so the owner cannot list tokens.
+- **Logout.** Tokens survive logout and session revocation by design. A token
+  is a separate credential. Only revoke, expiry, owner suspension, loss of all
+  roles or the kill switch stops it.
 
 ## Related concepts
 

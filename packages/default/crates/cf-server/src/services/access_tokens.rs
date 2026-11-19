@@ -16,6 +16,12 @@
 //! A token grant is immutable. Validation reports the grant as a
 //! [`RestrictedGrant`], which the M0 authorization boundary intersects with the
 //! owner's current roles and memberships. This module never widens it.
+//!
+//! Kill switch: `access_tokens_enable = false` blocks create, rotate and the
+//! admission of a presented token ([`validate_presented_token`]). Policy, list,
+//! detail and revoke keep working, so an owner can still see and revoke every
+//! token. Nothing in this module reads or writes the switch except through
+//! [`AccessTokenSettings`].
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -90,7 +96,7 @@ impl AccessTokenSettings {
 /// Reports why an access-token operation did not succeed.
 #[derive(Debug)]
 pub enum AccessTokenError {
-    /// `access_tokens_enable` is off.
+    /// `access_tokens_enable` is off. Only create and rotate return it.
     Disabled,
     /// The request is invalid. The map goes from field name to message.
     Validation(BTreeMap<String, String>),
@@ -127,6 +133,31 @@ fn conflict(message: &str, details: Option<serde_json::Value>) -> AccessTokenErr
     AccessTokenError::Conflict {
         message: message.to_owned(),
         details,
+    }
+}
+
+/// Name of the partial unique index on non-revoked `(user_id, lower(name))`.
+const NAME_INDEX: &str = "api_access_tokens_owner_active_name_idx";
+/// SQLSTATE of a unique violation.
+const UNIQUE_VIOLATION: &str = "23505";
+
+/// Maps an error from the token insert to the service error.
+///
+/// The owner lock and the name check make a duplicate name unreachable in
+/// normal operation. A unique violation on [`NAME_INDEX`] can still occur when
+/// a writer bypasses the lock, so it reports the same conflict as the name
+/// check instead of an internal failure. Every other error stays internal.
+fn insert_error(err: anyhow::Error) -> AccessTokenError {
+    let name_taken = err
+        .downcast_ref::<sqlx::Error>()
+        .and_then(|err| err.as_database_error())
+        .is_some_and(|db| {
+            db.code().as_deref() == Some(UNIQUE_VIOLATION) && db.constraint() == Some(NAME_INDEX)
+        });
+    if name_taken {
+        name_conflict()
+    } else {
+        AccessTokenError::Internal(err)
     }
 }
 
@@ -655,7 +686,8 @@ async fn check_rate(
 /// - [`AccessTokenError::Disabled`] when tokens are disabled.
 /// - [`AccessTokenError::Validation`] with field messages for invalid input.
 /// - [`AccessTokenError::Conflict`] for an OIDC eligibility block, the live
-///   token limit or a duplicate non-revoked name (case-insensitive).
+///   token limit or a duplicate non-revoked name (case-insensitive). A unique
+///   violation on the name index at insert time reports the same name conflict.
 /// - [`AccessTokenError::RateLimited`] after 10 issues in an hour.
 /// - [`AccessTokenError::OwnerUnavailable`] for a disabled or roleless owner.
 pub async fn create(
@@ -702,7 +734,8 @@ pub async fn create(
         &generated.display_hint,
         f64::from(issue.lifetime_days) * 86_400.0,
     )
-    .await?;
+    .await
+    .map_err(insert_error)?;
     store::insert_grants_tx(&mut tx, id, &issue.scopes, &issue.environment_ids).await?;
     let metadata = load_dto_tx(&mut tx, owner, id).await?;
     store::audit_access_token_tx(
@@ -739,8 +772,10 @@ fn name_conflict() -> AccessTokenError {
 ///
 /// # Errors
 /// - [`AccessTokenError::NotFound`] for a missing token or another user's token.
-/// - [`AccessTokenError::Conflict`] when the token is revoked or expired, the
-///   grant is no longer permitted, or OIDC eligibility fails. Nothing changes.
+/// - [`AccessTokenError::Conflict`] when the token is revoked or expired, it has
+///   no remaining environments (for example after the environments were
+///   deleted), the grant is no longer permitted, or OIDC eligibility fails.
+///   Nothing changes.
 /// - [`AccessTokenError::Disabled`], [`AccessTokenError::RateLimited`] and
 ///   [`AccessTokenError::OwnerUnavailable`] as for [`create`].
 pub async fn rotate(
@@ -764,6 +799,15 @@ pub async fn rotate(
     }
     let scopes = store::token_scope_names(&mut *tx, token_id).await?;
     let environment_ids = store::token_environment_ids(&mut *tx, token_id).await?;
+    // INVARIANT: A token grants at least one environment. Deleting environment
+    // rows cascades to the junction table and can leave none. Rotating such a
+    // token would issue a credential with an empty grant, so it conflicts.
+    if environment_ids.is_empty() {
+        return Err(conflict(
+            "The token has no remaining environments; create a new token",
+            None,
+        ));
+    }
     let environments = store::lock_environments_tx(&mut tx, &environment_ids).await?;
     let fields = check_grant(&access, &scopes, &environments, &environment_ids);
     if !fields.is_empty() {
@@ -791,7 +835,8 @@ pub async fn rotate(
         &generated.display_hint,
         lifetime_seconds,
     )
-    .await?;
+    .await
+    .map_err(insert_error)?;
     store::insert_grants_tx(&mut tx, id, &scopes, &environment_ids).await?;
     let metadata = load_dto_tx(&mut tx, owner, id).await?;
     store::audit_access_token_tx(
@@ -823,6 +868,13 @@ pub async fn rotate(
 /// is a no-op here. Revoking an expired token is allowed. Revocation works
 /// when tokens are disabled so an owner can always disable a credential.
 ///
+/// CONCURRENCY: The transaction locks the owner row `FOR SHARE` before the
+/// token row, the same order as [`create`] and [`rotate`]. It does not take the
+/// owner advisory lock, because revoke needs no serialization with issuing
+/// beyond the token row lock. The user row first order avoids a deadlock with
+/// a concurrent user deletion, which locks the user row and then cascades to
+/// the token rows.
+///
 /// # Errors
 /// [`AccessTokenError::NotFound`] for a missing token or another user's token.
 pub async fn revoke(
@@ -831,6 +883,10 @@ pub async fn revoke(
     token_id: Uuid,
 ) -> Result<AccessTokenDto, AccessTokenError> {
     let mut tx = pool.begin().await?;
+    // A missing owner row means the user is gone, so the token is gone too.
+    store::lock_owner_row_tx(&mut tx, owner)
+        .await?
+        .ok_or(AccessTokenError::NotFound)?;
     let locked = store::lock_token_tx(&mut tx, owner, token_id)
         .await?
         .ok_or(AccessTokenError::NotFound)?;
@@ -868,16 +924,18 @@ pub struct ListQuery {
 
 /// Lists the owner's tokens, newest first.
 ///
+/// This read-only call works when tokens are disabled, so an owner can still
+/// see which tokens to revoke.
+///
 /// # Errors
-/// [`AccessTokenError::Disabled`] when tokens are disabled and
-/// [`AccessTokenError::Validation`] for an unknown `status` or a long `q`.
+/// [`AccessTokenError::Validation`] for an unknown `status`, or for a `q` that
+/// is longer than 100 characters or contains a control character (including
+/// NUL, which the database rejects).
 pub async fn list(
     pool: &PgPool,
     owner: Uuid,
-    settings: &AccessTokenSettings,
     query: &ListQuery,
 ) -> Result<AccessTokenListDto, AccessTokenError> {
-    ensure_enabled(settings)?;
     let lifecycle = match query.status.as_deref().map(str::trim) {
         None | Some("") | Some("all") => "all",
         Some("active") => "active",
@@ -895,6 +953,15 @@ pub async fn list(
         return Err(AccessTokenError::Validation(BTreeMap::from([(
             "q".to_owned(),
             "q must be at most 100 characters".to_owned(),
+        )])));
+    }
+    // SECURITY: A NUL byte makes PostgreSQL fail the query, which would be a
+    // 500 that any session can trigger. Names reject control characters too,
+    // so no stored name can match such a query.
+    if name_query.is_some_and(|q| q.chars().any(char::is_control)) {
+        return Err(AccessTokenError::Validation(BTreeMap::from([(
+            "q".to_owned(),
+            "q must not contain control characters".to_owned(),
         )])));
     }
     let limit = query
@@ -926,16 +993,15 @@ pub async fn list(
 /// a member. A scope is permitted when the owner is active and the current
 /// role allows it. A disabled owner has nothing available.
 ///
+/// This read-only call works when tokens are disabled.
+///
 /// # Errors
-/// [`AccessTokenError::Disabled`] when tokens are disabled and
 /// [`AccessTokenError::NotFound`] for a missing token or another user's token.
 pub async fn detail(
     pool: &PgPool,
     owner: Uuid,
     token_id: Uuid,
-    settings: &AccessTokenSettings,
 ) -> Result<AccessTokenDetailDto, AccessTokenError> {
-    ensure_enabled(settings)?;
     let row = store::get_token(pool, owner, token_id)
         .await?
         .ok_or(AccessTokenError::NotFound)?;
@@ -1017,12 +1083,20 @@ pub struct ValidatedToken {
 
 /// Admits a presented `cfat_v1_` token or rejects it without a reason.
 ///
-/// Checks, in order: strict bounded parse; lookup by public id; constant-time
-/// comparison of the full SHA-256 (also run against a zero hash for an unknown
-/// id so lookup misses cost the same); not revoked; `now` before `expires_at`;
-/// owner active with at least one role; OIDC owners pass the freshness and
-/// ownership rule with `entitlement_max_age_seconds`. Local users without
-/// identity rows are exempt from the OIDC rule.
+/// Checks, in order: the kill switch (`settings.enabled`); strict bounded
+/// parse; lookup by public id; constant-time comparison of the full SHA-256
+/// (also run against a zero hash for an unknown id so lookup misses cost the
+/// same); not revoked; `now` before `expires_at`; owner active with at least
+/// one role; OIDC owners pass the freshness and ownership rule with
+/// `settings.entitlement_max_age_seconds`; the token still has at least one
+/// environment. Local users without identity rows are exempt from the OIDC
+/// rule.
+///
+/// SECURITY: When `settings.enabled` is `false`, every token is rejected
+/// before any database access, so `access_tokens_enable = false` stops
+/// admission and not only issuing. A token whose environment set is empty is
+/// rejected (fail closed), because an empty grant must never read as
+/// unrestricted.
 ///
 /// SECURITY: This is a point-in-time admission check made without locks. A
 /// mutation MUST repeat the owner, token and grant checks inside its own
@@ -1036,14 +1110,29 @@ pub async fn validate_presented_token(
     pool: &PgPool,
     presented: &str,
     now: DateTime<Utc>,
-    entitlement_max_age_seconds: u64,
+    settings: &AccessTokenSettings,
 ) -> Result<ValidatedToken, TokenRejected> {
-    let admitted = admit(pool, presented, now, entitlement_max_age_seconds).await;
-    match admitted {
+    match admit(pool, presented, now, settings).await {
         Ok(Some(validated)) => Ok(validated),
         Ok(None) => Err(TokenRejected),
-        Err(err) => {
-            tracing::error!(error = ?err, "access token validation failed closed");
+        Err(AccessTokenError::Internal(err)) => {
+            // SECURITY: Log the error chain as text only. The Debug form can
+            // carry a backtrace and driver detail that does not belong in logs.
+            let detail = format!("{err:#}");
+            tracing::error!(error = %detail, "access token validation failed closed");
+            Err(TokenRejected)
+        }
+        Err(other) => {
+            let kind = match &other {
+                AccessTokenError::Disabled => "disabled",
+                AccessTokenError::Validation(_) => "validation",
+                AccessTokenError::NotFound => "not_found",
+                AccessTokenError::Conflict { .. } => "conflict",
+                AccessTokenError::RateLimited => "rate_limited",
+                AccessTokenError::OwnerUnavailable => "owner_unavailable",
+                AccessTokenError::Internal(_) => "internal",
+            };
+            tracing::error!(kind, "access token validation failed closed");
             Err(TokenRejected)
         }
     }
@@ -1053,8 +1142,12 @@ async fn admit(
     pool: &PgPool,
     presented: &str,
     now: DateTime<Utc>,
-    entitlement_max_age_seconds: u64,
+    settings: &AccessTokenSettings,
 ) -> Result<Option<ValidatedToken>, AccessTokenError> {
+    if !settings.enabled {
+        return Ok(None);
+    }
+    let entitlement_max_age_seconds = settings.entitlement_max_age_seconds;
     let Some(id) = parse_access_token(presented) else {
         return Ok(None);
     };
@@ -1091,6 +1184,9 @@ async fn admit(
         .await?
         .into_iter()
         .collect();
+    if environments.is_empty() {
+        return Ok(None);
+    }
     Ok(Some(ValidatedToken {
         owner_user_id: row.user_id,
         grant: RestrictedGrant::new(id, Some(row.audience), scopes, environments, row.expires_at),

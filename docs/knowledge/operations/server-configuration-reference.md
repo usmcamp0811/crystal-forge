@@ -127,7 +127,7 @@ The `[server]` table holds the owner access-token policy. See
 
 | Key | Default | Rule |
 | --- | --- | --- |
-| `access_tokens_enable` | `true` | When `false`, create, rotate, list and detail return `403 access_tokens_disabled`. The policy endpoint (`enabled: false`) and revoke remain available. |
+| `access_tokens_enable` | `true` | When `false`, create and rotate return `403 access_tokens_disabled` and the server does not admit a presented token. The policy endpoint (`enabled: false`), list, detail and revoke remain available. |
 | `access_tokens_default_lifetime_days` | `30` | Must satisfy `1 <= default <= max`. |
 | `access_tokens_max_lifetime_days` | `90` | Must satisfy `default <= max <= 90`. |
 

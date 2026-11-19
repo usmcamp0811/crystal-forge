@@ -168,6 +168,23 @@ pub async fn lock_owner_tx(
         .bind(user_id.to_string())
         .execute(&mut **tx)
         .await?;
+    lock_owner_row_tx(tx, user_id).await
+}
+
+/// Locks the owner row `FOR SHARE` without taking the advisory lock.
+///
+/// CONCURRENCY: Revoke uses this so it takes the user row before the token
+/// row, the same order as create and rotate. User deletion locks the user row
+/// and then cascades to token rows, so a revoke that locked the token row
+/// first could deadlock with it. Returns the owner's `is_active`, or `None`
+/// when the user does not exist.
+///
+/// # Errors
+/// Returns database errors.
+pub async fn lock_owner_row_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<Option<bool>> {
     Ok(
         sqlx::query_scalar::<_, bool>("SELECT is_active FROM users WHERE id = $1 FOR SHARE")
             .bind(user_id)
@@ -288,8 +305,10 @@ pub async fn name_in_use_tx(
 /// stores `secret_hash` only; the plaintext never reaches this function.
 ///
 /// # Errors
-/// Returns database errors, including a unique violation when a non-revoked
-/// token with the same owner and name exists.
+/// Returns database errors, including a unique violation (SQLSTATE `23505` on
+/// `api_access_tokens_owner_active_name_idx`) when a non-revoked token with the
+/// same owner and name exists. The error keeps its `sqlx::Error` source so the
+/// service can map it to a conflict.
 pub async fn insert_token_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
@@ -554,8 +573,14 @@ pub fn group_scopes(pairs: Vec<(Uuid, String)>) -> HashMap<Uuid, Vec<String>> {
 /// newest first.
 ///
 /// An event concerns a token when its target is the token's public id or its
-/// metadata names the token as `replaced_token_id`. Only the action and time
-/// are returned.
+/// metadata names the token as `replaced_token_id` on a rotation event. Only
+/// the action and time are returned.
+///
+/// PERFORMANCE: The query is a `UNION ALL` of two selects so that each one
+/// uses an index: `target` for the first and `action` for the second. A single
+/// `target = $1 OR metadata ->> ... = $1` predicate forces a scan of the audit
+/// table. The two selects never return the same row, because a rotation event
+/// targets the replacement and names the replaced token.
 ///
 /// # Errors
 /// Returns database errors.
@@ -568,9 +593,16 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     Ok(sqlx::query_as::<_, (String, DateTime<Utc>)>(
-        "SELECT action, created_at FROM admin_audit_events
-         WHERE action IN ('access_token_created', 'access_token_rotated', 'access_token_revoked')
-           AND (target = $1 OR metadata ->> 'replaced_token_id' = $1)
+        "SELECT action, created_at FROM (
+             SELECT id, action, created_at FROM admin_audit_events
+             WHERE target = $1
+               AND action IN ('access_token_created', 'access_token_rotated',
+                              'access_token_revoked')
+             UNION ALL
+             SELECT id, action, created_at FROM admin_audit_events
+             WHERE action = 'access_token_rotated'
+               AND metadata ->> 'replaced_token_id' = $1
+         ) AS events
          ORDER BY created_at DESC, id DESC LIMIT $2",
     )
     .bind(token_id.simple().to_string())
