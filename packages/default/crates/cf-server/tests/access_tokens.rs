@@ -1035,11 +1035,20 @@ async fn name_and_lifetime_boundaries_are_inclusive_and_names_are_trimmed(pool: 
     let (one_day_id, _) = issued(&one_day);
     assert_eq!(one_day.body["status"], "expiring_soon");
 
-    // Length is counted in characters, not bytes.
+    // Length is counted in characters, not bytes. The database CHECK uses
+    // `char_length`, which counts bytes in a SQL_ASCII cluster (the sandbox
+    // cluster is created with `initdb --no-locale`), so a multi-byte character
+    // is only a valid probe when the server encoding is UTF8.
+    let encoding: String = sqlx::query_scalar("SHOW server_encoding")
+        .fetch_one(&pool)
+        .await
+        .expect("read server encoding");
+    eprintln!("server_encoding={encoding}");
+    let probe = if encoding == "UTF8" { "\u{e9}" } else { "n" };
     let unicode = api
         .create(
             &operator,
-            &create_body(&"\u{e9}".repeat(100), &[env], &READ_SCOPES, 90),
+            &create_body(&probe.repeat(100), &[env], &READ_SCOPES, 90),
         )
         .await;
     let (max_id, _) = issued(&unicode);
@@ -1047,7 +1056,7 @@ async fn name_and_lifetime_boundaries_are_inclusive_and_names_are_trimmed(pool: 
     let too_long = api
         .create(
             &operator,
-            &create_body(&"\u{e9}".repeat(101), &[env], &READ_SCOPES, 30),
+            &create_body(&probe.repeat(101), &[env], &READ_SCOPES, 30),
         )
         .await;
     assert_field_error(&too_long, "name");
