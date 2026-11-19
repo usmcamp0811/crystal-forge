@@ -119,11 +119,14 @@ pub(super) fn CreateTokenDialog(
                     }
                 } else {
                     div { class: "modal-head",
-                        h2 { id: "cfat-create-title",
-                            Icon { name: IconName::Key, size: 14 }
-                            "Create Access Token"
+                        // The head is a flex row, so the title and its description share one block.
+                        div {
+                            h2 { id: "cfat-create-title",
+                                Icon { name: IconName::Key, size: 14 }
+                                "Create Access Token"
+                            }
+                            p { "Create your own credential for an agent. Administrator approval is not required. The secret is shown once." }
                         }
-                        p { "Create your own credential for an agent. Administrator approval is not required. The secret is shown once." }
                     }
                     div { class: "modal-body",
                         if let Some(message) = current_errors.general.clone() {
@@ -163,10 +166,11 @@ pub(super) fn CreateTokenDialog(
                                 }
                                 div { class: "field",
                                     label { r#for: "cfat-expiry", "Expiration" }
+                                    // The selection is set per option: a `value` on a select is
+                                    // applied before its options exist and would show the first.
                                     select {
                                         id: "cfat-expiry",
                                         class: "input focus-ring",
-                                        value: "{values.expires_in_days}",
                                         "aria-describedby": "cfat-expiry-help cfat-expiry-error",
                                         onchange: move |event| {
                                             if let Ok(days) = event.value().parse::<u32>() {
@@ -174,7 +178,12 @@ pub(super) fn CreateTokenDialog(
                                             }
                                         },
                                         for days in policy.lifetime_options_days.iter().copied() {
-                                            option { key: "{days}", value: "{days}", "{lifetime_label(days)}" }
+                                            option {
+                                                key: "{days}",
+                                                value: "{days}",
+                                                selected: days == values.expires_in_days,
+                                                "{lifetime_label(days)}"
+                                            }
                                         }
                                     }
                                     div { id: "cfat-expiry-help", class: "help",
@@ -337,18 +346,21 @@ pub(super) fn RevealView(
     rsx! {
         DialogInitialFocus { dialog_id }
         div { class: "modal-head",
-            h2 { id: "cfat-reveal-title",
-                Icon { name: IconName::Check, size: 14 }
-                if rotated {
-                    "Access Token Rotated"
-                } else {
-                    "Access Token Created"
+            // The head is a flex row, so the title and its description share one block.
+            div {
+                h2 { id: "cfat-reveal-title",
+                    Icon { name: IconName::Check, size: 14 }
+                    if rotated {
+                        "Access Token Rotated"
+                    } else {
+                        "Access Token Created"
+                    }
                 }
-            }
-            p {
-                "{issued.metadata.name} · "
-                span { class: "mono", "{issued.metadata.display_hint}" }
-                " · expires {expires}"
+                p {
+                    "{issued.metadata.name} · "
+                    span { class: "mono", "{issued.metadata.display_hint}" }
+                    " · expires {expires}"
+                }
             }
         }
         div { class: "modal-body",
