@@ -616,9 +616,23 @@ async fn migration_0279_to_0284_preserves_populated_retained_cve_poam(pool: PgPo
     let scheduled = assessment_fixture(&pool).await;
     let accepted = assessment_fixture(&pool).await;
     let actor = admin_actor(scheduled.user_id);
-    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+    // This fixture runs at schema 0278, before migration 0335 adds the grant
+    // source columns. The current role writer targets the newest schema, so
+    // the fixture writes the historical row shape directly.
+    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
+        .bind(actor.user_id)
+        .execute(&pool)
         .await
         .unwrap();
+    sqlx::query(
+        "INSERT INTO user_role_assignments (user_id, role, granted_by_user_id)
+         VALUES ($1, $2, NULL)",
+    )
+    .bind(actor.user_id)
+    .bind(AuthRole::Admin)
+    .execute(&pool)
+    .await
+    .unwrap();
     let clock = FixedClock(Utc::now());
     let cve = "CVE-2026-32702";
     let package = "upgrade-continuity-package";
