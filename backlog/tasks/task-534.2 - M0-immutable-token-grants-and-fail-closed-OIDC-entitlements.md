@@ -394,3 +394,18 @@ Preview note: the task-owned preview PostgreSQL lost its shared-memory segment a
 Our former Backlog capture TASK-530 (Niks3 child startup failures) was removed because that ID belongs to another worktree. Its content is not lost: the flaky `handlers::api::builders::tests::niks3_probe_failure_never_polls_success_transition` result is recorded here and relates to the existing **TASK-532** ("Fix intermittent ETXTBSY/probe failures in cf-server core package tests"), which names the same failure family (a fake script executed right after being written, "Text file busy"). TASK-532 lists neighbouring tests, not this exact one, so the link is probable, not confirmed. Observed: that test failed twice on one derivation with the observed kind always `Process` and the expected kind varying between loop iterations, then passed on retry with no source change; `builders.rs` is not changed by this MR.
 
 The rebase onto `70001f2b` replayed all commits without conflicts. `origin/dev` added no migration after 0334, so migration 0335 keeps its number; a later migration landing on `dev` before this merges would require renumbering it, because an applied migration must not be edited. The branch and MR !345 keep the name `TASK-529.2-agent-authorization`; renaming would close the MR and lose its review history. Every verification result recorded above was produced before this rebase and does not apply to the rebased commits until rerun.
+
+### Verification on the rebased head `d0dfcba1`
+
+All results below are for source revision `d0dfcba150f205a7f025abd8611e7308ae5743ea` (this family rebased onto `origin/dev` `70001f2b`, then renumbered). They replace the earlier pre-rebase results for the rebased commits.
+
+- PostgreSQL/HTTP regressions PASSED: 53 nonignored tests, 0 failed, 0 ignored (1 restricted-grant, 28 admin-source, 24 OIDC), including the seven acting-Admin race tests.
+- Full Access scenario PASSED: 47 of 47 cases; the evidence `meta.json` records source revision `d0dfcba1`.
+- Embedded application build PASSED: Web UI 898 passed, server library 1588 passed, 0 failed.
+- OKF validation PASSED: 200 concepts, 219 Mermaid blocks, 0 unclassified.
+- Core package library tests PASSED on retry: 1586 passed, 0 failed, 856 ignored. The first attempt FAILED 15 tests, all in the Nix-parser deadline family ("Nix syntax validation unavailable: the Nix parser did not finish within 2 seconds"; `models::deployment_policies`, `handlers::api::deployment_policies`, `handlers::api::compliance`, `queries::compliance_interchange`). That is the known load-dependent farm flake tracked on `dev` as TASK-526; it ran while three other builds loaded the farm and no failing test touches authorization, OIDC or admin code. The retry ran on an otherwise idle farm. It is not counted as a pass for the failed attempt.
+- Core package native post-checks (config inspection, observation, isolation, source parity, CA bundle, trust publication) are STILL RUNNING for this head; the earlier completed run was at `2c298432`. Do not treat the library result as the full package pass.
+
+Still unverified: exact-head GitLab CI for `d0dfcba1`; narrow-screen, keyboard and error-state UI coverage; the system-detail and deploy-history surfaces that `origin/dev` changed, exercised only as an empty Systems page in the preview (no fixture systems); an unmocked OIDC provider callback.
+
+The preview was refreshed to the rebased embedded build (output `l5r2k51li1nbzjrj8a7z8fnj85rzlq1f-cf-server-0.3.0`) with the database untouched: 317 migrations applied, checksum unchanged.
