@@ -8,8 +8,12 @@ tags:
   - access-tokens
 implementation_status: partial
 sources:
-  - "Crystal Forge repository file packages/default/crates/cf-server/src/services/access_tokens.rs at commit 7e6d676d"
-  - "Crystal Forge repository file packages/default/crates/cf-server/migrations/0336_api_access_tokens.sql at commit 7e6d676d"
+  - id: service
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/services/access_tokens.rs at commit 7e6d676d"
+    title: Token lifecycle service and validation function
+  - id: migration
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0336_api_access_tokens.sql at commit 7e6d676d"
+    title: Token, scope and environment tables
 ---
 
 # Owner access token service
