@@ -17,7 +17,7 @@ sources:
 
 The historical TASK-65.7 provider matrix and HS256 rejection tests exist in
 `auth/integration_matrix.rs` and `auth/security_regression.rs`. Their claim-shape
-coverage does not establish TASK-529.2 authoritative reconciliation or a passing
+coverage does not establish TASK-534.2 authoritative reconciliation or a passing
 current-source farm result. The callback now uses the strict authoritative group
 extractor and source-aware [OIDC entitlement reconciliation](oidc-entitlement-ownership.md).
 

@@ -1,14 +1,14 @@
 ---
-id: TASK-529.2
+id: TASK-534.2
 title: M0 immutable token grants and fail-closed OIDC entitlements
 status: In Progress
 assignee: []
 created_date: '2026-11-16'
 labels: [security, authorization, oidc, agent-access]
-parent_task_id: TASK-529
+parent_task_id: TASK-534
 dependencies: []
 references:
-  - TASK-529
+  - TASK-534
   - docs/knowledge/security/agent-access-tokens-mcp-remediation-context.md
 priority: high
 ---
@@ -45,7 +45,7 @@ Required cases: token grant survives POA&M refresh; owner promotion cannot widen
 
 - Impact: server request authorization context, POA&M role refresh, OIDC identity/role mapping and persistence, session-derived authority, tests, and security knowledge contracts.
 - Risk: high; privilege escalation, stale access, accidental removal of unrelated grants, or partial reconciliation.
-- Dependencies: no implementation prerequisite on TASK-271, token issuance or MCP. TASK-529.1 preserves the complete CF-AGENT-ACCESS-001 v1.1 specification at the authoritative path. This task is now active in its dedicated worktree; legacy OIDC grant ownership/cutover remains a rollout gate, not a missing specification.
+- Dependencies: no implementation prerequisite on TASK-271, token issuance or MCP. TASK-534.1 preserves the complete CF-AGENT-ACCESS-001 v1.1 specification at the authoritative path. This task is now active in its dedicated worktree; legacy OIDC grant ownership/cutover remains a rollout gate, not a missing specification.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -62,7 +62,7 @@ Required cases: token grant survives POA&M refresh; owner promotion cannot widen
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: OpenCode on vm-agent in /home/mcamp/code/crystal-forge/TASK-526.2-agent-authorization
 
-Allocation provenance: old TASK-526.2 was a session allocation collision resolved as TASK-529.2 after the origin/dev `881dbc76` rebase; parent is TASK-529. This task remains In Progress with the same lock path. Planned branch: `TASK-529.2-agent-authorization`; the existing branch/worktree have not been renamed. Historical branch names, commit hashes, tmux identifiers and temporary derivation paths below retain their original values. The owner will handle Git/worktree and external references separately.
+Allocation provenance: old TASK-526.2 was a session allocation collision resolved as TASK-534.2 after the origin/dev `881dbc76` rebase; parent is TASK-534. This task remains In Progress with the same lock path. The existing branch is still named `TASK-529.2-agent-authorization` and the worktree path still uses 526.2; neither was renamed. Historical branch names, commit hashes, tmux identifiers and temporary derivation paths below retain their original values. The owner will handle Git/worktree and external references separately.
 
 User selected implementation on 2026-11-16. Branch `TASK-526.2-agent-authorization` starts at the pushed specification/design checkpoint `f0416e36`, which contains `dev` baseline `bd8d068d` plus the two handoff commits. New worktree verified clean. Integration `dev` has pre-existing untracked locks, task copies and a session file; none will be modified. No `main` worktree exists. Scope is backend authorization groundwork; no browser-visible changes or live database access.
 
@@ -83,7 +83,7 @@ Pre-rebase farm proof at `3105dabc`: the corrected focused SQLx derivation passe
 User requested latest-base rebase. Fetched origin/dev to `881dbc76` and rebased cleanly. `git range-diff bd8d068d..3105dabc origin/dev..HEAD` showed all three task patches unchanged; backend checkpoint is now `ccabd80d`. Read the newly merged AGENTS build-farm section. Confirmed Nix configuration `builders = @/etc/nix/machines` and `max-jobs = 0`; subsequent commands use those settings without overrides. User explicitly approved force-with-lease; pushed the rebased branch using an exact expected remote tip `3105dabc829c4b41625386542720ad99d891d1b2`.
 
 Rebased-source verification is running separately in persistent tmux server `cf-task5262`, session `farm`: window 0 owns `nix build .#default.cf-server-core-drv --no-link -L`, window `regression` owns the focused farm-only SQLx derivation from `/tmp/opencode/task-526-poam-regression.nix`. A transient stale-file-handle core evaluation was retried. Inspect panes before starting another copy. Pre-rebase passes do not prove the new base. No local compiler or host PostgreSQL was used after the user's farm-only instruction. Task remains In Progress with every full-M0 acceptance item unchecked.
-Integration HTTP impact (TASK-529.2, owner-selected bounded slice): authority is approved CF-AGENT-ACCESS-001 v1.1 sections 4.4 (unchanged human-session boundary) and 5.3 (separate managed/local ownership), plus the owner's independent administrator/IdP grants decision above. Consumers are Admin user PATCH/list and existing session-derived role guards. Disposition: retain every existing lifecycle-local-bootstrap assertion; extend its existing authorization.py with `authorization-admin-replacement-preserves-idp-and-classifies-explicit-category` and `authorization-source-union-does-not-admit-operator-admin-mutations`. Explicit prerequisite source rows in the fresh scenario VM database distinguish local, IdP and unresolved legacy contributions. Assert role-only classification leaves legacy membership unresolved; explicit environment replacement resolves that category; IdP role/environment survive local removal; requested Viewer returns effective Operator in PATCH and list; the existing Operator session cannot PATCH itself or another user (403 forbidden, no source/business/audit change). Restore the Operator fixture for later fragments. This proves the admin session+CSRF HTTP boundary only, not a signed real-OIDC callback, freshness/reconciliation, PAT admission, immutable token intersection or cross-environment resource denial. No new check, scenario derivation or VM. Focused gate `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` remains unrun by user instruction; no local builds, databases, services or tests were started.
+Integration HTTP impact (TASK-534.2, owner-selected bounded slice): authority is approved CF-AGENT-ACCESS-001 v1.1 sections 4.4 (unchanged human-session boundary) and 5.3 (separate managed/local ownership), plus the owner's independent administrator/IdP grants decision above. Consumers are Admin user PATCH/list and existing session-derived role guards. Disposition: retain every existing lifecycle-local-bootstrap assertion; extend its existing authorization.py with `authorization-admin-replacement-preserves-idp-and-classifies-explicit-category` and `authorization-source-union-does-not-admit-operator-admin-mutations`. Explicit prerequisite source rows in the fresh scenario VM database distinguish local, IdP and unresolved legacy contributions. Assert role-only classification leaves legacy membership unresolved; explicit environment replacement resolves that category; IdP role/environment survive local removal; requested Viewer returns effective Operator in PATCH and list; the existing Operator session cannot PATCH itself or another user (403 forbidden, no source/business/audit change). Restore the Operator fixture for later fragments. This proves the admin session+CSRF HTTP boundary only, not a signed real-OIDC callback, freshness/reconciliation, PAT admission, immutable token intersection or cross-environment resource denial. No new check, scenario derivation or VM. Focused gate `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` remains unrun by user instruction; no local builds, databases, services or tests were started.
 <!-- SECTION:NOTES:END -->
 
 ## OIDC implementation checkpoint (verification pending)
@@ -119,11 +119,11 @@ Prior rebased grant-isolation regression passed, output
 `gy7lli6dcvn40jx5ly6qqkzr5zmd5w1d-cf-restricted-authorization-regression-0.3.0`.
 The normal core build at that checkpoint failed 18 library tests: 16 parser
 deadline/validation failures tracked by the upstream TASK-526, plus the two Niks3
-failures captured in TASK-530. It is not a passing package result. Current
+failures captured in TASK-532. It is not a passing package result. Current
 OIDC-specific tests and the extended Access scenario still require farm results.
 
 Task IDs were renumbered because origin/dev independently allocated TASK-526.
-Active branch is now `TASK-529.2-agent-authorization`; the worktree path and
+Active branch is `TASK-529.2-agent-authorization` (named before the second collision below); the worktree path and
 retained tmux socket still use the original 526.2 allocation. The previous pushed
 526.2 branch remains historical. User requests an MR when the scoped work and
 required checks are ready; do not move to Review or claim M0 completion yet.
@@ -355,7 +355,7 @@ the request waited for the locks.
 
 Follow-up: other admin mutations (create user, delete user, OIDC mapping
 upsert/delete, classification and retry-policy writes) still authorize before
-their transactions and are not rechecked in a transaction. TASK-531 tracks that
+their transactions and are not rechecked in a transaction. TASK-535 tracks that
 work. It is a Backlog capture, not part of this task.
 
 Verification state, with no new farm pass claimed:
@@ -381,8 +381,16 @@ Both second-review findings are fixed at commit `9f9d907e` (docs follow in `c431
 - Embedded application build PASSED on retry, output `6c6ih031rl0dzh9cg0fq2ygi6miscqhf-cf-server-0.3.0` (server library 1571 passed, 0 failed, 853 ignored).
 - OKF validation PASSED at the documentation commit (200 concepts).
 
-Not a pass, recorded honestly: the same derivation `i125vc8vzll56iii1wgqvx1y6rhq89yx-cf-server-0.3.0.drv` first FAILED twice (application build and Access dependency) in `handlers::api::builders::tests::niks3_probe_failure_never_polls_success_transition`, with a different expected value each run (`MissingPath`, `Network`, `AuthenticationFailed`) and always `Process` observed, then PASSED on retry with no source change. `builders.rs` is unchanged by this MR. The observed value points at the test's fake `nix` script failing to execute, but the root cause is not established; the test is added to TASK-530. It also failed once on an earlier work-in-progress build and passed on others, so treat it as an existing intermittent failure, not a result for this MR.
+Not a pass, recorded honestly: the same derivation `i125vc8vzll56iii1wgqvx1y6rhq89yx-cf-server-0.3.0.drv` first FAILED twice (application build and Access dependency) in `handlers::api::builders::tests::niks3_probe_failure_never_polls_success_transition`, with a different expected value each run (`MissingPath`, `Network`, `AuthenticationFailed`) and always `Process` observed, then PASSED on retry with no source change. `builders.rs` is unchanged by this MR. The observed value points at the test's fake `nix` script failing to execute, but the root cause is not established; the test is added to TASK-532. It also failed once on an earlier work-in-progress build and passed on others, so treat it as an existing intermittent failure, not a result for this MR.
 
-Still unverified: exact-head GitLab CI for the new head; a fresh normal core/native check at `9f9d907e` (the completed run was at `2c298432`); narrow-screen, keyboard and error-state UI coverage; an unmocked OIDC provider callback. TASK-531 tracks the other admin mutations that still authorize before their transactions. MR !345 stays Draft, this task stays In Progress, and all six acceptance items stay unchecked.
+Still unverified: exact-head GitLab CI for the new head; a fresh normal core/native check at `9f9d907e` (the completed run was at `2c298432`); narrow-screen, keyboard and error-state UI coverage; an unmocked OIDC provider callback. TASK-535 tracks the other admin mutations that still authorize before their transactions. MR !345 stays Draft, this task stays In Progress, and all six acceptance items stay unchecked.
 
 Preview note: the task-owned preview PostgreSQL lost its shared-memory segment around 21:54 local time on 2026-11-17 (cause not investigated) and was restarted on the same data directory after a backup copy; fixtures and all 317 migrations intact.
+
+## Second allocation collision and rebase onto origin/dev `70001f2b`
+
+`origin/dev` merged an unrelated TASK-529 ("Show the real deployment failure reason in history and logs", merge `70001f2b`) after this family had been renumbered to 529. A separate `scan-cache-recovery` worktree also holds task-530, task-532 and task-533. This family is therefore renumbered again: parent **TASK-534**, children **TASK-534.1** and **TASK-534.2**, and the admin-mutation recheck follow-up **TASK-535** (previously TASK-531). Earlier text in this file that says "TASK-529" for this family now reads TASK-534; commit hashes, farm derivation names and log file names recorded earlier are unchanged because they are historical identifiers.
+
+Our former Backlog capture TASK-530 (Niks3 child startup failures) was removed because that ID belongs to another worktree. Its content is not lost: the flaky `handlers::api::builders::tests::niks3_probe_failure_never_polls_success_transition` result is recorded here and relates to the existing **TASK-532** ("Fix intermittent ETXTBSY/probe failures in cf-server core package tests"), which names the same failure family (a fake script executed right after being written, "Text file busy"). TASK-532 lists neighbouring tests, not this exact one, so the link is probable, not confirmed. Observed: that test failed twice on one derivation with the observed kind always `Process` and the expected kind varying between loop iterations, then passed on retry with no source change; `builders.rs` is not changed by this MR.
+
+The rebase onto `70001f2b` replayed all commits without conflicts. `origin/dev` added no migration after 0334, so migration 0335 keeps its number; a later migration landing on `dev` before this merges would require renumbering it, because an applied migration must not be edited. The branch and MR !345 keep the name `TASK-529.2-agent-authorization`; renaming would close the MR and lose its review history. Every verification result recorded above was produced before this rebase and does not apply to the rebased commits until rerun.

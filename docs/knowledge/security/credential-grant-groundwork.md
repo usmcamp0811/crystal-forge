@@ -13,7 +13,7 @@ implementation_status: partial
 
 ## Status and authority
 
-TASK-529.2 starts the authorization prerequisite for
+TASK-534.2 starts the authorization prerequisite for
 [CF-AGENT-ACCESS-001 v1.1](agent-access-tokens-mcp-remediation-context.md).
 This groundwork adds domain authorization inputs and source-aware OIDC
 reconciliation; it does **not** implement PAT
@@ -106,7 +106,7 @@ following work remains required before that release:
 
 1. Review-revision CI and reviewed legacy classification/cutover with independent
    recovery. Checkpoint-specific database and Access results are recorded in
-   TASK-529.2; the source helper alone is not PAT admission.
+   TASK-534.2; the source helper alone is not PAT admission.
 2. Token-row validation for every admitted request and transaction-aware checks
    for any future mutation, with deterministic revocation ordering.
 3. Binding the credential to the authenticated current owner; role and
@@ -129,7 +129,7 @@ and restricted mutation denial independent of owner Admin status.
 The existing state-machine database regression runner already runs the entire
 `poam_workflows` integration target. Adding this test does not create another
 top-level check. Execution results, failures and unrun integration-owner gates
-are recorded in TASK-529.2. Historical passes do not establish current-source
+are recorded in TASK-534.2. Historical passes do not establish current-source
 verification. The final 29 database regressions passed at `24b3bad6`; Access
 passed at `89e7689b`. Review-revision CI and the extra core native-Nix post-checks
 remain pending. Exact farm commands and database-test scope are in

@@ -62,7 +62,7 @@ Failure evidence from tested commit
 database host and missing auth mode; `journals/controller/crystal-forge.journal`
 records `both host and hostaddr are missing`.
 
-## Source-aware administration HTTP boundary (TASK-529.2)
+## Source-aware administration HTTP boundary (TASK-534.2)
 
 The existing `authorization.py` appends two cases after its original baseline
 assertions, in the same fresh controller VM/database:
@@ -83,7 +83,7 @@ assertions, in the same fresh controller VM/database:
 
 Authority: approved [CF-AGENT-ACCESS-001 v1.1](../../docs/knowledge/security/agent-access-tokens-mcp-remediation-context.md),
 sections 4.4 (unchanged human-session boundary) and 5.3 (separate local/managed
-ownership), plus the independent administrator/IdP grants decision in TASK-529.2.
+ownership), plus the independent administrator/IdP grants decision in TASK-534.2.
 Disposition: extend the existing scenario; retain all earlier assertions. The
 SQL fixtures use the existing VM-only psql mechanism and schema 0335 source
 columns; they supply prerequisites, not the result of the HTTP write.
@@ -94,7 +94,7 @@ verify this revision.
 
 ### Review P1: source-preserving Users modal
 
-Impact authority: the owner's MR345/TASK-529.2 review P1 instruction requires
+Impact authority: the owner's MR345/TASK-534.2 review P1 instruction requires
 independent local/IdP ownership and explicit local-edit intent. Affected consumers
 are Admin Users create/edit/cancel/disable, environment membership editing, and
 non-Admin route access, owned by `lifecycle-local-bootstrap`. Retain the original

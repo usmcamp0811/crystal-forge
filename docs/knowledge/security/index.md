@@ -1,6 +1,6 @@
 # Design Specification
 
-* [Agent Access Tokens, MCP, and Remediation Context](agent-access-tokens-mcp-remediation-context.md) - CF-AGENT-ACCESS-001 v1.1 contract for Operator-owned tokens, environment grants, MCP tools, OIDC freshness and evidence; delivery TASK-529 and design handoff TASK-529.1; M0 groundwork is under review, while PAT issuance and MCP transport remain unimplemented.
+* [Agent Access Tokens, MCP, and Remediation Context](agent-access-tokens-mcp-remediation-context.md) - CF-AGENT-ACCESS-001 v1.1 contract for Operator-owned tokens, environment grants, MCP tools, OIDC freshness and evidence; delivery TASK-534 and design handoff TASK-534.1; M0 groundwork is under review, while PAT issuance and MCP transport remain unimplemented.
 
 # Operator Guide
 
@@ -8,7 +8,7 @@
 
 # Security Model
 
-* [Credential grant boundaries in POA&M services](credential-grant-groundwork.md) - Partial M0 implementation in TASK-529.2: immutable restricted grants survive read refresh without Admin wildcard expansion; source-aware OIDC groundwork exists, while PAT admission, token-row validation and acceptance evidence remain release gates.
+* [Credential grant boundaries in POA&M services](credential-grant-groundwork.md) - Partial M0 implementation in TASK-534.2: immutable restricted grants survive read refresh without Admin wildcard expansion; source-aware OIDC groundwork exists, while PAT admission, token-row validation and acceptance evidence remain release gates.
 * [OIDC entitlement ownership and freshness](oidc-entitlement-ownership.md) - Local/IdP union, legacy classification, ordered reconciliation, failure fencing, future-PAT eligibility and upgrade/recovery; checkpoint database and Access tests passed, while PAT admission wiring and review-revision CI remain release gates.
 
 * [API authentication, sessions, and role-based authorization](api-authentication-and-authorization.md) - Explains cookie-session login, dev-mode login, the Viewer/Operator/Admin roles, authorization middleware, and environment scoping with non-disclosing not-found behavior; open it when changing who may call an API endpoint.

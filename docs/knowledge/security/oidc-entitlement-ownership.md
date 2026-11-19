@@ -30,7 +30,7 @@ sources:
 
 ## Status and authority
 
-TASK-529.2 implements the source model and callback reconciliation described
+TASK-534.2 implements the source model and callback reconciliation described
 below. The final database regressions passed on the farm at `24b3bad6`; the
 Access scenario passed at `89e7689b`. Exact review-revision CI remains pending.
 Those are historical checkpoints, not proof of the MR !345 requested-change
@@ -135,7 +135,7 @@ There is no separate environment membership admin route. Membership edits go
 through create user and PATCH. Only PATCH rechecks the actor.
 
 These gaps are **open, not fixed**. They are tracked as the separate Backlog
-follow-up TASK-531. This slice does not claim them as complete.
+follow-up TASK-535. This slice does not claim them as complete.
 
 ## Identity helper and first-creation contract
 
@@ -327,7 +327,7 @@ nix build .#okf-knowledge --no-link -L
 ```
 
 Exact commands, derivations, results and remaining runs are recorded in
-TASK-529.2. The core package's ordinary tests do not execute the PostgreSQL
+TASK-534.2. The core package's ordinary tests do not execute the PostgreSQL
 integration targets; do not substitute a package pass for those database proofs.
 `tests/oidc_entitlements.rs`, `tests/admin_source_grants.rs` and the POA&M target
 are selected by the existing `packages/devScripts/tests/database-regressions.sh`;

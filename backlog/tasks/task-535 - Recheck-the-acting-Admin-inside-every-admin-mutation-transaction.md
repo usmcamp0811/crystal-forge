@@ -1,5 +1,5 @@
 ---
-id: TASK-531
+id: TASK-535
 title: Recheck the acting Admin inside every admin mutation transaction
 status: Backlog
 assignee: []
@@ -7,13 +7,13 @@ created_date: '2026-11-17'
 labels: [security, authorization]
 dependencies: []
 references:
-  - TASK-529.2
+  - TASK-534.2
 priority: medium
 ---
 
 ## Description
 <!-- SECTION:DESCRIPTION:BEGIN -->
-TASK-529.2 (MR !345, Draft) rechecks the acting Admin inside the transaction of
+TASK-534.2 (MR !345, Draft) rechecks the acting Admin inside the transaction of
 `PATCH /api/v1/admin/users/:id` only. `require_admin_session` returns the actor
 and session ids without a lock. `patch_admin_user` then takes the grant advisory
 lock, locks the actor and target user rows by ascending id, and verifies that the
@@ -58,13 +58,13 @@ coverage for a demoted, disabled and logged-out actor per mutation.
 
 Non-goals:
 
-- Changing the PATCH recheck, which TASK-529.2 owns.
+- Changing the PATCH recheck, which TASK-534.2 owns.
 - Read-only admin endpoints, and non-admin role checks (Operator, Viewer).
 - A new authorization model, session scheme or schema migration unless the work
   proves one is required.
 - PAT, MCP or token-issuance work.
 
-References: TASK-529.2; PATCH design in
+References: TASK-534.2; PATCH design in
 `docs/knowledge/security/oidc-entitlement-ownership.md` and the User PATCH
 contract in `docs/knowledge/api/builders-queues-environments-dashboard-admin-api.md`.
 

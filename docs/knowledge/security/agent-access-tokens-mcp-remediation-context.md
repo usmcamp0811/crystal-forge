@@ -33,8 +33,8 @@ from the 2026-11-16 implementation request, not implemented API behavior.
 The prose and tables below preserve the requirements; source box diagrams are
 represented as Mermaid and tab-separated contracts as Markdown tables/lists.
 The illustrative SQL remains a schema contract, not an executable migration.
-TASK-529 tracks delivery, TASK-529.1 tracks this knowledge/design handoff, and
-TASK-529.2 tracks the M0 security prerequisites. M0 authorization and OIDC source
+TASK-534 tracks delivery, TASK-534.1 tracks this knowledge/design handoff, and
+TASK-534.2 tracks the M0 security prerequisites. M0 authorization and OIDC source
 groundwork is implemented for review; PAT issuance and MCP transport remain
 unimplemented. No milestone is marked complete by this progress note. See
 [credential grant groundwork](credential-grant-groundwork.md) and
@@ -785,11 +785,11 @@ Implementation rule: do not mark any milestone complete until all its requiremen
 
 | Source requirements | Delivery owner | Required evidence; current state |
 | --- | --- | --- |
-| Sections 1–19, proposed-state metadata and retained design | TASK-529.1 | Source comparison, OKF validation, design inventory and browser review; pending |
-| Sections 4.2–4.4, 5.3, 15.1–15.2, M0 | TASK-529.2 | Real transaction, role/membership, OIDC fixtures and isolation tests; unimplemented |
-| Sections 3, 5–8, 10.1–10.5, 10.9, M1 | TASK-529 / M1 | Local/OIDC Operator owner workflow, session+CSRF, lifecycle, redaction, DB and UI tests; unimplemented |
-| Sections 4.1, 9, 10.6–10.7, 11, 15.3, M2 | TASK-529 / M2 | Independent MCP client, scoped reads, inspector parity, NixOS and protocol checks; unimplemented |
-| Sections 10.8, 12–13, M3 | TASK-529 / TASK-271 | Shared authorized provenance, evidence confidence and additive visual parity; unimplemented |
-| Sections 7, 9.4, 14, M4 | TASK-529 / M4 | Explicit policy, all-subject authority, races, revision/idempotency, audits; gated, not released |
-| Sections 3.2, 4.1, 7, M5 | TASK-529 / M5 | Independent CLI audience/service principal schema and enforcement tests; future work |
-| Section 15 and release gate | TASK-529, all milestone owners | Real integration owners and documented unverified gaps; no acceptance test claimed passed |
+| Sections 1–19, proposed-state metadata and retained design | TASK-534.1 | Source comparison, OKF validation, design inventory and browser review; pending |
+| Sections 4.2–4.4, 5.3, 15.1–15.2, M0 | TASK-534.2 | Real transaction, role/membership, OIDC fixtures and isolation tests; unimplemented |
+| Sections 3, 5–8, 10.1–10.5, 10.9, M1 | TASK-534 / M1 | Local/OIDC Operator owner workflow, session+CSRF, lifecycle, redaction, DB and UI tests; unimplemented |
+| Sections 4.1, 9, 10.6–10.7, 11, 15.3, M2 | TASK-534 / M2 | Independent MCP client, scoped reads, inspector parity, NixOS and protocol checks; unimplemented |
+| Sections 10.8, 12–13, M3 | TASK-534 / TASK-271 | Shared authorized provenance, evidence confidence and additive visual parity; unimplemented |
+| Sections 7, 9.4, 14, M4 | TASK-534 / M4 | Explicit policy, all-subject authority, races, revision/idempotency, audits; gated, not released |
+| Sections 3.2, 4.1, 7, M5 | TASK-534 / M5 | Independent CLI audience/service principal schema and enforcement tests; future work |
+| Section 15 and release gate | TASK-534, all milestone owners | Real integration owners and documented unverified gaps; no acceptance test claimed passed |

@@ -1,4 +1,4 @@
-// Source-aware Users modal regression (TASK-529.2 review P1).
+// Source-aware Users modal regression (TASK-534.2 review P1).
 // Requires admin/operator/adminSourceGrants facts and same-run admin.userId /
 // authorization.operator.userId receipts. Python supplies a pure-IdP Operator
 // and production membership, then checks SQL/audits and restores the fixture.

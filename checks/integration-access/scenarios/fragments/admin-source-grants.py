@@ -1,4 +1,4 @@
-# TASK-529.2 review P1: append after authorization.py, before Admin forms.
+# TASK-534.2 review P1: append after authorization.py, before Admin forms.
 # Requires its authz_* helpers/session, bootstrap helpers, and same-run Operator
 # receipt. Owns only public Operator fixture prerequisites in this scenario VM.
 # Restores its public password, enabled flag, local Operator/empty environments

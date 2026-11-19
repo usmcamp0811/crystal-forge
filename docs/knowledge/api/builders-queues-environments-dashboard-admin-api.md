@@ -328,7 +328,7 @@ Admin-only endpoints for user and system management.
 
 ### User PATCH contract (MR !345 requested changes)
 
-This section describes the current TASK-529.2 worktree fix in
+This section describes the current TASK-534.2 worktree fix in
 `packages/default/crates/cf-server/src/handlers/api/admin.rs` (`update_user`),
 `src/queries/admin.rs` (`patch_admin_user`), and `src/api/models.rs`, relative to
 the `cf-server` crate. These changes are not attributed to the older commits in

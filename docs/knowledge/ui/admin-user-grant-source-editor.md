@@ -23,7 +23,7 @@ sources:
 ## Authority and implementation state
 
 This is the maintainer-approved review addendum requested for MR !345,
-TASK-529.2. It is authoritative for this source-ownership fix where the
+TASK-534.2. It is authoritative for this source-ownership fix where the
 single-HTML prototype has merged role/environment fields. Do not restore those
 merged fields for visual parity. The prototype does not model source ownership.
 Approval of this bounded contract is not browser acceptance or full M0 completion.
@@ -108,7 +108,7 @@ handles this case as follows:
 
 The notice and the comparison are source-level statements. This update does not
 claim a rendered or browser result for them. Execution of the related
-regressions is recorded in TASK-529.2, not here.
+regressions is recorded in TASK-534.2, not here.
 
 ## Comparison with the single-HTML design
 
@@ -140,7 +140,7 @@ remain; only ownership context and intentional local controls are added. This
 desktop evidence does not establish a full narrow-screen/keyboard/error-state
 matrix or exact-head GitLab CI. The screenshot is retained in the Access
 evidence `browser/admin-source-unrelated-save` directory; detailed artifact
-identifiers and remaining gates are recorded in TASK-529.2.
+identifiers and remaining gates are recorded in TASK-534.2.
 
 ## Related concepts
 

@@ -11,7 +11,7 @@
 //! both CVE and POA&M metadata and requires `mcp`, `cves:read`, and `poams:read`.
 //! Other public reads require a browser session until safe MCP projections are
 //! implemented. All restricted mutations fail closed pending a released,
-//! capability-specific transactional token-row validator (TASK-529).
+//! capability-specific transactional token-row validator (TASK-534).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

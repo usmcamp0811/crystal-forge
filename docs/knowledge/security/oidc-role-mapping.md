@@ -35,10 +35,10 @@ sources:
     title: NixOS OIDC options
   - id: current-reconciliation
     resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/oidc_entitlements.rs at commit c2c22b02"
-    title: TASK-529.2 source-aware reconciliation
+    title: TASK-534.2 source-aware reconciliation
   - id: current-callback
     resource: "Crystal Forge repository file packages/default/crates/cf-server/src/handlers/api/auth_oidc.rs at commit c2c22b02"
-    title: TASK-529.2 ordered callback reconciliation
+    title: TASK-534.2 ordered callback reconciliation
 ---
 
 # OIDC Role Mapping Configuration
@@ -46,7 +46,7 @@ sources:
 Crystal Forge maps validated OIDC groups to IdP-owned roles and environment
 memberships on login. The mapping lives in **`oidc_group_mappings`**. An Admin
 edits it through the Web UI or admin API. Independent local overrides survive
-IdP reconciliation. This guide describes implemented source in TASK-529.2;
+IdP reconciliation. This guide describes implemented source in TASK-534.2;
 current-source farm verification is pending. The historical source references
 above retain provenance for the earlier guide, not proof of current behavior.
 See [OIDC entitlement ownership](oidc-entitlement-ownership.md) for the partial
