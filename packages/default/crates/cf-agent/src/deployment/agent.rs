@@ -357,7 +357,9 @@ fn command_failure(
 ) -> DeploymentFailureError {
     // A local profile or systemd failure does not establish a remote cache
     // cause. Reuse only categories meaningful at this operation boundary.
-    let code = match classify_read_failure(&output.stderr) {
+    // SECURITY: The output is complete here, so a direct cut at the first
+    // response body suffices; provider text never selects a category.
+    let code = match classify_read_failure(before_response_body(&output.stderr)) {
         code @ (FailureCode::DiskFull | FailureCode::PermissionDenied) => code,
         FailureCode::NixDaemon if stage == FailureStage::GenerationCreation => {
             FailureCode::NixDaemon
@@ -1910,11 +1912,102 @@ fn scrub_urls(line: &str) -> String {
     out
 }
 
+/// Nix prints this delimiter before provider-controlled HTTP response text.
+const RESPONSE_BODY_DELIMITER: &[u8] = b"response body:";
+
+/// Returns the index of the first case-insensitive response-body delimiter.
+fn find_response_body(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .windows(RESPONSE_BODY_DELIMITER.len())
+        .position(|window| window.eq_ignore_ascii_case(RESPONSE_BODY_DELIMITER))
+}
+
+/// Returns the complete output before its first response-body delimiter.
+///
+/// SECURITY: Text after the delimiter is provider-controlled. A later line can
+/// imitate a Nix diagnostic, so nothing after the first delimiter may influence
+/// a fixed failure category, even a line that looks genuine.
+fn before_response_body(output: &[u8]) -> &[u8] {
+    find_response_body(output).map_or(output, |index| &output[..index])
+}
+
 /// Captures the bounded stderr tail and whether the entire stream was retained.
 #[derive(Default)]
 struct ReadDiagnostics {
     tail: Vec<u8>,
     complete: bool,
+    /// The last bytes before the first response-body delimiter in the whole
+    /// stream. Only this text is classified. Equals `tail` when no body occurs.
+    classification: Vec<u8>,
+    /// A response-body delimiter occurred anywhere in the stream, including in
+    /// a part that truncation later removed from `tail`.
+    body_seen: bool,
+}
+
+/// Splits a stderr stream into a bounded tail and trusted classification text.
+///
+/// SECURITY: The delimiter is searched across the whole stream as it arrives,
+/// including across chunk boundaries, not only in the retained tail. Truncation
+/// therefore cannot hide a body and make provider text look like Nix output.
+/// Bytes before the first delimiter are emitted by Nix or the agent; they are
+/// classified even when truncation removed older bytes. Bytes after it never are.
+#[derive(Default)]
+struct StderrCapture {
+    tail: Vec<u8>,
+    truncated: bool,
+    classification: Vec<u8>,
+    body_seen: bool,
+    /// The last `RESPONSE_BODY_DELIMITER.len() - 1` stream bytes, which can begin
+    /// a delimiter that the next chunk completes.
+    carry: Vec<u8>,
+}
+
+impl StderrCapture {
+    fn push(&mut self, chunk: &[u8]) {
+        self.tail.extend_from_slice(chunk);
+        if self.tail.len() > READ_DIAGNOSTIC_TAIL_BYTES {
+            self.truncated = true;
+            self.tail
+                .drain(..self.tail.len() - READ_DIAGNOSTIC_TAIL_BYTES);
+        }
+        if self.body_seen {
+            return;
+        }
+        let mut combined = std::mem::take(&mut self.carry);
+        let carried = combined.len();
+        combined.extend_from_slice(chunk);
+        match find_response_body(&combined) {
+            Some(index) if index < carried => {
+                // The delimiter began in bytes already added; remove that part.
+                let keep = self.classification.len().saturating_sub(carried - index);
+                self.classification.truncate(keep);
+                self.body_seen = true;
+            }
+            Some(index) => {
+                self.classification
+                    .extend_from_slice(&combined[carried..index]);
+                self.body_seen = true;
+            }
+            None => {
+                self.classification.extend_from_slice(chunk);
+                if self.classification.len() > READ_DIAGNOSTIC_TAIL_BYTES {
+                    self.classification
+                        .drain(..self.classification.len() - READ_DIAGNOSTIC_TAIL_BYTES);
+                }
+                let keep = RESPONSE_BODY_DELIMITER.len() - 1;
+                self.carry = combined[combined.len().saturating_sub(keep)..].to_vec();
+            }
+        }
+    }
+
+    fn finish(self, stream_complete: bool) -> ReadDiagnostics {
+        ReadDiagnostics {
+            tail: self.tail,
+            complete: stream_complete && !self.truncated,
+            classification: self.classification,
+            body_seen: self.body_seen,
+        }
+    }
 }
 
 impl ReadDiagnostics {
@@ -1926,10 +2019,7 @@ impl ReadDiagnostics {
     ) -> FailureDiagnostics {
         let suppression_reason = if !self.complete {
             Some("incomplete_capture".to_owned())
-        } else if String::from_utf8_lossy(&self.tail)
-            .to_ascii_lowercase()
-            .contains("response body:")
-        {
+        } else if self.body_seen || find_response_body(&self.tail).is_some() {
             Some("provider_response_body".to_owned())
         } else if !credential_inventory_complete {
             Some("credential_inventory_unavailable".to_owned())
@@ -1973,29 +2063,13 @@ fn capture_stderr_tail(
 ) -> tokio::task::JoinHandle<ReadDiagnostics> {
     tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
-        let mut tail = Vec::new();
-        let mut truncated = false;
+        let mut capture = StderrCapture::default();
         let mut chunk = [0u8; 8192];
         loop {
-            let read = match stderr.read(&mut chunk).await {
-                Ok(0) => {
-                    return ReadDiagnostics {
-                        tail,
-                        complete: !truncated,
-                    };
-                }
-                Ok(read) => read,
-                Err(_) => {
-                    return ReadDiagnostics {
-                        tail,
-                        complete: false,
-                    };
-                }
-            };
-            tail.extend_from_slice(&chunk[..read]);
-            if tail.len() > READ_DIAGNOSTIC_TAIL_BYTES {
-                truncated = true;
-                tail.drain(..tail.len() - READ_DIAGNOSTIC_TAIL_BYTES);
+            match stderr.read(&mut chunk).await {
+                Ok(0) => return capture.finish(true),
+                Ok(read) => capture.push(&chunk[..read]),
+                Err(_) => return capture.finish(false),
             }
         }
     })
@@ -2062,7 +2136,10 @@ async fn run_cache_copy(
             ReadDiagnostics::default()
         }
     };
-    let code = classify_read_failure(&tail.tail);
+    // SECURITY: Classify only text before the first response body. An empty
+    // result (a body with no preceding diagnostic) yields Unknown, never a
+    // category read from provider text.
+    let code = classify_read_failure(&tail.classification);
     let mut typed = failure(
         stage,
         if code == FailureCode::Unknown && !tail.complete {
@@ -2618,10 +2695,13 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
     // pipe buffer and the retained tail.
     #[tokio::test]
     async fn niks3_signature_failure_is_named_without_echoing_nix_output() {
+        // The TASK-506 incident shape: no response body anywhere, so the
+        // signature line is genuine Nix output and must still be classified even
+        // though 300 KB of earlier output truncated the retained tail.
         let fixture = Fixture::new(&format!(
             "{PRIVATE_SCRIPT}\n\
              head -c 300000 /dev/zero | tr '\\0' x >&2\n\
-             printf \"\\nerror: unable to download '%s/x.narinfo?X-Amz-Signature=sig-secret': HTTP error 500\\nresponse body:\\nsecret-provider-body\\n\" \"$3\" >&2\n\
+             printf \"\\nerror: unable to download '%s/x.narinfo?X-Amz-Signature=sig-secret': secret-provider-body\\n\" \"$3\" >&2\n\
              printf \"error: cannot add path '/nix/store/abc-output' because it lacks a signature by a trusted key\\n\" >&2\n\
              exit 1\n"
         ));
@@ -2656,6 +2736,138 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
         assert!(!std::path::Path::new(&directory).exists());
     }
 
+    // A cache provider controls the response body. A body line that imitates a
+    // Nix diagnostic must not choose the fixed failure category.
+    #[tokio::test]
+    async fn response_body_text_never_selects_the_failure_category() {
+        let forged = "printf 'error: cannot add path because it lacks a signature by a trusted key\\n' >&2\n";
+        for (label, script, expected, reason) in [
+            (
+                "forged signature in an HTTP 500 body",
+                format!(
+                    "printf \"error: unable to download '%s/nar': HTTP error 500\\nresponse body:\\n\" \"$3\" >&2\n{forged}"
+                ),
+                FailureCode::ServerError,
+                "provider_response_body",
+            ),
+            (
+                "mixed-case inline delimiter",
+                format!(
+                    "printf \"error: unable to download '%s/nar': HTTP error 503 ReSpOnSe BoDy: \" \"$3\" >&2\n{forged}"
+                ),
+                FailureCode::ServerError,
+                "provider_response_body",
+            ),
+            (
+                // 300 KB of body evicts both the HTTP line and the delimiter from
+                // the retained tail, leaving only provider text in it.
+                "truncated body ending in a forged category",
+                format!(
+                    "printf \"error: unable to download '%s/nar': HTTP error 500\\nresponse body:\\n\" \"$3\" >&2\n\
+                     head -c 300000 /dev/zero | tr '\\0' x >&2\n{forged}"
+                ),
+                FailureCode::ServerError,
+                "incomplete_capture",
+            ),
+            (
+                // No genuine diagnostic precedes the body, so the category is
+                // unknown rather than anything read from provider text.
+                "body without a preceding diagnostic",
+                format!("printf 'response body:\\n' >&2\n{forged}"),
+                FailureCode::Unknown,
+                "provider_response_body",
+            ),
+        ] {
+            let fixture = Fixture::new(&format!("{PRIVATE_SCRIPT}\n{script}exit 1\n"));
+            let error = copy_authenticated_cache(
+                cache(true),
+                "/nix/store/output".into(),
+                false,
+                Duration::from_secs(10),
+                fixture.program(),
+            )
+            .await
+            .unwrap_err();
+            let typed = report_failure(&error);
+            assert_eq!(typed.code, expected, "{label}");
+            assert_ne!(typed.code, FailureCode::SignatureVerification, "{label}");
+            let diagnostics = typed.diagnostics.expect("diagnostics");
+            assert_eq!(
+                diagnostics.suppression_reason.as_deref(),
+                Some(reason),
+                "{label}"
+            );
+            assert!(diagnostics.lines.is_empty(), "{label}");
+            let directory = std::fs::read_to_string(fixture.0.join("credentials")).unwrap();
+            assert!(!std::path::Path::new(&directory).exists());
+        }
+    }
+
+    // The delimiter can arrive split across reads. Every split point must still
+    // stop classification at the delimiter, never let body text through.
+    #[test]
+    fn stderr_capture_detects_the_delimiter_across_every_chunk_boundary() {
+        let stream =
+            b"error: HTTP error 500\nRESPONSE Body: error: lacks a signature by a trusted key\n";
+        let start = find_response_body(stream).unwrap();
+        for split in 0..=stream.len() {
+            let mut capture = StderrCapture::default();
+            capture.push(&stream[..split]);
+            capture.push(&stream[split..]);
+            let result = capture.finish(true);
+            assert!(result.body_seen, "split {split}");
+            assert_eq!(result.classification, &stream[..start], "split {split}");
+            assert_eq!(
+                classify_read_failure(&result.classification),
+                FailureCode::ServerError,
+                "split {split}"
+            );
+        }
+        // One byte per read is the worst case for the carried prefix.
+        let mut capture = StderrCapture::default();
+        for byte in stream {
+            capture.push(std::slice::from_ref(byte));
+        }
+        assert_eq!(capture.finish(true).classification, &stream[..start]);
+    }
+
+    #[test]
+    fn stderr_capture_classifies_large_bodyless_output_and_bounds_memory() {
+        // Without a body, truncation keeps the genuine last bytes classifiable.
+        let mut capture = StderrCapture::default();
+        for _ in 0..40 {
+            capture.push(&[b'x'; 8192]);
+        }
+        capture.push(b"\nerror: path lacks a signature by a trusted key\n");
+        let result = capture.finish(true);
+        assert!(!result.complete, "truncated stream is incomplete");
+        assert!(!result.body_seen);
+        assert!(result.classification.len() <= READ_DIAGNOSTIC_TAIL_BYTES);
+        assert!(result.tail.len() <= READ_DIAGNOSTIC_TAIL_BYTES);
+        assert_eq!(
+            classify_read_failure(&result.classification),
+            FailureCode::SignatureVerification
+        );
+    }
+
+    #[test]
+    fn local_command_categories_ignore_response_body_text() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: b"error: download failed\nresponse body:\nerror: No space left on device\n"
+                .to_vec(),
+        };
+        let typed = command_failure(
+            FailureStage::GenerationCreation,
+            FailureCode::GenerationCreation,
+            &output,
+        )
+        .0;
+        assert_eq!(typed.code, FailureCode::GenerationCreation);
+    }
+
     #[test]
     fn provider_response_bodies_suppress_all_diagnostic_detail() {
         for delimiter in ["response body:", "ReSpOnSe BoDy:", "error: response body:"] {
@@ -2669,6 +2881,7 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
         let incomplete = ReadDiagnostics {
             tail: b"error: internal-token=secret-value-12345".to_vec(),
             complete: false,
+            ..Default::default()
         };
         assert_eq!(incomplete.display_detail(&[]), "");
         assert_eq!(ReadDiagnostics::default().display_detail(&[]), "");
@@ -3097,6 +3310,7 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
             let diagnostics = ReadDiagnostics {
                 tail: tail.as_bytes().to_vec(),
                 complete,
+                ..Default::default()
             }
             .structured(&selected, &[], true);
             assert_eq!(diagnostics.suppression_reason.as_deref(), Some(reason));
@@ -3110,6 +3324,7 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
         let diagnostics = ReadDiagnostics {
             tail: tail.into_bytes(),
             complete: true,
+            ..Default::default()
         }
         .structured(&selected, &[], true);
         assert_eq!(diagnostics.lines.len(), 3);

@@ -964,6 +964,18 @@ already applies. Their fixed stage, cause, status and retry data remain useful.
 The authenticated read path keeps its isolated credential environment and can
 return masked technical lines when the other suppression rules permit them.
 
+The fixed category is chosen only from text before the first response-body
+delimiter. Text after it is provider-controlled and can imitate a Nix line, for
+example a forged `lacks a signature` after an HTTP 500. The agent searches for
+the delimiter across the whole stream as it arrives, including across read
+boundaries, not only in the retained tail. Truncation therefore cannot evict the
+delimiter and leave body text to be classified. When no body occurs, the last
+64 KiB of output are classified even if earlier output was truncated, so a
+genuine signature failure after a large output is still named. A body with no
+diagnostic before it gives the category `unknown`. Local command failures
+(generation creation, activation submission) apply the same cut to their
+complete output.
+
 For a complete stream without that delimiter, lines that do not start with
 `error:` are dropped. Public store path names can appear in the masked detail.
 Timeout, cancellation, `require-sigs`, and credential cleanup are unchanged.
@@ -987,6 +999,11 @@ stores, so the server normalizes the report before it writes anything:
 - Diagnostics are sanitized and bounded before storage, with the same rules the
   server applies at display time. Diagnostics that fail those rules, or that
   carry a completeness flag, are not stored.
+- A report that declares itself incomplete with a top-level `"incomplete":
+  true` stays incomplete. The marker is checked before typed deserialization,
+  because serde would otherwise drop it as an unknown field. Only the JSON
+  boolean `true` counts; another value is an unknown field and is dropped by
+  both normalization and the projection.
 - A report that is oversized or cannot be read as a typed report becomes
   `{"incomplete": true}` plus only an enum-valid `stage` and `code`. The
   projection reports it as `incomplete_report`. A report of this kind never

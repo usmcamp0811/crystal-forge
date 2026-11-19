@@ -282,3 +282,29 @@ with case("signed-failure-reports-are-normalized-before-persistence"):
         found = sql_json(controller, "SELECT count(*) AS n FROM " + table + " t WHERE to_jsonb(t)::text LIKE "
                          + literal("%" + marker + "%"))
         expect_equal(found[0]["n"], 0, "marker persisted in " + table)
+
+with case("self-declared-incomplete-report-cannot-override-observed-success"):
+    # A signed report with a valid typed cause and the exact ID of a succeeded
+    # request may correct that success to failed only when the report is
+    # complete. One that declares itself incomplete must change nothing.
+    system = receipts()["callback.systemId"]
+    hostname = receipts()["callback.hostname"]
+    deployment_id = delivery_api("POST", "/api/v1/systems/" + system + "/deploy", {
+        "commit_sha": FACTS["sourceRevision"], "action": "deploy", "request_id": str(uuid.uuid4()),
+    }, expected=202)["deployment_id"]
+    controller.succeed("runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -d crystal_forge -c "
+        + shlex.quote("UPDATE pending_system_deployments SET status='succeeded', completed_at=NOW() "
+                      "WHERE id=" + literal(deployment_id) + "::uuid AND status='pending'"))
+    before = callback_snapshot()
+    expect_equal(next(row for row in before["pending"] if row["id"] == deployment_id)["status"],
+                 "succeeded", "prerequisite: observed success")
+    _vm_write(controller, "/tmp/cf-it/incomplete-report.json", json.dumps({
+        "hostname": hostname, "target_store_path": FACTS["outputPath"], "error": "x",
+        "deployment_id": deployment_id,
+        "failure": {"stage": "activation", "code": "activation_execution", "exit_code": 17,
+                    "incomplete": True}}))
+    result = json.loads(controller.succeed("node /etc/cf-it/failure-report.cjs report " + shlex.join([
+        "/run/cf-it-callback/private.pem", hostname, "/tmp/cf-it/incomplete-report.json"])))
+    expect_equal(result, {"status": 200, "body": {"status": "ok", "message": "No matching pending deployment"}},
+                 "self-declared incomplete report is a recorded no-op")
+    expect_equal(callback_snapshot(), before, "observed success and every protected record unchanged")

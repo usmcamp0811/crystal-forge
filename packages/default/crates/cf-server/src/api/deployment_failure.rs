@@ -117,14 +117,10 @@ pub(crate) fn project_failure(metadata: &Value, role: Role) -> DeploymentFailure
             view.remediation_hint = code.remediation().map(str::to_owned);
         }
     }
-    // Ingress normalization marks a report whose optional content it dropped.
-    // Such a report stays `incomplete_report` even though the typed fields that
-    // remain would parse as a complete one.
-    let marked_incomplete = structured
-        .and_then(|value| value.get("incomplete"))
-        .and_then(Value::as_bool)
-        == Some(true);
-    if let (Some(failure), false) = (parsed, marked_incomplete) {
+    // A report marked incomplete stays `incomplete_report` even though its typed
+    // fields would parse as a complete one. Ingress normalization uses the same
+    // test, so the stored and reported forms project identically.
+    if let (Some(failure), false) = (parsed, structured.is_some_and(marked_incomplete)) {
         view.reason_status = "classified".into();
         if matches!(role, Role::Operator | Role::Admin) {
             view.exit_code = failure.exit_code;
@@ -139,6 +135,14 @@ pub(crate) fn project_failure(metadata: &Value, role: Role) -> DeploymentFailure
         }
     }
     view
+}
+
+/// Returns whether a report declares itself incomplete with a top-level marker.
+///
+/// Only the JSON boolean `true` counts. Any other value is an unknown field,
+/// which normalization drops and projection ignores, so both still agree.
+fn marked_incomplete(report: &Value) -> bool {
+    report.get("incomplete").and_then(Value::as_bool) == Some(true)
 }
 
 // SECURITY: Older or future captures may carry explicit completeness flags that
@@ -190,7 +194,11 @@ pub(crate) fn normalize_reported_failure(reported: Option<&Value>) -> Normalized
     };
     let oversized =
         serde_json::to_vec(raw).map_or(true, |bytes| bytes.len() > MAX_REPORTED_FAILURE_BYTES);
-    if oversized {
+    // SECURITY: Check the marker before typed deserialization. Serde ignores
+    // unknown fields, so a typed round trip would silently drop it and turn a
+    // self-declared incomplete report into a complete one with a typed cause,
+    // which could then authorize a terminal-state override.
+    if oversized || marked_incomplete(raw) {
         return incomplete_failure(raw);
     }
     let Ok(mut failure) = serde_json::from_value::<DeploymentFailure>(raw.clone()) else {
@@ -582,6 +590,12 @@ mod tests {
             json!({"stage":"cache_acquisition","code":"dns","diagnostics":"not-an-object"}),
             json!({"stage":"activation","code":"activation_execution","exit_code":"seventeen"}),
             json!({"stage":"activation"}),
+            // A self-declared incomplete report, and markers that do not count.
+            json!({"stage":"activation","code":"activation_execution","incomplete":true}),
+            json!({"stage":"activation","code":"activation_execution","exit_code":17,
+                   "incomplete":true}),
+            json!({"stage":"activation","code":"activation_execution","incomplete":false}),
+            json!({"stage":"activation","code":"activation_execution","incomplete":"yes"}),
             json!({"code":"dns"}),
             json!({"stage":"bogus","code":"dns"}),
             json!({"stage":"activation","code":"bogus"}),
@@ -704,6 +718,36 @@ mod tests {
         let complete = json!({"stage":"activation","code":"activation_execution","exit_code":17});
         assert!(normalize_reported_failure(Some(&complete)).typed.is_some());
         // The same cause with malformed optional content must not.
+        // A report that declares itself incomplete keeps that status, even with
+        // every typed field valid.
+        for declared in [
+            json!({"stage":"activation","code":"activation_execution","incomplete":true}),
+            json!({"stage":"activation","code":"activation_execution","exit_code":17,
+                   "incomplete":true}),
+        ] {
+            let normalized = normalize_reported_failure(Some(&declared));
+            assert!(normalized.typed.is_none(), "{declared}");
+            assert_eq!(
+                normalized.stored,
+                json!({"incomplete":true,"stage":"activation","code":"activation_execution"})
+            );
+            assert_eq!(
+                view(&normalized.stored, Role::Admin)["reason_status"],
+                "incomplete_report"
+            );
+            assert_eq!(
+                view(&declared, Role::Admin)["reason_status"],
+                "incomplete_report"
+            );
+        }
+        // Only the boolean `true` is a marker; other values are dropped as unknown.
+        let not_marked =
+            json!({"stage":"activation","code":"activation_execution","incomplete":"yes"});
+        assert!(
+            normalize_reported_failure(Some(&not_marked))
+                .typed
+                .is_some()
+        );
         let malformed =
             json!({"stage":"activation","code":"activation_execution","diagnostics":"x"});
         let normalized = normalize_reported_failure(Some(&malformed));
