@@ -409,3 +409,9 @@ All results below are for source revision `d0dfcba150f205a7f025abd8611e7308ae574
 Still unverified: exact-head GitLab CI for `d0dfcba1`; narrow-screen, keyboard and error-state UI coverage; the system-detail and deploy-history surfaces that `origin/dev` changed, exercised only as an empty Systems page in the preview (no fixture systems); an unmocked OIDC provider callback.
 
 The preview was refreshed to the rebased embedded build (output `l5r2k51li1nbzjrj8a7z8fnj85rzlq1f-cf-server-0.3.0`) with the database untouched: 317 migrations applied, checksum unchanged.
+
+### GitLab CI finding at `a2a61991` and the fix
+
+The GitLab pipeline for the exact head `a2a61991` (pipeline 3090604107) FAILED in `state-machine-tests`. This was a real defect in this MR, not a flake: `poam_workflows::migration_0279_to_0284_preserves_populated_retained_cve_poam` migrates only through 0278 and then called `sync_user_role`, which this MR changed to write the 0335 grant-source columns (`column "oidc_identity_id" does not exist`). The earlier farm regression harness ran only one test of the `poam_workflows` target, so the full target was never run before the MR was reported. The CI loop stops at the first failing target, so `risk_acceptance_0298_upgrade`, `task433_assignment_visibility`, `task433_csrf` and `time_window_policy_test` did not run in CI either. The pipeline for `d0dfcba1` also showed `integration-access` failing on the library test `discovery_scope_timeout_acknowledges_reap_before_next_admission` (not an authorization test; not investigated here).
+
+Fix `310e9e8c`: the 0278 fixture now writes the historical `user_role_assignments` row directly. No assertion changed. Farm results at `310e9e8c`: full `poam_workflows` target 133 passed, 0 failed, 0 ignored; the four targets CI never reached passed (7, 1, 4 and 4 tests). A new GitLab pipeline for the new head is not yet verified.
