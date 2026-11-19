@@ -73,6 +73,7 @@ use crate::components::poam::{
 };
 use crate::components::system::config_explorer::ConfigExplorer;
 use crate::components::system::deploy_target_picker::DeployTargetPicker;
+use crate::components::system::failure_detail::{FailureDetail, failure_log_message};
 use crate::components::system::flake_position::{
     FlakePositionCard, FlakePositionNotice, LaneModel, LaneUnknown, can_draw_deployment,
 };
@@ -5786,7 +5787,8 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
     let mut filter = use_signal(|| "all".to_string());
     let mut tail = use_signal(|| true);
     let mut use_utc = use_signal(|| false);
-    let mut highlighted_event = use_signal(|| None::<String>);
+    let mut highlighted_event = use_signal(|| None::<(String, u64)>);
+    let mut requested_jump = use_signal(|| None::<(String, u64)>);
     let mut clear_before: Signal<Option<chrono::DateTime<Utc>>> = use_signal(|| None);
     // Stable DOM id for the scroll container so we can locate it (and anchored lines)
     // via document.query_selector without relying on event-based element handles.
@@ -5829,54 +5831,21 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         }
     });
 
-    // Handle jump to event from history: stop tailing, reset filter, scroll to the
-    // anchored line, and flash-highlight it for ~2.4s (design parity).
-    {
-        let jump_target = jump_target.clone();
-        use_effect(move || {
-            let Some((event_id, _nonce)) = jump_target.clone() else {
-                return;
-            };
+    // Reveal existing anchors immediately after the jump's render. Late data,
+    // filter resets and reconstructed-to-real replacements mount their own
+    // anchor below; no elapsed delay can establish that readiness.
+    use_effect(use_reactive(&jump_target, move |target| {
+        let has_target = target.is_some();
+        requested_jump.set(target);
+        if has_target {
             tail.set(false);
             filter.set("all".to_string());
-            highlighted_event.set(Some(event_id.clone()));
-
-            // Scroll the anchored line into view (center it).
-            #[cfg(target_arch = "wasm32")]
-            {
-                let event_id_scroll = event_id.clone();
-                spawn(async move {
-                    // Let the DOM update before querying for the anchor.
-                    gloo_timers::future::TimeoutFuture::new(60).await;
-                    if let Some(container) = web_sys::window()
-                        .and_then(|w| w.document())
-                        .and_then(|d| d.get_element_by_id(log_stream_id))
-                    {
-                        let selector = format!("[data-ev=\"{event_id_scroll}\"]");
-                        if let Ok(Some(el)) = container.query_selector(&selector) {
-                            if let Ok(html_el) = el.dyn_into::<web_sys::HtmlElement>() {
-                                let target = (html_el.offset_top() - container.client_height() / 2
-                                    + html_el.offset_height())
-                                .max(0);
-                                container.set_scroll_top(target);
-                            }
-                        }
-                    }
-                });
-            }
-
-            // Clear highlight after 2.4 seconds.
-            let event_id_clone = event_id.clone();
-            spawn(async move {
-                gloo_timers::future::TimeoutFuture::new(2400).await;
-                highlighted_event.with_mut(|hl| {
-                    if hl.as_ref() == Some(&event_id_clone) {
-                        *hl = None;
-                    }
-                });
-            });
-        });
-    }
+            clear_before.set(None);
+            reveal_requested_log_jump(requested_jump, highlighted_event);
+        } else {
+            highlighted_event.set(None);
+        }
+    }));
 
     // Combine reconstructed (anchored) timeline lines with real agent logs.
     // Reconstructed lines are explicitly labelled so they are not mistaken for
@@ -5890,6 +5859,11 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         for (idx, entry) in history_entries.iter().enumerate() {
             let event_id = history_event_id(entry, idx);
             let kind = classify_history_entry(entry);
+            // INVARIANT: Only exact persisted event identity replaces a
+            // reconstruction. Commits and timestamps can be shared by retries.
+            if deployment_event_has_agent_log(entry, &logs) {
+                continue;
+            }
             let base = entry.timestamp;
             let short_msg = entry
                 .change_reason
@@ -6024,80 +5998,36 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                         false,
                     );
                 }
-                HistoryEventKind::DeployFailed => {
-                    push(
-                        0,
-                        "info",
-                        format!(
-                            "[reconstructed timeline] deploy: evaluating configuration @ {sha}"
-                        ),
-                        false,
-                    );
-                    push(
-                        4,
-                        "error",
-                        format!("[reconstructed timeline] activation failed: {short_msg}"),
-                        true,
-                    );
-                    push(
-                        6,
-                        "warn",
-                        "[reconstructed timeline] deploy: rolled back to previous generation"
-                            .into(),
-                        false,
-                    );
-                }
-                HistoryEventKind::Deploy => {
-                    push(
-                        0,
-                        "info",
-                        format!(
-                            "[reconstructed timeline] deploy: evaluating configuration @ {sha}"
-                        ),
-                        false,
-                    );
-                    push(
-                        2,
-                        "info",
-                        "[reconstructed timeline] eval: success — derivations resolved, building"
-                            .into(),
-                        false,
-                    );
-                    push(
-                        5,
-                        "info",
-                        "[reconstructed timeline] build: completed".into(),
-                        false,
-                    );
-                    push(
-                        7,
-                        "info",
-                        "[reconstructed timeline] deploy: activating configuration".into(),
-                        false,
-                    );
-                    push(
-                        9,
-                        "info",
-                        format!("[reconstructed timeline] deploy: generation activated ({sha})"),
-                        true,
-                    );
+                // The history records only an outcome and its reason. It does not
+                // record evaluation, build, activation or rollback steps, so the
+                // timeline does not invent them for a failure or a success.
+                HistoryEventKind::DeployFailed | HistoryEventKind::Deploy => {
+                    if let Some((level, message)) = recorded_deploy_outcome_line(entry, &kind, &sha)
+                    {
+                        push(0, level, message, true);
+                    }
                 }
                 HistoryEventKind::StateChange => {}
             }
         }
 
-        // Add real agent-event logs (no anchors — they augment the synthesized stream).
+        // Real event IDs retain History jump targets when reconstruction is skipped.
         for entry in &logs {
             let level = match entry.level {
                 LogLevel::Info | LogLevel::Debug => "info",
                 LogLevel::Warn => "warn",
                 LogLevel::Error => "error",
             };
+            let anchor = entry.event_id.map(|id| id.to_string()).filter(|id| {
+                !combined
+                    .iter()
+                    .any(|(_, _, _, anchor)| anchor.as_ref() == Some(id))
+            });
             combined.push((
                 entry.timestamp,
                 level.to_string(),
                 entry.message.clone(),
-                None,
+                anchor,
             ));
         }
 
@@ -6295,8 +6225,10 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                             _ => "sd-log-line sd-log-info",
                         };
 
-                        let is_highlighted = event_id.is_some() && highlighted_event.read().as_ref() == event_id.as_ref();
+                        let is_highlighted = highlighted_event.read().as_ref()
+                            .is_some_and(|(id, _)| event_id.as_ref() == Some(id));
                         let highlight_class = if is_highlighted { " sd-log-hl" } else { "" };
+                        let mounted_event_id = (*event_id).clone();
 
                         let lvl_upper = level.to_uppercase();
 
@@ -6310,9 +6242,18 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                                 }
                             }
                             div {
-                                key: "{timestamp}-{message}",
+                                key: "{event_id:?}-{timestamp}-{message}",
                                 class: "{level_class}{highlight_class}",
                                 "data-ev": event_id.as_ref().map(|s| s.as_str()).unwrap_or(""),
+                                onmounted: move |_| {
+                                    // Consult the current request, not the one
+                                    // captured when this row's render began.
+                                    let is_target = requested_jump.peek().as_ref()
+                                        .is_some_and(|(id, _)| mounted_event_id.as_ref() == Some(id));
+                                    if is_target {
+                                        reveal_requested_log_jump(requested_jump, highlighted_event);
+                                    }
+                                },
                                 span { class: "sd-log-t", "{ts_str}" }
                                 span { class: "sd-log-lvl", "{lvl_upper}" }
                                 span { class: "sd-log-m", "{message}" }
@@ -6330,11 +6271,101 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
     }
 }
 
+// Keep the requested identity until the next jump so a reconstructed anchor
+// replaced by a real event can reveal itself again. Only that anchor's mount
+// retriggers scrolling; unrelated polling rows do not move the user's viewport.
+fn reveal_requested_log_jump(
+    requested_jump: Signal<Option<(String, u64)>>,
+    highlighted_event: Signal<Option<(String, u64)>>,
+) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(target) = requested_jump.peek().clone() else {
+            return;
+        };
+        let Some(container) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id("sd-log-stream-container"))
+        else {
+            return;
+        };
+        let selector = format!("[data-ev=\"{}\"]", target.0);
+        let Ok(Some(element)) = container.query_selector(&selector) else {
+            return;
+        };
+        // Native scrolling uses the correct coordinates for both the stream
+        // and the outer content scroller, regardless of the offset parent.
+        let options = web_sys::ScrollIntoViewOptions::new();
+        options.set_block(web_sys::ScrollLogicalPosition::Center);
+        options.set_inline(web_sys::ScrollLogicalPosition::Nearest);
+        element.scroll_into_view_with_scroll_into_view_options(&options);
+        let mut highlighted_event = highlighted_event;
+        highlighted_event.set(Some(target.clone()));
+        spawn(async move {
+            gloo_timers::future::TimeoutFuture::new(2400).await;
+            // A previous jump must not clear a newer highlight of the same event.
+            if requested_jump.peek().as_ref() == Some(&target) {
+                highlighted_event.with_mut(|highlight| {
+                    if highlight.as_ref() == Some(&target) {
+                        *highlight = None;
+                    }
+                });
+            }
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (requested_jump, highlighted_event);
+}
+
 fn display_log_date(timestamp: chrono::DateTime<Utc>, use_utc: bool) -> chrono::NaiveDate {
     if use_utc {
         timestamp.date_naive()
     } else {
         timestamp.with_timezone(&Local).date_naive()
+    }
+}
+
+// INVARIANT: Independent attempts remain visible even at the same commit and
+// timestamp. An absent History ID cannot match an unidentified telemetry line.
+// A recorded deployment start, success or failure that has its real agent event
+// is shown through that event alone, never through a reconstruction as well.
+fn deployment_event_has_agent_log(entry: &SystemHistoryEntry, logs: &[DeploymentLogEntry]) -> bool {
+    matches!(
+        classify_history_entry(entry),
+        HistoryEventKind::DeployStarted | HistoryEventKind::Deploy | HistoryEventKind::DeployFailed
+    ) && entry
+        .id
+        .is_some_and(|id| logs.iter().any(|log| log.event_id == Some(id)))
+}
+
+// INVARIANT: The line restates only what the recorded History event holds, its
+// outcome and message. Evaluation, build, activation and rollback steps are not
+// recorded, so none is reconstructed. Returns `None` for other event kinds.
+fn recorded_deploy_outcome_line(
+    entry: &SystemHistoryEntry,
+    kind: &HistoryEventKind,
+    sha: &str,
+) -> Option<(&'static str, String)> {
+    match kind {
+        HistoryEventKind::DeployFailed => Some((
+            "error",
+            format!(
+                "[reconstructed timeline] deploy failed @ {sha}: {}",
+                entry
+                    .failure
+                    .as_ref()
+                    .map(failure_log_message)
+                    .unwrap_or_else(|| history_event_message(entry, kind))
+            ),
+        )),
+        HistoryEventKind::Deploy => Some((
+            "info",
+            format!(
+                "[reconstructed timeline] deploy succeeded @ {sha}: {}",
+                history_event_message(entry, kind)
+            ),
+        )),
+        _ => None,
     }
 }
 
@@ -8351,7 +8382,7 @@ enum HistoryEventKind {
     DeployStarted,
     /// Config deployed through Crystal Forge (generation-changing).
     Deploy,
-    /// Deploy that failed to activate.
+    /// Deployment failure without an inferred activation or rollback stage.
     DeployFailed,
     /// Out-of-band `nixos-rebuild switch` on the host, later reconciled to a pushed commit.
     LocalRebuildMatched,
@@ -8378,6 +8409,7 @@ struct HistoryEvent {
     prev_generation: Option<i32>,
     sha: Option<String>,
     message: String,
+    failure: Option<crate::api::models::DeploymentFailureView>,
     actor: String,
     duration: Option<String>,
     store_path: Option<String>,
@@ -8491,7 +8523,7 @@ fn history_event_message(entry: &SystemHistoryEntry, kind: &HistoryEventKind) ->
         }
         HistoryEventKind::DeployFailed => {
             if is_raw_reason {
-                "Deploy failed to activate".to_string()
+                "Deployment failed".to_string()
             } else {
                 raw
             }
@@ -8646,6 +8678,7 @@ fn build_history_events(
             prev_generation,
             sha: entry.commit_hash.clone(),
             message: short_reason,
+            failure: entry.failure.clone(),
             actor: entry.actor.clone(),
             // Do not infer operation duration from spacing between history records.
             // The backend does not currently expose reliable operation start/end or
@@ -8837,6 +8870,7 @@ mod fold_tests {
             prev_generation: None,
             sha: None,
             message: String::new(),
+            failure: None,
             actor: String::new(),
             duration: None,
             store_path: None,
@@ -9374,7 +9408,11 @@ fn DeployRow(
                     }
 
                     // Message
-                    div { class: "tl-msg", "{event.message}" }
+                    if let Some(failure) = &event.failure {
+                        FailureDetail { failure: failure.clone() }
+                    } else {
+                        div { class: "tl-msg", "{event.message}" }
+                    }
 
                     // Meta row
                     div { class: "tl-meta",
@@ -12464,6 +12502,7 @@ fn synthesize_history_entries_from_commits(
         .map(|commit| {
             let timestamp = commit.deployed_at.unwrap_or(commit.committed_at);
             SystemHistoryEntry {
+                failure: None,
                 id: None,
                 timestamp,
                 occurred_at: Some(timestamp),
@@ -12518,7 +12557,15 @@ fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogE
             };
 
             DeploymentLogEntry {
-                message: event.message,
+                event_id: event.event_id,
+                deployment_id: event.deployment_id,
+                // The summary message already contains operational fields on
+                // newer servers; format the projection instead of appending it.
+                message: event
+                    .failure
+                    .as_ref()
+                    .map(failure_log_message)
+                    .unwrap_or(event.message),
                 timestamp: event.timestamp,
                 level,
                 phase: Some(if event.deployment_related {
@@ -12599,6 +12646,7 @@ mod tests {
 
     fn progress(stage: &str) -> crate::api::models::SystemDeploymentProgress {
         crate::api::models::SystemDeploymentProgress {
+            failure: None,
             id: uuid::Uuid::from_u128(7),
             stage: stage.to_string(),
             kind: "deploy".to_string(),
@@ -13453,6 +13501,7 @@ mod tests {
         let now = Utc::now();
         let entries = vec![
             SystemHistoryEntry {
+                failure: None,
                 id: None,
                 timestamp: now,
                 occurred_at: Some(now),
@@ -13486,6 +13535,7 @@ mod tests {
                 restart_type: None,
             },
             SystemHistoryEntry {
+                failure: None,
                 id: None,
                 timestamp: now - Duration::minutes(10),
                 occurred_at: Some(now - Duration::minutes(10)),
@@ -13519,6 +13569,7 @@ mod tests {
                 restart_type: None,
             },
             SystemHistoryEntry {
+                failure: None,
                 id: None,
                 timestamp: now - Duration::minutes(20),
                 occurred_at: Some(now - Duration::minutes(20)),
@@ -13570,6 +13621,9 @@ mod tests {
     fn agent_event_mapping_preserves_deployment_phase() {
         let now = Utc::now();
         let logs = map_agent_events_to_logs(vec![SystemAgentEvent {
+            event_id: None,
+            deployment_id: None,
+            failure: None,
             timestamp: now,
             level: "info".to_string(),
             event_type: "state_change".to_string(),
@@ -13581,8 +13635,178 @@ mod tests {
         assert_eq!(logs[0].phase.as_deref(), Some("Deployment"));
     }
 
+    #[test]
+    fn failed_log_correlation_requires_the_exact_persisted_event() {
+        let mut failed = history_entry("cf_deployment_failed", "agent", "cf_deployment");
+        failed.event_type = "cf_deployment_failed".into();
+        failed.id = Some(Uuid::from_u128(1));
+        failed.deployment_id = Some(Uuid::from_u128(10));
+        let mut real = crate::api::models::DeploymentLogEntry {
+            event_id: Some(Uuid::from_u128(2)),
+            deployment_id: failed.deployment_id,
+            message: failed.change_reason.clone(),
+            timestamp: failed.timestamp,
+            level: crate::api::models::LogLevel::Error,
+            phase: Some("Deployment".into()),
+        };
+        // Same deployment, timestamp and message still represent different events.
+        assert!(!super::deployment_event_has_agent_log(
+            &failed,
+            &[real.clone()]
+        ));
+        assert!(!super::deployment_event_has_agent_log(&failed, &[]));
+        real.event_id = failed.id;
+        assert!(super::deployment_event_has_agent_log(
+            &failed,
+            &[real.clone()]
+        ));
+        real.event_id = None;
+        assert!(!super::deployment_event_has_agent_log(
+            &failed,
+            &[real.clone()]
+        ));
+        failed.id = None;
+        assert!(!super::deployment_event_has_agent_log(&failed, &[real]));
+    }
+
+    // The history records an outcome, not how the deployment got there. A
+    // reconstruction must not invent evaluation, build, activation or rollback.
+    #[test]
+    fn deploy_reconstruction_restates_only_the_recorded_outcome() {
+        const INVENTED: [&str; 8] = [
+            "evaluating",
+            "eval:",
+            "derivations resolved",
+            "build:",
+            "activating",
+            "generation activated",
+            "rolled back",
+            "rollback",
+        ];
+        let mut success = history_entry("cf_deployment_succeeded", "agent", "cf_deployment");
+        success.event_type = "cf_deployment_succeeded".into();
+        let (level, message) =
+            super::recorded_deploy_outcome_line(&success, &HistoryEventKind::Deploy, "abc1234")
+                .expect("a recorded success yields one line");
+        assert_eq!(level, "info");
+        assert!(message.starts_with("[reconstructed timeline] deploy succeeded @ abc1234:"));
+
+        let mut failed = history_entry("cf_deployment_failed", "agent", "cf_deployment");
+        failed.event_type = "cf_deployment_failed".into();
+        let (level, failed_message) = super::recorded_deploy_outcome_line(
+            &failed,
+            &HistoryEventKind::DeployFailed,
+            "abc1234",
+        )
+        .expect("a recorded failure yields one line");
+        assert_eq!(level, "error");
+        assert!(failed_message.starts_with("[reconstructed timeline] deploy failed @ abc1234:"));
+
+        for text in [message, failed_message] {
+            for invented in INVENTED {
+                assert!(
+                    !text.to_lowercase().contains(invented),
+                    "invented step {invented:?} in {text:?}"
+                );
+            }
+        }
+        // Other kinds have their own reconstruction and yield nothing here.
+        for kind in [
+            HistoryEventKind::DeployStarted,
+            HistoryEventKind::Restart,
+            HistoryEventKind::AgentRestart,
+            HistoryEventKind::LocalRebuildMatched,
+            HistoryEventKind::LocalRebuildUntracked,
+            HistoryEventKind::StateChange,
+        ] {
+            assert!(super::recorded_deploy_outcome_line(&success, &kind, "abc1234").is_none());
+        }
+    }
+
+    #[test]
+    fn recorded_deployment_events_with_a_real_agent_event_are_not_reconstructed() {
+        let real = |id| crate::api::models::DeploymentLogEntry {
+            event_id: Some(id),
+            deployment_id: None,
+            message: "Deployment activated successfully".into(),
+            timestamp: Utc::now(),
+            level: crate::api::models::LogLevel::Info,
+            phase: Some("Deployment".into()),
+        };
+        for event_type in [
+            "cf_deployment_started",
+            "cf_deployment_succeeded",
+            "cf_deployment_failed",
+        ] {
+            let mut entry = history_entry(event_type, "agent", "cf_deployment");
+            entry.event_type = event_type.into();
+            entry.id = Some(Uuid::from_u128(7));
+            assert!(
+                super::deployment_event_has_agent_log(&entry, &[real(Uuid::from_u128(7))]),
+                "{event_type} with its real event must not be reconstructed"
+            );
+            // A different event, or none, keeps the reconstruction.
+            assert!(!super::deployment_event_has_agent_log(
+                &entry,
+                &[real(Uuid::from_u128(8))]
+            ));
+            assert!(!super::deployment_event_has_agent_log(&entry, &[]));
+        }
+        // Restarts and local rebuilds have no real event of this kind to prefer.
+        let mut restart = history_entry("system_reboot", "agent", "restart");
+        restart.event_type = "system_reboot".into();
+        restart.id = Some(Uuid::from_u128(7));
+        assert!(!super::deployment_event_has_agent_log(
+            &restart,
+            &[real(Uuid::from_u128(7))]
+        ));
+    }
+
+    #[test]
+    fn structured_agent_log_formats_detail_once_and_preserves_retry_identity() {
+        let event: SystemAgentEvent = serde_json::from_value(serde_json::json!({
+            "event_id": Uuid::from_u128(1), "deployment_id": Uuid::from_u128(10),
+            "timestamp": "2026-11-17T00:00:00Z", "level": "error",
+            "event_type": "cf_deployment_failed", "deployment_related": true,
+            "message": "Cache acquisition failed: DNS failure [code=dns, exit=1] Check DNS.",
+            "failure": {
+                "stage": "Cache acquisition", "summary": "DNS failure", "reason_status": "classified",
+                "code": "dns", "exit_code": 1, "remediation_hint": "Check DNS.",
+                "diagnostics": {"lines": ["error: masked lookup detail"],
+                    "cache_endpoint": "https://cache.example.test/path", "suppression_reason": null}
+            }
+        })).unwrap();
+        let mut retry = event.clone();
+        retry.event_id = Some(Uuid::from_u128(2));
+        retry.deployment_id = Some(Uuid::from_u128(20));
+        let logs = map_agent_events_to_logs(vec![event.clone(), retry]);
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].event_id, event.event_id);
+        assert_eq!(logs[0].deployment_id, event.deployment_id);
+        assert_ne!(logs[0].event_id, logs[1].event_id);
+        assert_eq!(logs[0].message, logs[1].message);
+        assert_eq!(logs[0].message.matches("DNS failure").count(), 1);
+        assert_eq!(
+            logs[0]
+                .message
+                .matches("error: masked lookup detail")
+                .count(),
+            1
+        );
+        assert!(logs[0].message.contains("Reason status: classified"));
+        assert!(logs[0].message.contains("Code: dns"));
+        assert!(logs[0].message.contains("Exit code: 1"));
+        assert!(logs[0].message.contains("Remediation: Check DNS."));
+        assert!(
+            logs[0]
+                .message
+                .contains("Cache endpoint: https://cache.example.test/path")
+        );
+    }
+
     fn history_entry(change_reason: &str, actor: &str, event_kind: &str) -> SystemHistoryEntry {
         SystemHistoryEntry {
+            failure: None,
             id: None,
             timestamp: Utc::now(),
             occurred_at: None,

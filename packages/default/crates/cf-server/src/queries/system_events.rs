@@ -32,8 +32,11 @@ pub struct PendingSystemDeployment {
     pub failure_message: Option<String>,
 }
 
+/// Carries deployment progress and unprojected metadata within the server.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SystemDeploymentProgressRow {
+    /// Carries stored failure metadata to the shared role projection only.
+    pub failure_metadata: Option<serde_json::Value>,
     pub id: Uuid,
     pub target_store_path: String,
     pub status: String,
@@ -44,7 +47,6 @@ pub struct SystemDeploymentProgressRow {
     pub applying_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub failed_at: Option<DateTime<Utc>>,
-    pub failure_message: Option<String>,
     pub target_commit: Option<String>,
     pub target_generation: Option<i64>,
 }
@@ -430,13 +432,79 @@ pub async fn mark_pending_deployment_applying_tx(
     Ok(Some(row))
 }
 
+/// Marks an unexpired pending request failed using legacy target matching.
+///
+/// # Errors
+/// Returns database errors.
 pub async fn mark_pending_deployment_failed_tx(
     tx: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
     target_store_path: &str,
     failure_message: &str,
 ) -> Result<Option<PendingSystemDeployment>> {
-    let row = find_matching_pending_deployment_tx(tx, system_id, Some(target_store_path)).await?;
+    mark_reported_deployment_failed_tx(
+        tx,
+        system_id,
+        target_store_path,
+        failure_message,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Records a failure against an exact request or legacy pending target match.
+///
+/// Only a fully typed Activation/ActivationExecution report with an explicit ID
+/// may replace observed success. Unknown, foreign, mismatched and other terminal
+/// requests return `None`; an explicit ID never falls back to target matching.
+/// Observed success events remain immutable evidence of the earlier heartbeat.
+///
+/// # Errors
+/// Returns database errors. The caller must persist the failure event in the
+/// same transaction before committing.
+pub async fn mark_reported_deployment_failed_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+    target_store_path: &str,
+    failure_message: &str,
+    deployment_id: Option<Uuid>,
+    failure: Option<&cf_protocol::deployment_failure::DeploymentFailure>,
+) -> Result<Option<PendingSystemDeployment>> {
+    use cf_protocol::deployment_failure::{FailureCode, FailureStage};
+    // CONCURRENCY: Match issuance and heartbeat lock order: system, then request.
+    // Holding the system lock also protects cleanup from concurrent reissuance.
+    let system = sqlx::query_scalar::<_, Uuid>("SELECT id FROM systems WHERE id = $1 FOR UPDATE")
+        .bind(system_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    if system.is_none() {
+        return Ok(None);
+    }
+    let activation_execution = deployment_id.is_some()
+        && failure.is_some_and(|failure| {
+            failure.stage == FailureStage::Activation
+                && failure.code == FailureCode::ActivationExecution
+        });
+    let row = if let Some(id) = deployment_id {
+        sqlx::query_as::<_, PendingSystemDeployment>(
+            r#"
+            SELECT * FROM pending_system_deployments
+            WHERE system_id = $1 AND target_store_path = $2 AND id = $3
+              AND ((status = 'pending' AND expires_at > NOW())
+                   OR (status = 'succeeded' AND $4))
+            FOR UPDATE
+            "#,
+        )
+        .bind(system_id)
+        .bind(target_store_path)
+        .bind(id)
+        .bind(activation_execution)
+        .fetch_optional(&mut **tx)
+        .await?
+    } else {
+        find_matching_pending_deployment_tx(tx, system_id, Some(target_store_path)).await?
+    };
     let Some(row) = row else {
         return Ok(None);
     };
@@ -446,20 +514,21 @@ pub async fn mark_pending_deployment_failed_tx(
         UPDATE pending_system_deployments
         SET status = 'failed',
             failed_at = COALESCE(failed_at, NOW()),
-            completed_at = COALESCE(completed_at, NOW()),
+            completed_at = NOW(),
             failure_message = $2,
             delivered_at = COALESCE(delivered_at, NOW())
         WHERE id = $1
-          AND status = 'pending'
+          AND (status = 'pending' OR (status = 'succeeded' AND $3))
         "#,
     )
     .bind(row.id)
     .bind(failure_message)
+    .bind(activation_execution)
     .execute(&mut **tx)
     .await?;
 
     if row.source.starts_with("manual_") {
-        clear_matching_manual_desired_target_tx(tx, system_id, target_store_path).await?;
+        clear_matching_manual_desired_target_tx(tx, &row).await?;
     }
 
     Ok(Some(row))
@@ -467,8 +536,7 @@ pub async fn mark_pending_deployment_failed_tx(
 
 async fn clear_matching_manual_desired_target_tx(
     tx: &mut Transaction<'_, Postgres>,
-    system_id: Uuid,
-    target_store_path: &str,
+    failed: &PendingSystemDeployment,
 ) -> Result<()> {
     sqlx::query(
         r#"
@@ -478,20 +546,33 @@ async fn clear_matching_manual_desired_target_tx(
             updated_at = NOW()
         WHERE id = $1
           AND desired_target = $2
+          AND (desired_target_set_at IS NULL OR desired_target_set_at <= $4)
+          -- A late callback must not erase another request, even for this path.
+          AND NOT EXISTS (
+              SELECT 1 FROM pending_system_deployments newer
+              WHERE newer.system_id = $1 AND newer.id <> $3
+                AND newer.status = 'pending'
+          )
         "#,
     )
-    .bind(system_id)
-    .bind(target_store_path)
+    .bind(failed.system_id)
+    .bind(&failed.target_store_path)
+    .bind(failed.id)
+    .bind(failed.issued_at)
     .execute(&mut **tx)
     .await?;
 
     Ok(())
 }
 
+/// Records structured agent failure data for role-aware API projection.
+///
+/// # Errors
+/// Returns an error if the event cannot be inserted in the transaction.
 pub async fn insert_deployment_failed_event_tx(
     tx: &mut Transaction<'_, Postgres>,
     pending: &PendingSystemDeployment,
-    failure_message: &str,
+    deployment_failure: Option<&serde_json::Value>,
 ) -> Result<()> {
     let event = PendingSystemEvent {
         event_type: SystemEventType::CfDeploymentFailed,
@@ -509,7 +590,7 @@ pub async fn insert_deployment_failed_event_tx(
         metadata: json!({
             "target_store_path": pending.target_store_path,
             "pending_deployment_id": pending.id,
-            "failure_message": failure_message,
+            "deployment_failure": deployment_failure,
         }),
     };
 
@@ -542,6 +623,10 @@ pub async fn insert_deployment_started_event_tx(
     insert_system_event_tx(tx, pending.system_id, pending.id, Utc::now(), &event).await
 }
 
+/// Returns current deployment progress and metadata for role-aware projection.
+///
+/// # Errors
+/// Returns an error if deployment progress cannot be queried.
 pub async fn get_system_deployment_progress_row(
     pool: &PgPool,
     system_id: Uuid,
@@ -559,11 +644,23 @@ pub async fn get_system_deployment_progress_row(
             psd.applying_at,
             psd.completed_at,
             psd.failed_at,
-            psd.failure_message,
+            -- SECURITY: Project metadata in Rust; never select legacy text.
+            failure_event.metadata AS failure_metadata,
             COALESCE(requested.git_commit_hash, by_output.git_commit_hash) AS target_commit,
             NULLIF(psd.metadata->>'target_generation', '')::bigint AS target_generation
         FROM pending_system_deployments psd
         LEFT JOIN systems s ON s.id = psd.system_id
+        LEFT JOIN LATERAL (
+          SELECT se.metadata
+          FROM system_events se
+          -- PERFORMANCE: Pending and successful progress need no failure scan.
+          WHERE psd.status = 'failed'
+            AND se.system_id = psd.system_id
+            AND se.deployment_id = psd.id
+            AND se.event_type = 'cf_deployment_failed'
+          ORDER BY se.occurred_at DESC, se.id DESC
+          LIMIT 1
+        ) failure_event ON TRUE
         -- INVARIANT: One store path can be the output of many commits when
         -- newer commits do not change the configuration. The commit that the
         -- request named wins; otherwise the newest commit with that output.
@@ -998,7 +1095,11 @@ pub async fn list_system_event_history_rows(
             se.desired_target_id,
             se.source,
             se.actor,
-            se.metadata,
+            -- SECURITY: Do not return raw legacy diagnostics in API metadata.
+            CASE WHEN se.event_type = 'cf_deployment_failed'
+                THEN se.metadata - 'failure_message'
+                ELSE se.metadata
+            END AS metadata,
             COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname) AS system_configuration_name,
             c.git_commit_hash AS commit_hash,
             f.name AS flake_name,
@@ -1027,6 +1128,303 @@ pub async fn list_system_event_history_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn callback_fixture(pool: &PgPool, hostname: &str) -> (Uuid, Uuid) {
+        let system: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems(hostname,public_key,derivation,desired_target,desired_target_set_at) VALUES($1,'test-key','','/nix/store/callback-system',now() - interval '1 minute') RETURNING id",
+        ).bind(hostname).fetch_one(pool).await.unwrap();
+        let deployment: Uuid = sqlx::query_scalar(
+            "INSERT INTO pending_system_deployments(system_id,target_store_path,source) VALUES($1,'/nix/store/callback-system','manual_deploy') RETURNING id",
+        ).bind(system).fetch_one(pool).await.unwrap();
+        (system, deployment)
+    }
+
+    fn activation_execution_failure() -> cf_protocol::deployment_failure::DeploymentFailure {
+        serde_json::from_value(json!({
+            "stage":"activation", "code":"activation_execution", "exit_code":17
+        }))
+        .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn callback_failure_after_heartbeat_success_preserves_newer_same_target(pool: PgPool) {
+        for newer_request in [false, true] {
+            let hostname = format!("callback-race-{newer_request}");
+            let (system, deployment) = callback_fixture(&pool, &hostname).await;
+            let mut tx = pool.begin().await.unwrap();
+            let started =
+                mark_pending_deployment_applying_tx(&mut tx, system, "/nix/store/callback-system")
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(started.id, deployment);
+            insert_deployment_started_event_tx(&mut tx, &started)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+
+            // Exercise the actual heartbeat finalizer while the activation
+            // script is still running, before its exit-17 callback arrives.
+            let mut tx = pool.begin().await.unwrap();
+            let mut previous = lock_observed_system_state_by_hostname_tx(&mut tx, &hostname)
+                .await
+                .unwrap()
+                .unwrap();
+            previous.generation = Some(1);
+            previous.store_path = Some("/nix/store/previous-system".into());
+            let report: SystemState = serde_json::from_value(json!({
+                "hostname":hostname, "change_reason":"startup", "generation":2,
+                "timestamp":Utc::now(), "store_path":"/nix/store/callback-system"
+            }))
+            .unwrap();
+            record_report_events_tx(
+                &mut tx,
+                Some(&previous),
+                &report,
+                None,
+                Some("agent_restart"),
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM pending_system_deployments WHERE id=$1")
+                    .bind(deployment)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(status, "succeeded");
+
+            let newer = if newer_request {
+                let mut tx = pool.begin().await.unwrap();
+                // Keep the original desired-target timestamp: identity, not
+                // path equality or a newer timestamp, must protect this work.
+                let id = set_pending_deployment_target_tx(
+                    &mut tx,
+                    system,
+                    Some("/nix/store/callback-system"),
+                    "manual_deploy",
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                tx.commit().await.unwrap();
+                assert_ne!(id, deployment);
+                Some(id)
+            } else {
+                None
+            };
+
+            let failure = activation_execution_failure();
+            if newer.is_some() {
+                let mut tx = pool.begin().await.unwrap();
+                assert!(
+                    mark_reported_deployment_failed_tx(
+                        &mut tx,
+                        system,
+                        "/nix/store/callback-system",
+                        failure.code.summary(),
+                        Some(Uuid::new_v4()),
+                        Some(&failure)
+                    )
+                    .await
+                    .unwrap()
+                    .is_none()
+                );
+                tx.commit().await.unwrap();
+            }
+            let mut tx = pool.begin().await.unwrap();
+            let failed = mark_reported_deployment_failed_tx(
+                &mut tx,
+                system,
+                "/nix/store/callback-system",
+                failure.code.summary(),
+                Some(deployment),
+                Some(&failure),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(failed.id, deployment);
+            insert_deployment_failed_event_tx(
+                &mut tx,
+                &failed,
+                Some(&serde_json::to_value(&failure).unwrap()),
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM pending_system_deployments WHERE id=$1")
+                    .bind(deployment)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(status, "failed");
+            let events: Vec<String> = sqlx::query_scalar(
+                "SELECT event_type FROM system_events WHERE deployment_id=$1 ORDER BY event_type",
+            )
+            .bind(deployment)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                events,
+                [
+                    "cf_deployment_failed",
+                    "cf_deployment_started",
+                    "cf_deployment_succeeded"
+                ]
+            );
+            let desired: Option<String> =
+                sqlx::query_scalar("SELECT desired_target FROM systems WHERE id=$1")
+                    .bind(system)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                desired.as_deref(),
+                newer.map(|_| "/nix/store/callback-system")
+            );
+            if let Some(newer) = newer {
+                let status: String =
+                    sqlx::query_scalar("SELECT status FROM pending_system_deployments WHERE id=$1")
+                        .bind(newer)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                assert_eq!(status, "pending");
+            }
+            // A duplicate exact callback cannot fall back to the newer request.
+            let mut tx = pool.begin().await.unwrap();
+            assert!(
+                mark_reported_deployment_failed_tx(
+                    &mut tx,
+                    system,
+                    "/nix/store/callback-system",
+                    failure.code.summary(),
+                    Some(deployment),
+                    Some(&failure)
+                )
+                .await
+                .unwrap()
+                .is_none()
+            );
+            tx.commit().await.unwrap();
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn callback_correlation_rejects_foreign_ids_and_non_execution_terminal_overrides(
+        pool: PgPool,
+    ) {
+        use cf_protocol::deployment_failure::{FailureCode, FailureStage};
+        let (system, deployment) = callback_fixture(&pool, "callback-boundary").await;
+        let (foreign_system, foreign) = callback_fixture(&pool, "callback-foreign").await;
+        let mut tx = pool.begin().await.unwrap();
+        mark_pending_deployment_succeeded_tx(&mut tx, deployment)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let execution = activation_execution_failure();
+        let mut other_code = execution.clone();
+        other_code.code = FailureCode::Activation;
+        let mut other_stage = execution.clone();
+        other_stage.stage = FailureStage::Deployment;
+        for (id, target, failure) in [
+            (
+                Some(Uuid::new_v4()),
+                "/nix/store/callback-system",
+                Some(&execution),
+            ),
+            (
+                Some(foreign),
+                "/nix/store/callback-system",
+                Some(&execution),
+            ),
+            (
+                Some(deployment),
+                "/nix/store/wrong-system",
+                Some(&execution),
+            ),
+            (
+                Some(deployment),
+                "/nix/store/callback-system",
+                Some(&other_code),
+            ),
+            (
+                Some(deployment),
+                "/nix/store/callback-system",
+                Some(&other_stage),
+            ),
+            (Some(deployment), "/nix/store/callback-system", None),
+            (None, "/nix/store/callback-system", Some(&execution)),
+        ] {
+            let mut tx = pool.begin().await.unwrap();
+            assert!(
+                mark_reported_deployment_failed_tx(&mut tx, system, target, "fixed", id, failure)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            tx.commit().await.unwrap();
+        }
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM pending_system_deployments WHERE id=$1")
+                .bind(deployment)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "succeeded");
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM pending_system_deployments WHERE id=$1 AND system_id=$2",
+        )
+        .bind(foreign)
+        .bind(foreign_system)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "pending");
+        for status in ["failed", "expired", "superseded"] {
+            sqlx::query("UPDATE pending_system_deployments SET status=$1 WHERE id=$2")
+                .bind(status)
+                .bind(deployment)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            assert!(
+                mark_reported_deployment_failed_tx(
+                    &mut tx,
+                    system,
+                    "/nix/store/callback-system",
+                    "fixed",
+                    Some(deployment),
+                    Some(&execution)
+                )
+                .await
+                .unwrap()
+                .is_none()
+            );
+            tx.commit().await.unwrap();
+        }
+        // Legacy reports continue to match pending work only.
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            mark_pending_deployment_failed_tx(
+                &mut tx,
+                foreign_system,
+                "/nix/store/callback-system",
+                "fixed"
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+        tx.commit().await.unwrap();
+    }
 
     #[test]
     fn event_type_strings_match_api_contract() {

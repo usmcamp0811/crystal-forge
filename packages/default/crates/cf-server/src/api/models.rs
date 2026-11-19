@@ -14,6 +14,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
+#[path = "deployment_failure.rs"]
+mod failure_projection;
+pub use failure_projection::DeploymentFailureView;
+pub(crate) use failure_projection::{
+    failure_metadata, normalize_reported_failure, project_failure,
+};
+
 /// Tri-state value for PATCH-style update payloads.
 ///
 /// JSON cannot, with a plain `Option<T>`, distinguish "field omitted" from
@@ -4373,8 +4380,12 @@ pub struct VerifyGenerationClosureResponse {
     pub last_seen_at: Option<DateTime<Utc>>,
 }
 
+/// Describes recent deployment progress with role-projected failure context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemDeploymentProgress {
+    /// Contains only failure information permitted for the authenticated role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<DeploymentFailureView>,
     pub id: uuid::Uuid,
     pub stage: String,
     pub kind: String,
@@ -4395,6 +4406,9 @@ pub struct SystemDeploymentProgress {
 /// A single system state transition for timeline/history views.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemHistoryEntry {
+    /// Contains only failure information permitted for the authenticated role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<DeploymentFailureView>,
     #[serde(default)]
     pub id: Option<uuid::Uuid>,
     pub timestamp: DateTime<Utc>,
@@ -4458,6 +4472,15 @@ pub struct SystemHistoryEntry {
 /// Agent-originated event shown on system details logs tab.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemAgentEvent {
+    /// Identifies the persisted lifecycle event, absent for heartbeat telemetry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<Uuid>,
+    /// Correlates this event with its deployment request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<Uuid>,
+    /// Contains only failure information permitted for the authenticated role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<DeploymentFailureView>,
     pub timestamp: DateTime<Utc>,
     pub level: String,
     pub event_type: String,

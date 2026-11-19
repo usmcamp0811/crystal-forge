@@ -1,3 +1,4 @@
+use super::failure_detail::FailureDetail;
 use crate::api::models::SystemDeploymentProgress;
 use crate::components::{Icon, IconName};
 use dioxus::prelude::*;
@@ -48,7 +49,7 @@ pub(crate) fn stage_subtext(
         "failed" => failure_message
             .filter(|message| !message.trim().is_empty())
             .map(|message| format!("Deployment failed: {message}"))
-            .unwrap_or_else(|| "Deployment failed to activate. Review logs for details.".to_string()),
+            .unwrap_or_else(|| "Deployment failed. Review logs for details.".to_string()),
         _ => String::new(),
     }
 }
@@ -125,7 +126,7 @@ pub fn PendingDeployBanner(
     );
 
     rsx! {
-        div { class: "{root_class}",
+        div { class: "{root_class}", "data-deployment-progress": "{progress.id}",
             div { class: "deploy-pending-main",
                 div { class: "deploy-pending-icon",
                     if is_done {
@@ -136,7 +137,7 @@ pub fn PendingDeployBanner(
                         span { class: "deploy-pending-spinner", "aria-hidden": "true" }
                     }
                 }
-                div { style: "min-width:0;flex:1;",
+                div { class: "deploy-pending-content",
                     div { class: "deploy-pending-title",
                         if is_done {
                             "{verb} complete"
@@ -147,20 +148,26 @@ pub fn PendingDeployBanner(
                         }
                         span { class: "mono deploy-pending-commit", "{target_chip}" }
                     }
-                    div { class: "deploy-pending-sub", title: "{subtext}", "{subtext}" }
+                    if let Some(failure) = &progress.failure {
+                        FailureDetail { failure: failure.clone() }
+                    } else {
+                        div { class: "deploy-pending-sub", title: "{subtext}", "{subtext}" }
+                    }
                 }
-                button {
-                    class: "btn btn-ghost xs focus-ring",
-                    onclick: move |_| on_view_logs.call(()),
-                    Icon { name: IconName::Terminal, size: 12 }
-                    " Logs"
-                }
-                if is_done || is_failed {
+                div { class: "deploy-pending-actions",
                     button {
-                        class: "btn-icon focus-ring",
-                        "aria-label": "Dismiss",
-                        onclick: move |_| on_dismiss.call(()),
-                        Icon { name: IconName::X, size: 14 }
+                        class: "btn btn-ghost xs focus-ring",
+                        onclick: move |_| on_view_logs.call(()),
+                        Icon { name: IconName::Terminal, size: 12 }
+                        " Logs"
+                    }
+                    if is_done || is_failed {
+                        button {
+                            class: "btn-icon focus-ring",
+                            "aria-label": "Dismiss",
+                            onclick: move |_| on_dismiss.call(()),
+                            Icon { name: IconName::X, size: 14 }
+                        }
                     }
                 }
             }
