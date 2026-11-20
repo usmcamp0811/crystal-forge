@@ -18,9 +18,6 @@ sources:
   - id: config
     resource: "Crystal Forge repository file packages/default/crates/cf-config/src/config/server.rs at commit 04f4ae9b"
     title: mcp_enable and mcp_public_url configuration and validation
-  - id: task
-    resource: "Crystal Forge repository file backlog/tasks/task-534.4 - M2-read-only-MCP-server.md at commit 04f4ae9b"
-    title: TASK-534.4 decisions
   - id: opencode-docs
     resource: "https://opencode.ai/docs/mcp-servers/"
     title: OpenCode MCP servers documentation (remote server configuration), read 2026-11-19
