@@ -283,8 +283,10 @@ with case("access-token-create-returns-secret-once-and-stores-only-its-hash"):
                  "created audit event identity")
     metadata = dict(event["metadata"])
     expect(isinstance(metadata.pop("expires_at", None), str), "audit metadata records the expiry")
+    # A read-only grant needs no production confirmation (TASK-534.5).
     expect_equal(metadata, {"name": at_facts["operatorToken"], "audience": "mcp",
-                            "scopes": at_read_scopes, "environment_ids": [at_env_id]},
+                            "scopes": at_read_scopes, "environment_ids": [at_env_id],
+                            "production_write_confirmed": False},
                  "audit metadata holds the grant and no secret or hash")
     receipt("accessTokens.sql.operatorCreate", {"hashBytes": 32, "hashIsSha256OfSecret": True,
                                                 "plaintextHits": 0, "auditEvents": 1})
