@@ -119,3 +119,14 @@ LOCK: OpenCode on vm-agent in /home/mcamp/code/crystal-forge/TASK-534.5-mcp-writ
 
 Branch `TASK-534.5-mcp-write-tools` starts at `882c4462` (TASK-534.4 head). Migration 0341 is the next free number (0337 to 0340 belong to the scan-cache-recovery work).
 <!-- SECTION:NOTES:END -->
+
+## Verification
+
+Farm PostgreSQL runs (sandbox clusters, all at the branch heads named):
+
+- `36e0f129`: `access_tokens` 45, `mcp_tools` 8, `mcp_write_poam` 7, `mcp_write_scan` 8, `poam_workflows` 133 passed; `mcp_transport` 9 passed and 1 failed (`admin_status_reports_configuration_and_requires_admin` still expected `phase: read-only` and 4 tools).
+- `d3cdf293` (expectation fixed): `mcp_transport` 10 passed, 0 failed.
+- Web UI derivation at `ad0a9114`: 965 passed, 0 failed.
+- `nix build .#okf-knowledge` passed.
+
+The integration-access scenario was updated for the released write scopes (and for the environment `color`/`is_production` fields added since TASK-534.3) but has not been run. No live write check on the dev server yet.
