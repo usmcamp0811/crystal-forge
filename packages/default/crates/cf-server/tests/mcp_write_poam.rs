@@ -4,13 +4,20 @@
 //! migrations. Tokens are issued through the access-token service and admitted
 //! with `validate_presented_token`, as the MCP transport does, so the in-
 //! transaction token-row check sees real rows. Tests call the tool functions
-//! directly.
+//! directly. The system-move race drives the real system edit handler over
+//! HTTP with an Admin browser session.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use axum::{Router, routing::patch};
 use chrono::{NaiveDate, Utc};
 use crystal_forge::api::models::CreateAccessTokenRequest;
 use crystal_forge::auth::authorization::CredentialIdentity;
+use crystal_forge::auth::session::{
+    CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token,
+};
+use crystal_forge::handlers::{agent_request::CFState, api::systems};
 use crystal_forge::mcp::poam_write::{update_poam_progress, verify_poam};
 use crystal_forge::mcp::tools::{ToolCaller, ToolError};
 use crystal_forge::models::auth_identity::AuthRole;
@@ -19,13 +26,18 @@ use crystal_forge::models::poam::{
     UpdateMilestoneRequest,
 };
 use crystal_forge::queries::auth_identity::{
-    clear_user_environment_memberships, insert_user_environment_membership, sync_user_role,
+    clear_user_environment_memberships, create_user_session, insert_user_environment_membership,
+    sync_user_role,
 };
 use crystal_forge::queries::users::insert_user;
 use crystal_forge::services::access_tokens::{
     self as token_service, AccessTokenSettings, validate_presented_token,
 };
 use crystal_forge::services::poam::{self as poam_service, PoamActor, SystemClock};
+use crystal_forge::{
+    config::ServerConfig, queue::QueueNotifier, server::jobs::BackgroundJobRegistry,
+};
+use reqwest::Client;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -1144,4 +1156,365 @@ async fn a_write_in_progress_blocks_deactivation_and_moves_until_it_commits(pool
     // The committed write releases its scope locks.
     assert!(!blocked_by_lock(&pool, &deactivate).await);
     assert!(!blocked_by_lock(&pool, &move_system).await);
+}
+
+// ---------------------------------------------------------------------------
+// Verification against the real system move
+// ---------------------------------------------------------------------------
+
+/// The first lock statement of `verify_once` (`lock_cve_keys_tx`), byte for
+/// byte, for `lock_waiter_seen`.
+const VERIFY_CVE_KEY_LOCK_SQL: &str = "SELECT lock_poam_cve_key(key.cve_id)\n           FROM (SELECT DISTINCT unnest($1::text[]) AS cve_id ORDER BY cve_id) key";
+
+const MOVE_CSRF: &str = "mcp-write-move-csrf";
+
+/// The real `PATCH /api/v1/systems/:id` handler (`update_system_handler`),
+/// mounted on the path of `bin/server.rs`, with an Admin browser session.
+struct MoveApi {
+    base: String,
+    client: Client,
+    session: String,
+}
+
+async fn move_api(pool: &PgPool, admin: Uuid) -> MoveApi {
+    let session = format!("mcp-write-move-session-{}", Uuid::new_v4().simple());
+    create_user_session(
+        pool,
+        admin,
+        hash_token(&session),
+        Utc::now() + chrono::Duration::hours(1),
+        Some("mcp-write-poam-test".into()),
+        Some("127.0.0.1".into()),
+        "local".into(),
+    )
+    .await
+    .expect("create Admin session");
+    let state = CFState::new(
+        pool.clone(),
+        ServerConfig::default(),
+        Arc::new(QueueNotifier::new()),
+        BackgroundJobRegistry::new(),
+    );
+    let app = Router::new()
+        .route("/api/v1/systems/:id", patch(systems::update_system_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind system move server");
+    let address = listener.local_addr().expect("read system move address");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve system move API")
+    });
+    MoveApi {
+        base: format!("http://{address}"),
+        client: Client::new(),
+        session,
+    }
+}
+
+impl MoveApi {
+    /// Sends one system edit with a matching double-submit CSRF token and
+    /// returns the HTTP status and body.
+    async fn move_system(&self, system_id: Uuid, body: &Value) -> (u16, String) {
+        let response = self
+            .client
+            .patch(format!("{}/api/v1/systems/{system_id}", self.base))
+            .header(
+                "cookie",
+                format!(
+                    "{SESSION_COOKIE_NAME}={}; {CSRF_COOKIE_NAME}={MOVE_CSRF}",
+                    self.session
+                ),
+            )
+            .header(CSRF_HEADER_NAME.as_str(), MOVE_CSRF)
+            .json(body)
+            .send()
+            .await
+            .expect("send system move");
+        let status = response.status().as_u16();
+        let text = response.text().await.expect("read system move response");
+        (status, text)
+    }
+}
+
+/// Returns the edit body that keeps every current value of the system and
+/// changes only its environment.
+async fn move_body(pool: &PgPool, system_id: Uuid, environment_id: Uuid) -> Value {
+    let (hostname, configuration, flake, environment): (String, Option<String>, String, String) =
+        sqlx::query_as(
+            "SELECT s.hostname,s.system_configuration_name,f.name,e.name \
+             FROM systems s JOIN flakes f ON f.id=s.flake_id \
+             JOIN environments e ON e.id=$2 WHERE s.id=$1",
+        )
+        .bind(system_id)
+        .bind(environment_id)
+        .fetch_one(pool)
+        .await
+        .expect("system move body");
+    json!({
+        "hostname": hostname,
+        "system_configuration_name": configuration,
+        "flake_name": flake,
+        "environment": environment,
+        "deployment_policy": "manual",
+    })
+}
+
+async fn system_environment(pool: &PgPool, system_id: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar("SELECT environment_id FROM systems WHERE id=$1")
+        .bind(system_id)
+        .fetch_one(pool)
+        .await
+        .expect("system environment")
+}
+
+async fn attempt_count(pool: &PgPool, poam_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM poam_verification_attempts WHERE poam_id=$1")
+        .bind(poam_id)
+        .fetch_one(pool)
+        .await
+        .expect("attempt count")
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn verification_serializes_with_a_real_system_move(pool: PgPool) {
+    let fleet = fleet(&pool).await;
+    let owner = user(&pool, AuthRole::Operator, &[fleet.env_a]).await;
+    let token = issue(&pool, owner, WRITE_VERIFY, &[fleet.env_a]).await;
+    let system_id = fleet.observations_a[0].system_id;
+    let (poam_id, revision) = create_poam(&pool, &fleet.creator, &fleet.observations_a[0]).await;
+    progress(
+        &pool,
+        &token,
+        poam_id,
+        revision,
+        json!({"type": "set_status", "status": "awaiting_verification"}),
+    )
+    .await
+    .expect("await verification");
+    let api = move_api(&pool, fleet.creator.user_id).await;
+    let to_b = move_body(&pool, system_id, fleet.env_b).await;
+    let to_a = move_body(&pool, system_id, fleet.env_a).await;
+
+    // Scenario a: verification races the real move handler (A to B), and the
+    // system then moves back to A for the next iteration.
+    //
+    // CONCURRENCY: Both transactions take the exclusive advisory key of
+    // CVE-2099-0701 first (`lock_cve_keys_tx` and the move's
+    // `lock_poam_cve_key`) and hold it until commit, so they serialize
+    // completely. There are only two coherent results:
+    // - verification held the key first: it records an attempt while the
+    //   system is still in A, and the move commits after it;
+    // - the move held the key first: verification observes the system in B
+    //   and returns `NotFound` without an attempt.
+    // Any other result, a deadlock (40P01 surfaced as an error or a 500 from
+    // the move, which does not retry it) or a timeout fails the test. The join
+    // order alternates so both sides get the first poll.
+    for iteration in 0..20 {
+        let revision = current_revision(&pool, poam_id).await;
+        let attempts = attempt_count(&pool, poam_id).await;
+        let verify = verify_poam(
+            &pool,
+            &token.caller,
+            json!({"poam_id": poam_id, "revision": revision}),
+        );
+        let moving = api.move_system(system_id, &to_b);
+        let (verified, moved) = if iteration % 2 == 0 {
+            tokio::time::timeout(RACE_TIMEOUT, futures::future::join(verify, moving))
+                .await
+                .expect("race finishes")
+        } else {
+            let (moved, verified) =
+                tokio::time::timeout(RACE_TIMEOUT, futures::future::join(moving, verify))
+                    .await
+                    .expect("race finishes");
+            (verified, moved)
+        };
+
+        assert_eq!(moved.0, 200, "iteration {iteration}: move: {}", moved.1);
+        assert_eq!(
+            system_environment(&pool, system_id).await,
+            Some(fleet.env_b),
+            "iteration {iteration}"
+        );
+        match verified {
+            Ok(result) => {
+                assert_eq!(revision_of(&result), revision + 1, "iteration {iteration}");
+                assert_eq!(result["outcome"], "rejected", "iteration {iteration}");
+                let attempt_id: Uuid =
+                    serde_json::from_value(result["attempt_id"].clone()).expect("attempt id");
+                let (poam_revision, sealed): (i64, bool) = sqlx::query_as(
+                    "SELECT poam_revision,sealed_at IS NOT NULL \
+                     FROM poam_verification_attempts WHERE id=$1 AND poam_id=$2",
+                )
+                .bind(attempt_id)
+                .bind(poam_id)
+                .fetch_one(&pool)
+                .await
+                .expect("attempt row");
+                assert_eq!(poam_revision, revision, "iteration {iteration}");
+                assert!(sealed, "iteration {iteration}");
+                assert_eq!(attempt_count(&pool, poam_id).await, attempts + 1);
+                assert_eq!(current_revision(&pool, poam_id).await, revision + 1);
+            }
+            Err(ToolError::NotFound) => {
+                assert_eq!(attempt_count(&pool, poam_id).await, attempts);
+                assert_eq!(current_revision(&pool, poam_id).await, revision);
+            }
+            Err(error) => panic!("iteration {iteration}: unexpected verification: {error:?}"),
+        }
+
+        let back = tokio::time::timeout(RACE_TIMEOUT, api.move_system(system_id, &to_a))
+            .await
+            .expect("move back finishes");
+        assert_eq!(back.0, 200, "iteration {iteration}: move back: {}", back.1);
+        assert_eq!(
+            system_environment(&pool, system_id).await,
+            Some(fleet.env_a)
+        );
+    }
+
+    // Scenario b: a move transaction runs the statements of
+    // `update_system_handler` in its order. It holds its first locks (the
+    // CVE keys, then source and destination environments `FOR UPDATE`) while
+    // verification starts. Verification waits at its first lock, the CVE key.
+    // The move then takes the rest of its locks, changes the environment and
+    // commits. Under READ COMMITTED the verification statements after the
+    // wait see the system in B, so verification is `NotFound` and records
+    // nothing.
+    let revision = current_revision(&pool, poam_id).await;
+    let attempts = attempt_count(&pool, poam_id).await;
+    let mut move_tx = pool.begin().await.expect("begin move");
+    let preliminary: Option<Uuid> =
+        sqlx::query_scalar("SELECT environment_id FROM systems WHERE id=$1")
+            .bind(system_id)
+            .fetch_one(&mut *move_tx)
+            .await
+            .expect("preliminary environment");
+    assert_eq!(preliminary, Some(fleet.env_a));
+    let environment_b_name = to_b["environment"].as_str().expect("environment name");
+    let cve_keys: Vec<String> = sqlx::query_scalar(
+        r#"SELECT DISTINCT canonical_cve_id FROM (
+             SELECT canonical_cve_id FROM poam_cve_findings
+             WHERE system_id=$1
+             UNION ALL
+             SELECT disposition.canonical_cve_id
+             FROM cve_environment_dispositions disposition
+             WHERE disposition.state='scheduled'
+               AND disposition.retired_at IS NULL
+               AND (disposition.environment_id=(SELECT environment_id
+                    FROM systems WHERE id=$1)
+                 OR disposition.environment_id=(SELECT id FROM environments
+                    WHERE name=$2))
+           ) keys ORDER BY canonical_cve_id"#,
+    )
+    .bind(system_id)
+    .bind(environment_b_name)
+    .fetch_all(&mut *move_tx)
+    .await
+    .expect("move CVE keys");
+    assert!(cve_keys.iter().any(|key| key == "CVE-2099-0701"));
+    sqlx::query(
+        r#"SELECT lock_poam_cve_key(key.cve_id)
+           FROM (SELECT unnest($1::text[]) AS cve_id ORDER BY cve_id) key"#,
+    )
+    .bind(&cve_keys)
+    .execute(&mut *move_tx)
+    .await
+    .expect("lock move CVE keys");
+    let mut environment_ids = vec![fleet.env_a, fleet.env_b];
+    environment_ids.sort();
+    sqlx::query("SELECT id FROM environments WHERE id=ANY($1) ORDER BY id FOR UPDATE")
+        .bind(&environment_ids)
+        .execute(&mut *move_tx)
+        .await
+        .expect("lock move environments");
+
+    let release = async {
+        let waited = lock_waiter_seen(&pool, VERIFY_CVE_KEY_LOCK_SQL).await;
+        sqlx::query("SELECT lock_poam_finding_key($1,$2)")
+            .bind(system_id)
+            .bind(Uuid::nil())
+            .execute(&mut *move_tx)
+            .await
+            .expect("lock move system key");
+        sqlx::query(
+            r#"SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id)
+               FROM (
+                 SELECT finding.system_id,finding.policy_lineage_id
+                 FROM poam_findings finding WHERE finding.system_id=$1
+                 ORDER BY finding.system_id,finding.policy_lineage_id
+               ) key"#,
+        )
+        .bind(system_id)
+        .execute(&mut *move_tx)
+        .await
+        .expect("lock move policy finding keys");
+        sqlx::query(
+            r#"SELECT lock_poam_cve_finding_key(
+                        key.system_id,key.canonical_cve_id,key.canonical_package_name)
+               FROM (
+                 SELECT finding.system_id,finding.canonical_cve_id,
+                        finding.canonical_package_name
+                 FROM poam_cve_findings finding WHERE finding.system_id=$1
+                 ORDER BY finding.system_id,finding.canonical_cve_id,
+                          finding.canonical_package_name
+               ) key"#,
+        )
+        .bind(system_id)
+        .execute(&mut *move_tx)
+        .await
+        .expect("lock move CVE finding keys");
+        sqlx::query(
+            "SELECT environment_id, management_mode, parent_host_id, is_active
+             FROM systems WHERE id=$1 FOR UPDATE",
+        )
+        .bind(system_id)
+        .execute(&mut *move_tx)
+        .await
+        .expect("lock moved system");
+        // `update_system_metadata` with unchanged FQDN and heartbeat; every
+        // column except the environment keeps its value.
+        sqlx::query(
+            "UPDATE systems
+             SET hostname = hostname,
+                 environment_id = $1,
+                 flake_id = flake_id,
+                 system_configuration_name = system_configuration_name,
+                 deployment_policy = deployment_policy,
+                 updated_at = NOW()
+              WHERE id = $2",
+        )
+        .bind(fleet.env_b)
+        .bind(system_id)
+        .execute(&mut *move_tx)
+        .await
+        .expect("move system to B");
+        move_tx.commit().await.expect("commit move");
+        waited
+    };
+    let (result, waited) = tokio::time::timeout(
+        RACE_TIMEOUT,
+        futures::future::join(
+            verify_poam(
+                &pool,
+                &token.caller,
+                json!({"poam_id": poam_id, "revision": revision}),
+            ),
+            release,
+        ),
+    )
+    .await
+    .expect("race finishes");
+
+    assert!(waited, "verification must wait for the move's first lock");
+    assert!(matches!(result, Err(ToolError::NotFound)), "{result:?}");
+    assert_eq!(
+        system_environment(&pool, system_id).await,
+        Some(fleet.env_b)
+    );
+    assert_eq!(attempt_count(&pool, poam_id).await, attempts);
+    assert_eq!(current_revision(&pool, poam_id).await, revision);
 }

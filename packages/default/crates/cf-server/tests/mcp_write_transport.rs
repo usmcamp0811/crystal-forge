@@ -796,6 +796,102 @@ async fn verify_poam_on_a_poam_not_awaiting_verification_is_invalid_arguments(po
     assert_eq!(attempts, 0);
 }
 
+/// Mirrors the direct `verify_poam_records_an_attributed_attempt_and_never_closes`
+/// test in `mcp_write_poam` over `/mcp`. The scan still reports the CVE, so
+/// the attempt is `rejected`; the tool never closes the POA&M.
+#[sqlx::test]
+async fn verify_poam_over_http_records_a_sealed_attributed_attempt(pool: PgPool) {
+    let env = environment(&pool).await;
+    let (owner, _) = user(&pool, AuthRole::Operator, &[env]).await;
+    let token = issue(&pool, owner, WRITE_VERIFY, &[env]).await;
+    let (poam_id, revision) = open_poam(&pool, env).await;
+    let server = start(&pool).await;
+
+    let awaiting = server
+        .call(
+            &token,
+            "update_poam_progress",
+            json!({
+                "poam_id": poam_id,
+                "revision": revision,
+                "action": { "type": "set_status", "status": "awaiting_verification" },
+            }),
+        )
+        .await;
+    let awaiting = structured(&awaiting);
+    assert_eq!(awaiting["status"], "awaiting_verification");
+    let before = awaiting["revision"].as_i64().expect("revision");
+
+    let reply = server
+        .call(
+            &token,
+            "verify_poam",
+            json!({ "poam_id": poam_id, "revision": before }),
+        )
+        .await;
+    let result = structured(&reply);
+    assert_eq!(result["outcome"], "rejected", "{}", reply.text);
+    assert_eq!(result["revision"], before + 1, "{}", reply.text);
+    let attempt_id: Uuid =
+        serde_json::from_value(result["attempt_id"].clone()).expect("attempt id");
+    assert_eq!(current_revision(&pool, poam_id).await, before + 1);
+
+    let (sealed, access_token_id, via_agent, access_token_name, poam_revision, attempted_by): (
+        bool,
+        Option<Uuid>,
+        bool,
+        Option<String>,
+        i64,
+        Uuid,
+    ) = sqlx::query_as(
+        "SELECT sealed_at IS NOT NULL,access_token_id,via_agent,access_token_name, \
+         poam_revision,attempted_by FROM poam_verification_attempts WHERE id=$1 AND poam_id=$2",
+    )
+    .bind(attempt_id)
+    .bind(poam_id)
+    .fetch_one(&pool)
+    .await
+    .expect("attempt row");
+    assert!(sealed);
+    assert_eq!(access_token_id, Some(token.id));
+    assert!(via_agent);
+    assert_eq!(access_token_name.as_deref(), Some(token.name.as_str()));
+    // The attempt records the revision that it verified, before the bump.
+    assert_eq!(poam_revision, before);
+    assert_eq!(attempted_by, owner);
+
+    let (status, closed): (String, bool) =
+        sqlx::query_as("SELECT status,closed_at IS NOT NULL FROM poams WHERE id=$1")
+            .bind(poam_id)
+            .fetch_one(&pool)
+            .await
+            .expect("POA&M state");
+    assert_ne!(status, "completed");
+    assert_eq!(status, "awaiting_verification");
+    assert!(!closed);
+
+    let activity_token: Option<Uuid> = sqlx::query_scalar(
+        "SELECT access_token_id FROM poam_activity WHERE poam_id=$1 AND kind='verification_attempted'",
+    )
+    .bind(poam_id)
+    .fetch_one(&pool)
+    .await
+    .expect("verification activity");
+    assert_eq!(activity_token, Some(token.id));
+
+    let (audit_token, via): (Option<Uuid>, Option<String>) = sqlx::query_as(
+        "SELECT access_token_id,metadata->>'via' FROM admin_audit_events \
+         WHERE action='poam_verification_attempted' AND target=$1",
+    )
+    .bind(format!("poam:{poam_id}"))
+    .fetch_one(&pool)
+    .await
+    .expect("verification audit row");
+    assert_eq!(audit_token, Some(token.id));
+    assert_eq!(via.as_deref(), Some("mcp"));
+    assert!(denied_rows(&pool, token.id).await.is_empty());
+}
+
 /// A token hard delete sets `admin_audit_events.access_token_id` to `NULL`.
 /// The Audit Log still marks the events as agent actions and shows the name
 /// snapshot. The token has only audit rows (a scan request and a denied
