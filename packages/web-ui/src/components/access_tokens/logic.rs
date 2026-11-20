@@ -7,13 +7,13 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Days, Utc};
 use uuid::Uuid;
 
 use crate::api::client::AccessTokenApiError;
 use crate::api::models::{
-    AccessTokenDto, AccessTokenEnvironmentDto, AccessTokenMcpDto, AccessTokenPolicyDto,
-    AccessTokenPolicyScopeDto, AccessTokenStatus, CreateAccessTokenRequest,
+    AccessTokenDto, AccessTokenMcpDto, AccessTokenPolicyDto, AccessTokenPolicyScopeDto,
+    AccessTokenStatus, CreateAccessTokenRequest, Role,
 };
 use crate::components::icon::IconName;
 
@@ -23,11 +23,16 @@ pub(super) const NAME_MAX_CHARS: usize = 100;
 pub(super) const MAX_ENVIRONMENTS: usize = 50;
 /// Tokens requested per list page. The server accepts 1 to 100.
 pub(super) const LIST_PAGE_SIZE: u32 = 25;
-/// Placeholder shown while the secret is hidden. Independent of the secret.
-pub(super) const MASKED_TOKEN: &str = "cfat_v1_••••••••••••••••••••••••••••••••";
+/// Bullets that stand in for the secret part of a hidden token. The design
+/// shows 28; the count does not reveal the real secret length.
+const MASK_BULLETS: usize = 28;
+/// Fallback dot color for an environment without a usable color.
+const ENV_COLOR_FALLBACK: &str = "var(--cf-text-muted)";
 /// Header example for the reveal view. Names an environment variable, never
 /// the secret.
-pub(super) const AUTH_HEADER_EXAMPLE: &str = "Authorization: Bearer $CF_ACCESS_TOKEN";
+pub(super) const AUTH_HEADER_EXAMPLE: &str = "Authorization: Bearer $CF_MCP_TOKEN";
+/// Reads a user's own sign-out and revocation behavior, shown under the list.
+const FOOTER_NOTE: &str = "Tokens keep working after you sign out of the browser. They stop on revocation, expiry, account disable, or when your role or environment access is removed.";
 /// Shown when a create request may have succeeded without the browser seeing
 /// the secret.
 pub(super) const CREATE_UNKNOWN_OUTCOME: &str = "The server response was not received, so the token may have been created. Close this dialog, check the access token list, and revoke any token you do not recognize. Crystal Forge cannot show a lost secret again.";
@@ -124,14 +129,18 @@ pub(super) fn status_presentation(status: AccessTokenStatus) -> StatusPresentati
     }
 }
 
-/// Returns whether Rotate and Revoke apply to a token in this status.
+/// Returns whether a token is live: not revoked and not expired.
 ///
-/// Only a token that can authenticate offers them; every other row offers
-/// Details only.
-pub(super) fn can_manage(status: AccessTokenStatus) -> bool {
+/// The approved design offers Rotate and Revoke for every live token,
+/// including one whose owner access is suspended, so the owner can still
+/// revoke it. Every other row offers Details only. The server decides whether
+/// a rotation of a suspended token is permitted.
+pub(super) fn is_live(status: AccessTokenStatus) -> bool {
     matches!(
         status,
-        AccessTokenStatus::Active | AccessTokenStatus::ExpiringSoon
+        AccessTokenStatus::Active
+            | AccessTokenStatus::ExpiringSoon
+            | AccessTokenStatus::OwnerSuspended
     )
 }
 
@@ -146,6 +155,24 @@ fn plural(count: i64, unit: &str) -> String {
 /// Formats a timestamp as a UTC calendar date, for example `2026-12-02`.
 pub(super) fn format_date(timestamp: DateTime<Utc>) -> String {
     timestamp.format("%Y-%m-%d").to_string()
+}
+
+/// Formats a timestamp as a short UTC date, for example `Nov 16`.
+///
+/// The year is omitted, as in the approved design. Callers keep the full date
+/// (see [`format_date`]) in a `title` attribute.
+pub(super) fn format_short_date(timestamp: DateTime<Utc>) -> String {
+    timestamp.format("%b %-d").to_string()
+}
+
+/// Returns the short date on which a token created at `now` with a lifetime of
+/// `days` expires, for example `Dec 16`.
+///
+/// Pure calendar arithmetic on a UTC timestamp, so it works in the browser
+/// build. A lifetime that overflows the calendar returns `-`.
+pub(super) fn expiry_date(now: DateTime<Utc>, days: u32) -> String {
+    now.checked_add_days(Days::new(u64::from(days)))
+        .map_or_else(|| "-".to_string(), format_short_date)
 }
 
 /// Describes a past instant relative to `now`. A future instant reads as now.
@@ -178,37 +205,129 @@ pub(super) fn relative_expiry(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> 
     }
 }
 
-/// Describes the last use of a token. `None` means the token was never used.
-pub(super) fn last_used_text(last_used_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
-    last_used_at.map_or_else(|| "Never".to_string(), |at| relative_past(at, now))
+/// Describes the last use of a token as a short date. `None` means the token
+/// was never used and reads `never`.
+pub(super) fn last_used_short(last_used_at: Option<DateTime<Utc>>) -> String {
+    last_used_at.map_or_else(|| "never".to_string(), format_short_date)
 }
 
-/// Returns an environment name, marked when the environment is inactive.
-pub(super) fn environment_label(environment: &AccessTokenEnvironmentDto) -> String {
-    if environment.is_active {
-        environment.name.clone()
+/// Returns the `title` text of a last-used cell: the full date and the age.
+pub(super) fn last_used_title(last_used_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+    last_used_at.map_or_else(
+        || "This token has not been used".to_string(),
+        |at| format!("{} ({})", format_date(at), relative_past(at, now)),
+    )
+}
+
+/// Returns a CSS color for an environment dot.
+///
+/// The server sends `#RRGGBB` or nothing. The value goes into a `style`
+/// attribute, so anything that is not a `#` followed by three or six hex
+/// digits falls back to the muted text color.
+pub(super) fn env_dot_color(color: Option<&str>) -> String {
+    match color {
+        Some(value)
+            if value.strip_prefix('#').is_some_and(|hex| {
+                matches!(hex.len(), 3 | 6) && hex.chars().all(|c| c.is_ascii_hexdigit())
+            }) =>
+        {
+            value.to_string()
+        }
+        _ => ENV_COLOR_FALLBACK.to_string(),
+    }
+}
+
+/// Returns the highest role of a user. A user with no role reads as Viewer,
+/// the least privileged.
+pub(super) fn highest_role(roles: &[Role]) -> Role {
+    if roles.contains(&Role::Admin) {
+        Role::Admin
+    } else if roles.contains(&Role::Operator) {
+        Role::Operator
     } else {
-        format!("{} (inactive)", environment.name)
+        Role::Viewer
     }
 }
 
-/// Summarizes granted environments: up to two names, then a count.
-pub(super) fn environment_summary(environments: &[AccessTokenEnvironmentDto]) -> String {
-    match environments {
-        [] => "None".to_string(),
-        [one] => environment_label(one),
-        [first, second] => format!(
-            "{}, {}",
-            environment_label(first),
-            environment_label(second)
-        ),
-        [first, second, rest @ ..] => format!(
-            "{}, {} +{} more",
-            environment_label(first),
-            environment_label(second),
-            rest.len()
-        ),
+/// Returns the display name of a role.
+pub(super) fn role_label(role: Role) -> &'static str {
+    match role {
+        Role::Admin => "Admin",
+        Role::Operator => "Operator",
+        Role::Viewer => "Viewer",
     }
+}
+
+/// Returns the description under the card title.
+pub(super) fn card_description(role: Role) -> String {
+    let approval = if role == Role::Viewer {
+        " Viewer tokens are read-only."
+    } else {
+        " No administrator approval needed for allowed scopes."
+    };
+    format!(
+        "Connect a coding agent to your CVE and POA&M work.{approval} Tokens never exceed your role or assigned environments."
+    )
+}
+
+/// Returns the sentence under the create dialog title.
+pub(super) fn create_intro(role: Role) -> String {
+    let approval = if role == Role::Operator {
+        "Operator access does not require Admin approval. "
+    } else {
+        ""
+    };
+    format!("Create your own credential for an agent. {approval}The secret is shown once.")
+}
+
+/// Returns the help line of the Environments section.
+pub(super) fn environments_help(role: Role) -> &'static str {
+    if role == Role::Admin {
+        "Select explicit environments. Admin tokens never get an implicit all-environments grant."
+    } else {
+        "Select at least one of your assigned environments."
+    }
+}
+
+/// Returns the sentence of the Review box about the role and grant limits.
+pub(super) fn review_note(role: Role) -> String {
+    format!(
+        "Cannot exceed your current {} role or assigned environments. Grants are fixed after creation; to change them, create a replacement.",
+        role_label(role)
+    )
+}
+
+/// Returns the text of the empty list state.
+pub(super) fn empty_list_text(role: Role) -> String {
+    let verb = if role == Role::Viewer {
+        "read "
+    } else {
+        "read and work on "
+    };
+    format!("Create one to let an MCP coding agent {verb}CVEs and POA&Ms in your environments.")
+}
+
+/// Returns the help text under the token list.
+///
+/// The sentence about OIDC appears only for an OIDC-owned user, and only with
+/// the number of hours that the server reported.
+pub(super) fn footer_note(oidc_owned: bool, max_age_hours: Option<u32>) -> String {
+    match (oidc_owned, max_age_hours) {
+        (true, Some(hours)) => format!(
+            "{FOOTER_NOTE} OIDC tokens pause if your group membership hasn't been refreshed by a sign-in in the last {hours} hours."
+        ),
+        _ => FOOTER_NOTE.to_string(),
+    }
+}
+
+/// Returns the masked form of a token: its public prefix and id, then
+/// bullets in place of the secret.
+///
+/// SECURITY: The input is the public token id, never the token text, so this
+/// function cannot leak any part of the secret. The 32 lowercase hex digits
+/// equal the id embedded in the plaintext token.
+pub(super) fn masked_token(id: Uuid) -> String {
+    format!("cfat_v1_{}_{}", id.simple(), "•".repeat(MASK_BULLETS))
 }
 
 fn is_read_scope(scope: &str) -> bool {
@@ -270,13 +389,9 @@ pub(super) fn mcp_endpoint_text(mcp: Option<&AccessTokenMcpDto>) -> String {
     }
 }
 
-/// Returns the display name of a token audience.
+/// Returns the short type name of a token audience, for the Type chip.
 pub(super) fn audience_label(audience: &str) -> &str {
-    if audience == "mcp" {
-        "MCP Server"
-    } else {
-        audience
-    }
+    if audience == "mcp" { "MCP" } else { audience }
 }
 
 /// Returns why a scope cannot be selected, or `None` for an available scope.
@@ -339,14 +454,62 @@ pub(super) fn create_failure(error: &AccessTokenApiError) -> CreateErrors {
     errors
 }
 
-/// Maps an audit action name to a short label. Unknown names pass through.
+/// Maps an audit action name to an activity line without its date. Unknown
+/// names pass through.
 pub(super) fn event_label(action: &str) -> String {
     match action {
-        "access_token_created" => "Created".to_string(),
+        "access_token_created" => "Created by you from Profile".to_string(),
         "access_token_rotated" => "Rotated".to_string(),
-        "access_token_revoked" => "Revoked".to_string(),
+        "access_token_revoked" => "Revoked by you".to_string(),
         other => other.to_string(),
     }
+}
+
+/// Returns the name of the signed-in owner for the Details drawer: the display
+/// name when set, otherwise the part of the email before `@`.
+pub(super) fn owner_name(display_name: Option<&str>, email: &str) -> String {
+    display_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map_or_else(
+            || email.split('@').next().unwrap_or_default().to_string(),
+            str::to_string,
+        )
+}
+
+/// Returns the line under the "Effective now" chips for a token without
+/// effective environments: `No effective access.`, with the token status for
+/// a token that is not live.
+pub(super) fn no_effective_access_text(status: AccessTokenStatus) -> String {
+    if is_live(status) {
+        "No effective access.".to_string()
+    } else {
+        format!(
+            "No effective access (token {}).",
+            status_presentation(status).label.to_lowercase()
+        )
+    }
+}
+
+/// Returns the line that names granted scopes the owner's current role no
+/// longer permits, or `None` when every granted scope is permitted.
+///
+/// The approved design has no such line. The effective-access response
+/// reports it, and hiding a shrunk grant would mislead the owner.
+pub(super) fn unpermitted_scopes_text(scopes: &[&str]) -> Option<String> {
+    (!scopes.is_empty())
+        .then(|| format!("Not permitted by your current role: {}.", scopes.join(", ")))
+}
+
+/// Returns the "Unavailable: a, b (removed from your assignments)." line, or
+/// `None` when no granted environment is unavailable.
+pub(super) fn unavailable_environments_text(names: &[&str]) -> Option<String> {
+    (!names.is_empty()).then(|| {
+        format!(
+            "Unavailable: {} (removed from your assignments).",
+            names.join(", ")
+        )
+    })
 }
 
 /// Returns why creation is unavailable, or `None` when the user can create.
@@ -435,14 +598,36 @@ impl CreateErrors {
     }
 }
 
+/// Returns the lowercase names of the owner's non-revoked tokens, for the
+/// duplicate-name check of the create form.
+///
+/// The server allows one non-revoked token per name and owner, ignoring case.
+/// The list holds only the pages and filter result that the card loaded, so
+/// the check is a hint. The server still decides.
+pub(super) fn existing_token_names(items: &[AccessTokenDto]) -> Vec<String> {
+    items
+        .iter()
+        .filter(|token| token.status != AccessTokenStatus::Revoked)
+        .map(|token| token.name.trim().to_lowercase())
+        .collect()
+}
+
 /// Checks the form against the contract limits and the loaded policy.
-pub(super) fn validate_create(form: &CreateForm, policy: &AccessTokenPolicyDto) -> CreateErrors {
+///
+/// `existing_names` holds lowercase names from [`existing_token_names`].
+pub(super) fn validate_create(
+    form: &CreateForm,
+    policy: &AccessTokenPolicyDto,
+    existing_names: &[String],
+) -> CreateErrors {
     let mut errors = CreateErrors::default();
     let name_chars = form.name.trim().chars().count();
     if name_chars == 0 {
         errors.name = Some("Give the token a name so you can recognize it later.".to_string());
     } else if name_chars > NAME_MAX_CHARS {
         errors.name = Some(format!("Use {NAME_MAX_CHARS} characters or fewer."));
+    } else if existing_names.contains(&form.name.trim().to_lowercase()) {
+        errors.name = Some("You already have a token with this name.".to_string());
     }
     if !policy.lifetime_options_days.contains(&form.expires_in_days)
         || form.expires_in_days == 0
@@ -572,10 +757,12 @@ mod tests {
                 AccessTokenPolicyEnvironmentDto {
                     id: env_id(1),
                     name: "production".to_string(),
+                    color: Some("#f87171".to_string()),
                 },
                 AccessTokenPolicyEnvironmentDto {
                     id: env_id(2),
                     name: "staging".to_string(),
+                    color: None,
                 },
             ],
             scopes: vec![
@@ -585,6 +772,8 @@ mod tests {
                 scope("poams:write", false, false),
             ],
             create_blocked: None,
+            oidc_owned: false,
+            entitlement_max_age_hours: None,
         }
     }
 
@@ -602,14 +791,6 @@ mod tests {
             revoked_at: None,
             last_used_at: None,
             status: AccessTokenStatus::Active,
-        }
-    }
-
-    fn environment(name: &str, is_active: bool) -> AccessTokenEnvironmentDto {
-        AccessTokenEnvironmentDto {
-            id: Uuid::new_v4(),
-            name: name.to_string(),
-            is_active,
         }
     }
 
@@ -649,16 +830,31 @@ mod tests {
     }
 
     #[test]
-    fn only_authenticating_statuses_offer_rotate_and_revoke() {
-        assert!(can_manage(AccessTokenStatus::Active));
-        assert!(can_manage(AccessTokenStatus::ExpiringSoon));
+    fn only_live_statuses_offer_rotate_and_revoke() {
+        assert!(is_live(AccessTokenStatus::Active));
+        assert!(is_live(AccessTokenStatus::ExpiringSoon));
+        // The design lists a suspended token as live: it can still be revoked.
+        assert!(is_live(AccessTokenStatus::OwnerSuspended));
         for status in [
             AccessTokenStatus::Expired,
             AccessTokenStatus::Revoked,
-            AccessTokenStatus::OwnerSuspended,
             AccessTokenStatus::Unknown,
         ] {
-            assert!(!can_manage(status));
+            assert!(!is_live(status));
+        }
+    }
+
+    #[test]
+    fn status_chips_match_the_design() {
+        let cases = [
+            (AccessTokenStatus::Active, "chip-healthy"),
+            (AccessTokenStatus::ExpiringSoon, "chip-warning"),
+            (AccessTokenStatus::Expired, "chip-unknown"),
+            (AccessTokenStatus::Revoked, "chip-critical"),
+            (AccessTokenStatus::OwnerSuspended, "chip-warning"),
+        ];
+        for (status, chip) in cases {
+            assert_eq!(status_presentation(status).chip_class, chip);
         }
     }
 
@@ -675,29 +871,16 @@ mod tests {
     }
 
     #[test]
-    fn environment_summary_names_two_then_counts() {
-        assert_eq!(environment_summary(&[]), "None");
-        assert_eq!(
-            environment_summary(&[environment("staging", true)]),
-            "staging"
-        );
-        assert_eq!(
-            environment_summary(&[environment("a", true), environment("b", true)]),
-            "a, b"
-        );
-        assert_eq!(
-            environment_summary(&[
-                environment("a", true),
-                environment("b", true),
-                environment("c", true),
-                environment("d", true),
-            ]),
-            "a, b +2 more"
-        );
-        assert_eq!(
-            environment_summary(&[environment("edge", false)]),
-            "edge (inactive)"
-        );
+    fn env_dot_color_accepts_hex_and_falls_back_otherwise() {
+        assert_eq!(env_dot_color(Some("#f87171")), "#f87171");
+        assert_eq!(env_dot_color(Some("#FBB")), "#FBB");
+        let fallback = "var(--cf-text-muted)";
+        assert_eq!(env_dot_color(None), fallback);
+        assert_eq!(env_dot_color(Some("")), fallback);
+        assert_eq!(env_dot_color(Some("red")), fallback);
+        assert_eq!(env_dot_color(Some("#12345")), fallback);
+        assert_eq!(env_dot_color(Some("#gggggg")), fallback);
+        assert_eq!(env_dot_color(Some("#fff; background: url(x)")), fallback);
     }
 
     #[test]
@@ -748,11 +931,24 @@ mod tests {
         assert_eq!(relative_past(now - Duration::hours(5), now), "5 hours ago");
         assert_eq!(relative_past(now - Duration::days(3), now), "3 days ago");
         assert_eq!(relative_past(now + Duration::days(3), now), "just now");
-        assert_eq!(last_used_text(None, now), "Never");
+    }
+
+    fn at(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .expect("valid timestamp")
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn last_used_reads_never_or_a_short_date_with_the_full_date_in_the_title() {
+        let now = at("2026-11-16T12:00:00Z");
+        assert_eq!(last_used_short(None), "never");
+        assert_eq!(last_used_short(Some(at("2026-10-03T08:00:00Z"))), "Oct 3");
         assert_eq!(
-            last_used_text(Some(now - Duration::hours(2)), now),
-            "2 hours ago"
+            last_used_title(Some(now - Duration::hours(2)), now),
+            "2026-11-16 (2 hours ago)"
         );
+        assert_eq!(last_used_title(None, now), "This token has not been used");
     }
 
     #[test]
@@ -784,6 +980,154 @@ mod tests {
     }
 
     #[test]
+    fn format_short_date_is_month_abbreviation_and_unpadded_day() {
+        assert_eq!(format_short_date(at("2026-11-02T23:59:59Z")), "Nov 2");
+        assert_eq!(format_short_date(at("2026-12-16T00:00:00Z")), "Dec 16");
+        assert_eq!(format_short_date(at("2027-01-01T00:00:00Z")), "Jan 1");
+    }
+
+    #[test]
+    fn expiry_date_adds_calendar_days_across_month_and_year_ends() {
+        let created = at("2026-11-16T10:00:00Z");
+        assert_eq!(expiry_date(created, 7), "Nov 23");
+        assert_eq!(expiry_date(created, 30), "Dec 16");
+        assert_eq!(expiry_date(created, 90), "Feb 14");
+        assert_eq!(expiry_date(at("2026-12-31T23:00:00Z"), 1), "Jan 1");
+        assert_eq!(expiry_date(at("2028-02-28T00:00:00Z"), 1), "Feb 29");
+        assert_eq!(expiry_date(created, 0), "Nov 16");
+    }
+
+    #[test]
+    fn card_description_depends_on_the_role() {
+        let viewer = card_description(Role::Viewer);
+        assert_eq!(
+            viewer,
+            "Connect a coding agent to your CVE and POA&M work. Viewer tokens are read-only. Tokens never exceed your role or assigned environments."
+        );
+        for role in [Role::Operator, Role::Admin] {
+            assert_eq!(
+                card_description(role),
+                "Connect a coding agent to your CVE and POA&M work. No administrator approval needed for allowed scopes. Tokens never exceed your role or assigned environments."
+            );
+        }
+    }
+
+    #[test]
+    fn role_dependent_dialog_copy() {
+        assert_eq!(
+            create_intro(Role::Operator),
+            "Create your own credential for an agent. Operator access does not require Admin approval. The secret is shown once."
+        );
+        for role in [Role::Viewer, Role::Admin] {
+            assert_eq!(
+                create_intro(role),
+                "Create your own credential for an agent. The secret is shown once."
+            );
+        }
+        assert!(environments_help(Role::Admin).starts_with("Select explicit environments."));
+        assert_eq!(
+            environments_help(Role::Operator),
+            "Select at least one of your assigned environments."
+        );
+        assert_eq!(
+            environments_help(Role::Viewer),
+            environments_help(Role::Operator)
+        );
+        assert!(review_note(Role::Operator).starts_with(
+            "Cannot exceed your current Operator role or assigned environments. Grants are fixed after creation; to change them, create a replacement."
+        ));
+        assert!(review_note(Role::Admin).contains("current Admin role"));
+        assert_eq!(
+            empty_list_text(Role::Viewer),
+            "Create one to let an MCP coding agent read CVEs and POA&Ms in your environments."
+        );
+        assert_eq!(
+            empty_list_text(Role::Operator),
+            "Create one to let an MCP coding agent read and work on CVEs and POA&Ms in your environments."
+        );
+    }
+
+    #[test]
+    fn highest_role_prefers_admin_then_operator_and_defaults_to_viewer() {
+        assert_eq!(highest_role(&[]), Role::Viewer);
+        assert_eq!(highest_role(&[Role::Viewer]), Role::Viewer);
+        assert_eq!(
+            highest_role(&[Role::Viewer, Role::Operator]),
+            Role::Operator
+        );
+        assert_eq!(highest_role(&[Role::Operator, Role::Admin]), Role::Admin);
+    }
+
+    #[test]
+    fn footer_note_adds_the_oidc_sentence_only_for_oidc_owned_users() {
+        let base = "Tokens keep working after you sign out of the browser. They stop on revocation, expiry, account disable, or when your role or environment access is removed.";
+        assert_eq!(footer_note(false, None), base);
+        assert_eq!(footer_note(false, Some(24)), base);
+        // Without a reported number of hours the sentence would be a guess.
+        assert_eq!(footer_note(true, None), base);
+        assert_eq!(
+            footer_note(true, Some(24)),
+            format!(
+                "{base} OIDC tokens pause if your group membership hasn't been refreshed by a sign-in in the last 24 hours."
+            )
+        );
+    }
+
+    #[test]
+    fn masked_token_is_prefix_id_and_28_bullets_without_any_secret() {
+        let id = Uuid::parse_str("8d12aaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee").expect("uuid");
+        let masked = masked_token(id);
+        assert_eq!(
+            masked,
+            format!(
+                "cfat_v1_8d12aaaabbbb4ccc8dddeeeeeeeeeeee_{}",
+                "•".repeat(28)
+            )
+        );
+        let (prefix, bullets) = masked.rsplit_once('_').expect("separator");
+        assert_eq!(prefix, "cfat_v1_8d12aaaabbbb4ccc8dddeeeeeeeeeeee");
+        assert_eq!(bullets.chars().count(), 28);
+        assert!(bullets.chars().all(|c| c == '•'));
+        assert_eq!(prefix.trim_start_matches("cfat_v1_").len(), 32);
+    }
+
+    #[test]
+    fn owner_name_prefers_the_display_name_then_the_email_local_part() {
+        assert_eq!(
+            owner_name(Some("Jordan Park"), "jp@example.com"),
+            "Jordan Park"
+        );
+        assert_eq!(owner_name(Some("  "), "jp@example.com"), "jp");
+        assert_eq!(owner_name(None, "jp@example.com"), "jp");
+    }
+
+    #[test]
+    fn effective_access_lines_follow_the_design() {
+        assert_eq!(
+            no_effective_access_text(AccessTokenStatus::OwnerSuspended),
+            "No effective access."
+        );
+        assert_eq!(
+            no_effective_access_text(AccessTokenStatus::Revoked),
+            "No effective access (token revoked)."
+        );
+        assert_eq!(
+            no_effective_access_text(AccessTokenStatus::Expired),
+            "No effective access (token expired)."
+        );
+        assert_eq!(unpermitted_scopes_text(&[]), None);
+        assert_eq!(
+            unpermitted_scopes_text(&["poams:write"]).as_deref(),
+            Some("Not permitted by your current role: poams:write.")
+        );
+        assert_eq!(unavailable_environments_text(&[]), None);
+        assert_eq!(
+            unavailable_environments_text(&["edge", "lab"]).as_deref(),
+            Some("Unavailable: edge, lab (removed from your assignments).")
+        );
+    }
+
+    #[test]
     fn mcp_endpoint_text_is_honest_about_a_disabled_server() {
         let enabled = AccessTokenMcpDto {
             enabled: true,
@@ -812,17 +1156,38 @@ mod tests {
 
     #[test]
     fn header_example_names_an_environment_variable() {
-        assert!(AUTH_HEADER_EXAMPLE.contains("$CF_ACCESS_TOKEN"));
+        assert_eq!(AUTH_HEADER_EXAMPLE, "Authorization: Bearer $CF_MCP_TOKEN");
         assert!(!AUTH_HEADER_EXAMPLE.contains("cfat_v1_"));
-        assert!(MASKED_TOKEN.starts_with("cfat_v1_"));
     }
 
     #[test]
     fn event_labels_cover_token_audit_actions() {
-        assert_eq!(event_label("access_token_created"), "Created");
+        assert_eq!(
+            event_label("access_token_created"),
+            "Created by you from Profile"
+        );
         assert_eq!(event_label("access_token_rotated"), "Rotated");
-        assert_eq!(event_label("access_token_revoked"), "Revoked");
+        assert_eq!(event_label("access_token_revoked"), "Revoked by you");
         assert_eq!(event_label("something_else"), "something_else");
+    }
+
+    #[test]
+    fn existing_names_skip_revoked_tokens_and_ignore_case() {
+        let mut revoked = token_dto(2, "Old Bot");
+        revoked.status = AccessTokenStatus::Revoked;
+        let mut expired = token_dto(3, "  Prototype ");
+        expired.status = AccessTokenStatus::Expired;
+        let names = existing_token_names(&[token_dto(1, "OpenCode - Sledge"), revoked, expired]);
+        assert_eq!(names, vec!["opencode - sledge", "prototype"]);
+
+        let mut form = valid_form();
+        form.name = "  OPENCODE - sledge ".to_string();
+        assert_eq!(
+            validate_create(&form, &policy(), &names).name.as_deref(),
+            Some("You already have a token with this name.")
+        );
+        form.name = "Old Bot".to_string();
+        assert!(validate_create(&form, &policy(), &names).name.is_none());
     }
 
     #[test]
@@ -885,53 +1250,87 @@ mod tests {
 
     #[test]
     fn valid_form_has_no_errors() {
-        assert!(validate_create(&valid_form(), &policy()).is_empty());
+        assert!(validate_create(&valid_form(), &policy(), &[]).is_empty());
     }
 
     #[test]
     fn name_must_be_one_to_one_hundred_characters_after_trimming() {
         let mut form = valid_form();
         form.name = "   ".to_string();
-        assert!(validate_create(&form, &policy()).name.is_some());
+        assert_eq!(
+            validate_create(&form, &policy(), &[]).name.as_deref(),
+            Some("Give the token a name so you can recognize it later.")
+        );
         form.name = "é".repeat(NAME_MAX_CHARS);
-        assert!(validate_create(&form, &policy()).name.is_none());
+        assert!(validate_create(&form, &policy(), &[]).name.is_none());
         form.name = "é".repeat(NAME_MAX_CHARS + 1);
-        assert!(validate_create(&form, &policy()).name.is_some());
+        assert_eq!(
+            validate_create(&form, &policy(), &[]).name.as_deref(),
+            Some("Use 100 characters or fewer.")
+        );
+    }
+
+    #[test]
+    fn empty_selections_use_the_design_messages() {
+        let mut form = valid_form();
+        form.environment_ids.clear();
+        form.scopes.clear();
+        let errors = validate_create(&form, &policy(), &[]);
+        assert_eq!(
+            errors.environments.as_deref(),
+            Some("Select at least one environment.")
+        );
+        assert_eq!(
+            errors.scopes.as_deref(),
+            Some("Select at least one capability.")
+        );
     }
 
     #[test]
     fn environments_must_be_explicit_known_and_bounded() {
         let mut form = valid_form();
         form.environment_ids.clear();
-        assert!(validate_create(&form, &policy()).environments.is_some());
+        assert!(
+            validate_create(&form, &policy(), &[])
+                .environments
+                .is_some()
+        );
         form.environment_ids = vec![env_id(99)];
-        assert!(validate_create(&form, &policy()).environments.is_some());
+        assert!(
+            validate_create(&form, &policy(), &[])
+                .environments
+                .is_some()
+        );
         form.environment_ids = (0..=MAX_ENVIRONMENTS as u128).map(env_id).collect();
-        assert!(validate_create(&form, &policy()).environments.is_some());
+        assert!(
+            validate_create(&form, &policy(), &[])
+                .environments
+                .is_some()
+        );
     }
 
     #[test]
     fn scopes_must_be_selected_and_available() {
         let mut form = valid_form();
         form.scopes.clear();
-        assert!(validate_create(&form, &policy()).scopes.is_some());
+        assert!(validate_create(&form, &policy(), &[]).scopes.is_some());
         form.scopes = vec!["poams:write".to_string()];
-        assert!(validate_create(&form, &policy()).scopes.is_some());
+        assert!(validate_create(&form, &policy(), &[]).scopes.is_some());
         form.scopes = vec!["unknown:read".to_string()];
-        assert!(validate_create(&form, &policy()).scopes.is_some());
+        assert!(validate_create(&form, &policy(), &[]).scopes.is_some());
     }
 
     #[test]
     fn lifetime_must_be_offered_and_within_the_maximum() {
         let mut form = valid_form();
         form.expires_in_days = 14;
-        assert!(validate_create(&form, &policy()).expires.is_some());
+        assert!(validate_create(&form, &policy(), &[]).expires.is_some());
         form.expires_in_days = 0;
-        assert!(validate_create(&form, &policy()).expires.is_some());
+        assert!(validate_create(&form, &policy(), &[]).expires.is_some());
         let mut strict = policy();
         strict.max_lifetime_days = 30;
         form.expires_in_days = 90;
-        assert!(validate_create(&form, &strict).expires.is_some());
+        assert!(validate_create(&form, &strict, &[]).expires.is_some());
     }
 
     #[test]
@@ -989,7 +1388,7 @@ mod tests {
 
     #[test]
     fn audience_and_unavailable_scope_text() {
-        assert_eq!(audience_label("mcp"), "MCP Server");
+        assert_eq!(audience_label("mcp"), "MCP");
         assert_eq!(audience_label("cli"), "cli");
         let policy = policy();
         assert_eq!(scope_unavailable_text(&policy.scopes[0]), None);

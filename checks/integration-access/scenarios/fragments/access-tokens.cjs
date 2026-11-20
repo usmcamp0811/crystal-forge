@@ -11,7 +11,7 @@
 // needs the API-created Operator token to be the only existing row; rotate needs
 // accessTokens.browser.createdId; revoke needs accessTokens.browser.rotate.newId.
 //
-// Secret handling. The reveal secret is read from the real "Token secret" field
+// Secret handling. The reveal secret is read from the real "Token" field
 // after "Show token". Only its SHA-256 hex fingerprint leaves this process, in
 // accessTokens.browser.<phase>.secretSha256. Python compares it with the stored
 // hash, which proves the displayed secret is the stored credential. The secret
@@ -20,16 +20,24 @@
 // is masked, and Show is undone before the acknowledgement. A failing run keeps
 // a Playwright trace that can contain the throwaway credential of a disposable VM.
 //
-// Screenshots are review candidates. The approved design has no access-token
-// card or dialog (Blocked: design gap for visual comparison), so no comparison
-// or visual baseline is claimed here.
+// Screenshots are the images for design comparison. The approved design is
+// docs/design/CrystalForge/crystal-forge.html (AccessTokensCard,
+// CfatCreateModal, CfatReveal, CfatDetails, CfatConfirm). The maintainer
+// compares the screenshots side by side on the dev server. This script makes
+// semantic assertions only and claims no automated pixel baseline.
+//
+// Accessible names below come from packages/web-ui/src/components/
+// access_tokens/{mod,create,manage}.rs. Row and drawer buttons are named
+// "Details for <name>", "Rotate <name>" and "Revoke <name>". Those names are
+// substrings of other accessible names, so each lookup is exact and scoped to
+// its container.
 "use strict";
 
 const crypto = require("crypto");
 
 const phases = ["create", "rotate", "revoke"];
 const SECRET_FORMAT = /^cfat_v1_[0-9a-f]{32}_[A-Za-z0-9_-]{43}$/;
-const ACKNOWLEDGEMENT = "I have saved the token in my agent's secret store";
+const ACKNOWLEDGEMENT = "I have saved the token in my agent's secret store.";
 const LIST_PATH = "/api/v1/user/access-tokens";
 
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -115,7 +123,7 @@ async function reveal(ctx, phase, title) {
   await expect(dialog.getByText("This is the only time the secret will be displayed")).toBeVisible();
   const done = dialog.getByRole("button", { name: "Done", exact: true });
   await expect(done).toBeDisabled();
-  const field = dialog.getByLabel("Token secret", { exact: true });
+  const field = dialog.getByLabel("Token", { exact: true });
   await expect(field).toHaveValue(/•/);
   await ctx.screenshot(`access-token-${phase}-reveal-masked`);
 
@@ -167,11 +175,16 @@ async function createPhase(ctx) {
   let created;
   await ctx.step("create modal offers only the assigned environment and read scopes", async () => {
     await dismissCoach(page);
-    await card.getByRole("button", { name: "Create access token", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "Create Access Token" });
+    // An empty list shows a second Create button in the empty state; the
+    // header button comes first in document order.
+    await card.getByRole("button", { name: "Create access token", exact: true }).first().click();
+    const dialog = page.getByRole("dialog", { name: "Create access token" });
     await expect(dialog).toBeVisible();
-    await dialog.getByLabel("Token name", { exact: true }).fill(t.browserToken);
-    await expect(dialog.getByLabel("Expiration", { exact: true })).toHaveValue(String(t.lifetimeDays));
+    await dialog.getByLabel("Token name *", { exact: true }).fill(t.browserToken);
+    // Expiration is a radiogroup; aria-checked marks the selected lifetime.
+    const expiration = dialog.getByRole("radiogroup", { name: "Expiration *", exact: true });
+    await expect(expiration.getByRole("radio", { name: `${t.lifetimeDays} days`, exact: true }))
+      .toHaveAttribute("aria-checked", "true");
     await expect(dialog.getByRole("checkbox", { name: t.otherEnvironment, exact: true })).toHaveCount(0);
     const environment = dialog.getByRole("checkbox", { name: t.environment, exact: true });
     await expect(environment).not.toBeChecked();
@@ -184,7 +197,8 @@ async function createPhase(ctx) {
       await expect(box).toBeDisabled();
       await expect(box).not.toBeChecked();
     }
-    await expect(dialog.getByText("Unavailable: Not supported yet")).toHaveCount(t.unavailableScopes.length);
+    // The tile shows only the reason, one per unreleased scope.
+    await expect(dialog.getByText("Not supported yet", { exact: true })).toHaveCount(t.unavailableScopes.length);
     await ctx.screenshot("access-token-create-modal");
 
     const [response] = await Promise.all([
@@ -199,7 +213,7 @@ async function createPhase(ctx) {
   });
 
   await ctx.step("reveal shows the secret once; Done needs the acknowledgement", async () => {
-    const view = await reveal(ctx, "create", "Access Token Created");
+    const view = await reveal(ctx, "create", "Access token created");
     await finishReveal(ctx, view);
     // The embedded public id is the id the server returned.
     expect(view.secret.startsWith(`cfat_v1_${created.replace(/-/g, "")}_`)).toBe(true);
@@ -212,26 +226,29 @@ async function createPhase(ctx) {
     await expect(rows(card)).toHaveCount(2);
 
     await ctx.step("details drawer shows the granted and effective access", async () => {
-      await row.getByRole("button", { name: `Details for token ${t.browserToken}`, exact: true }).click();
-      const drawer = page.getByRole("dialog", { name: t.browserToken });
+      await row.getByRole("button", { name: `Details for ${t.browserToken}`, exact: true }).click();
+      const drawer = page.getByRole("dialog", { name: t.browserToken, exact: true });
       await expect(drawer).toBeVisible();
       const section = (title) => drawer.locator("section").filter({
         has: page.getByRole("heading", { name: title, exact: true }),
       });
+      // Both sections render the environment as a chip. Only the granted
+      // section lists scopes; the effective section lists environments and
+      // names a scope only when the role no longer permits it.
       for (const title of ["Granted at creation", "Effective now"]) {
         await expect(section(title).getByText(t.environment, { exact: true })).toBeVisible();
-        for (const scope of t.readScopes) {
-          await expect(section(title).getByText(scope, { exact: true })).toBeVisible();
-        }
         for (const scope of t.unavailableScopes) {
           await expect(section(title).getByText(scope, { exact: true })).toHaveCount(0);
         }
       }
-      await expect(section("Effective now").getByText("(unavailable)")).toHaveCount(0);
-      await expect(section("Effective now").getByText("(not permitted)")).toHaveCount(0);
-      await expect(section("Recent activity").getByText(/^Created ·/)).toHaveCount(1);
-      await expect(drawer.getByRole("button", { name: `Rotate token ${t.browserToken}`, exact: true })).toBeVisible();
-      await expect(drawer.getByRole("button", { name: `Revoke token ${t.browserToken}`, exact: true })).toBeVisible();
+      for (const scope of t.readScopes) {
+        await expect(section("Granted at creation").getByText(scope, { exact: true })).toBeVisible();
+      }
+      await expect(section("Effective now").getByText(/^Unavailable:/)).toHaveCount(0);
+      await expect(section("Effective now").getByText("Not permitted by your current role")).toHaveCount(0);
+      await expect(section("Recent activity").getByText(/^Created by you from Profile ·/)).toHaveCount(1);
+      await expect(drawer.getByRole("button", { name: `Rotate ${t.browserToken}`, exact: true })).toBeVisible();
+      await expect(drawer.getByRole("button", { name: `Revoke ${t.browserToken}`, exact: true })).toBeVisible();
       await ctx.screenshot("access-token-details-drawer");
       await drawer.getByRole("button", { name: "Close details", exact: true }).click();
       await expect(page.getByRole("dialog")).toHaveCount(0);
@@ -261,8 +278,9 @@ async function rotatePhase(ctx) {
     await expect(named(card, t.browserToken)).toHaveCount(1);
     await expect(named(card, t.browserToken).getByText("Active", { exact: true })).toBeVisible();
     await dismissCoach(page);
-    await card.getByRole("button", { name: `Rotate token ${t.browserToken}`, exact: true }).click();
-    // Scope to the dialog: the row button's name also contains "Rotate token".
+    await card.getByRole("button", { name: `Rotate ${t.browserToken}`, exact: true }).click();
+    // Scope to the dialog: its confirm button is "Rotate token", not the row
+    // button "Rotate <name>".
     const confirm = page.getByRole("dialog", { name: `Rotate "${t.browserToken}"?` });
     await expect(confirm).toBeVisible();
     await ctx.screenshot("access-token-rotate-confirm");
@@ -280,8 +298,8 @@ async function rotatePhase(ctx) {
   });
 
   await ctx.step("rotated reveal shows the replacement secret once", async () => {
-    const view = await reveal(ctx, "rotate", "Access Token Rotated");
-    await expect(view.dialog.getByText(/was revoked\./)).toBeVisible();
+    const view = await reveal(ctx, "rotate", "Access token rotated");
+    await expect(view.dialog.getByText(/was revoked;/)).toBeVisible();
     await finishReveal(ctx, view);
   });
 
@@ -291,8 +309,8 @@ async function rotatePhase(ctx) {
     await expect(mine.getByText("Revoked", { exact: true })).toHaveCount(1);
     await expect(mine.getByText("Active", { exact: true })).toHaveCount(1);
     // Only the replacement still offers Rotate and Revoke.
-    await expect(page.getByRole("button", { name: `Rotate token ${t.browserToken}`, exact: true })).toHaveCount(1);
-    await expect(page.getByRole("button", { name: `Revoke token ${t.browserToken}`, exact: true })).toHaveCount(1);
+    await expect(page.getByRole("button", { name: `Rotate ${t.browserToken}`, exact: true })).toHaveCount(1);
+    await expect(page.getByRole("button", { name: `Revoke ${t.browserToken}`, exact: true })).toHaveCount(1);
   });
 
   ctx.emit("accessTokens.browser.rotate", true);
@@ -313,8 +331,9 @@ async function revokePhase(ctx) {
     await expect(mine.getByText("Revoked", { exact: true })).toHaveCount(1);
     await expect(mine.getByText("Active", { exact: true })).toHaveCount(1);
     await dismissCoach(page);
-    await card.getByRole("button", { name: `Revoke token ${t.browserToken}`, exact: true }).click();
-    // Exact button name: the row button "Revoke token <name>" also contains it.
+    await card.getByRole("button", { name: `Revoke ${t.browserToken}`, exact: true }).click();
+    // Scope to the dialog: its confirm button is "Revoke token", not the row
+    // button "Revoke <name>".
     const confirm = page.getByRole("dialog", { name: `Revoke "${t.browserToken}"?` });
     await expect(confirm).toBeVisible();
     await ctx.screenshot("access-token-revoke-dialog");
@@ -335,8 +354,8 @@ async function revokePhase(ctx) {
       await expect(mine).toHaveCount(2);
       await expect(mine.getByText("Revoked", { exact: true })).toHaveCount(2);
       await expect(mine.getByText("Active", { exact: true })).toHaveCount(0);
-      await expect(page.getByRole("button", { name: `Rotate token ${t.browserToken}`, exact: true })).toHaveCount(0);
-      await expect(page.getByRole("button", { name: `Revoke token ${t.browserToken}`, exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: `Rotate ${t.browserToken}`, exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: `Revoke ${t.browserToken}`, exact: true })).toHaveCount(0);
       // Revoking one token leaves the API-created token active.
       await expect(named(card, t.operatorToken).getByText("Active", { exact: true })).toBeVisible();
     };

@@ -5,23 +5,48 @@
 //! `manage`). The secret is rendered only when the user chooses Show, and it
 //! reaches the clipboard only when the user presses Copy.
 
+use chrono::Utc;
 use dioxus::prelude::*;
 
 use crate::api::client::create_access_token;
-use crate::api::models::{AccessTokenMcpDto, AccessTokenPolicyDto, CreatedAccessTokenDto};
+use crate::api::models::{AccessTokenMcpDto, AccessTokenPolicyDto, CreatedAccessTokenDto, Role};
 use crate::components::dialog_focus::{
     DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
 };
 use crate::components::icon::{Icon, IconName};
 
+use super::Spinner;
 use super::logic::{
-    AUTH_HEADER_EXAMPLE, CreateErrors, MASKED_TOKEN, build_create_request, create_failure,
-    format_date, initial_form, lifetime_label, mcp_endpoint_text, review_summary,
-    scope_unavailable_text, set_selected, validate_create,
+    AUTH_HEADER_EXAMPLE, CreateErrors, build_create_request, create_failure, create_intro,
+    env_dot_color, environments_help, expiry_date, format_short_date, initial_form, lifetime_label,
+    masked_token, mcp_endpoint_text, review_note, review_summary, scope_unavailable_text,
+    set_selected, validate_create,
 };
 
 /// DOM id of the create dialog. Focus handling addresses the dialog by id.
 const DIALOG_ID: &str = "cfat-create-dialog";
+
+/// Renders one numbered section of the create form as a fieldset.
+///
+/// The number reads as muted text before the title, as in the design. A
+/// disabled section disables every control inside it.
+#[component]
+fn Section(
+    n: &'static str,
+    title: &'static str,
+    #[props(default = false)] disabled: bool,
+    children: Element,
+) -> Element {
+    rsx! {
+        fieldset { class: "cfat-fieldset", disabled,
+            legend {
+                span { class: "cfat-legend-n", "{n}." }
+                "{title}"
+            }
+            {children}
+        }
+    }
+}
 
 /// Renders the create form, then the one-time reveal view after success.
 ///
@@ -30,11 +55,18 @@ const DIALOG_ID: &str = "cfat-create-dialog";
 /// the only copy of the secret. The dialog never retries a request. After a
 /// success the dialog closes only through [`RevealView`]'s Done button.
 ///
+/// `user_role` only selects wording, as in the design. The server decides
+/// what the user may grant. `existing_names` holds the lowercase names of the
+/// owner's non-revoked tokens that the card has loaded; a repeat gets a
+/// message before the request, and the server still decides.
+///
 /// `on_changed` receives a status message whenever the token list changed or
 /// may have changed.
 #[component]
 pub(super) fn CreateTokenDialog(
     policy: AccessTokenPolicyDto,
+    user_role: Role,
+    existing_names: Vec<String>,
     on_close: EventHandler<()>,
     on_changed: EventHandler<String>,
 ) -> Element {
@@ -49,7 +81,7 @@ pub(super) fn CreateTokenDialog(
         if pending() {
             return;
         }
-        let found = validate_create(&form.read(), &submit_policy);
+        let found = validate_create(&form.read(), &submit_policy, &existing_names);
         if !found.is_empty() {
             errors.set(found);
             return;
@@ -61,7 +93,7 @@ pub(super) fn CreateTokenDialog(
             match create_access_token(&request).await {
                 Ok(created) => {
                     issued.set(Some(created));
-                    on_changed.call(format!("Created token \"{}\".", request.name));
+                    on_changed.call(format!("Created \"{}\".", request.name));
                 }
                 Err(error) => {
                     if error.outcome_unknown() {
@@ -85,12 +117,13 @@ pub(super) fn CreateTokenDialog(
         &values.scopes,
         values.expires_in_days,
     );
+    let expiry = expiry_date(Utc::now(), values.expires_in_days);
 
     rsx! {
         div { class: "modal-backdrop cfat-backdrop",
             div {
                 id: DIALOG_ID,
-                class: "modal cfat-modal",
+                class: if revealed { "modal cfat-modal cfat-modal-reveal" } else { "modal cfat-modal" },
                 role: "dialog",
                 aria_modal: "true",
                 aria_labelledby: if revealed { "cfat-reveal-title" } else { "cfat-create-title" },
@@ -122,21 +155,20 @@ pub(super) fn CreateTokenDialog(
                         // The head is a flex row, so the title and its description share one block.
                         div {
                             h2 { id: "cfat-create-title",
-                                Icon { name: IconName::Key, size: 14 }
-                                "Create Access Token"
+                                span { class: "cfat-ico", Icon { name: IconName::Key, size: 14 } }
+                                "Create access token"
                             }
-                            p { "Create your own credential for an agent. Administrator approval is not required. The secret is shown once." }
+                            p { "{create_intro(user_role)}" }
                         }
                     }
-                    div { class: "modal-body",
+                    div { class: "modal-body", style: "gap: 20px;",
                         if let Some(message) = current_errors.general.clone() {
                             div { class: "sd-callout sd-callout-danger", role: "alert", "{message}" }
                         }
 
-                        fieldset { class: "cfat-fieldset", disabled: pending(),
-                            legend { "Details" }
+                        Section { n: "1", title: "Details", disabled: pending(),
                             div { class: "field",
-                                label { r#for: "cfat-name", "Token name" }
+                                label { r#for: "cfat-name", "Token name *" }
                                 input {
                                     id: "cfat-name",
                                     class: "input focus-ring",
@@ -144,12 +176,12 @@ pub(super) fn CreateTokenDialog(
                                     placeholder: "OpenCode - Sledge",
                                     autocomplete: "off",
                                     required: true,
+                                    "maxlength": "120",
                                     "aria-invalid": current_errors.name.as_ref().map(|_| "true"),
-                                    "aria-describedby": "cfat-name-help cfat-name-error",
+                                    "aria-describedby": "cfat-name-error",
                                     value: values.name.clone(),
                                     oninput: move |event| form.write().name = event.value(),
                                 }
-                                div { id: "cfat-name-help", class: "help", "Required. 1 to 100 characters." }
                                 div { id: "cfat-name-error", role: "alert", class: "cfat-error",
                                     if let Some(message) = current_errors.name.clone() {
                                         "{message}"
@@ -158,36 +190,37 @@ pub(super) fn CreateTokenDialog(
                             }
                             div { class: "cfat-two-col",
                                 div { class: "field",
-                                    label { r#for: "cfat-audience", "Use with" }
-                                    select { id: "cfat-audience", class: "input focus-ring", disabled: true,
-                                        option { value: "mcp", "MCP Server" }
+                                    label { r#for: "cfat-audience", "Use with *" }
+                                    select {
+                                        id: "cfat-audience",
+                                        class: "input focus-ring",
+                                        style: "font-size: 12px;",
+                                        disabled: true,
+                                        option { value: "mcp", selected: true, "MCP server" }
                                     }
-                                    div { class: "help", "Only MCP Server in this version." }
+                                    div { class: "help", "Only MCP in v1. CLI tokens come later with their own scopes." }
                                 }
                                 div { class: "field",
-                                    label { r#for: "cfat-expiry", "Expiration" }
-                                    // The selection is set per option: a `value` on a select is
-                                    // applied before its options exist and would show the first.
-                                    select {
-                                        id: "cfat-expiry",
-                                        class: "input focus-ring",
-                                        "aria-describedby": "cfat-expiry-help cfat-expiry-error",
-                                        onchange: move |event| {
-                                            if let Ok(days) = event.value().parse::<u32>() {
-                                                form.write().expires_in_days = days;
-                                            }
-                                        },
+                                    label { id: "cfat-expiry-label", "Expiration *" }
+                                    div {
+                                        class: "seg",
+                                        role: "radiogroup",
+                                        aria_labelledby: "cfat-expiry-label",
+                                        style: "width: fit-content;",
                                         for days in policy.lifetime_options_days.iter().copied() {
-                                            option {
+                                            button {
                                                 key: "{days}",
-                                                value: "{days}",
-                                                selected: days == values.expires_in_days,
+                                                r#type: "button",
+                                                role: "radio",
+                                                aria_checked: days == values.expires_in_days,
+                                                class: if days == values.expires_in_days { "active" } else { "" },
+                                                onclick: move |_| form.write().expires_in_days = days,
                                                 "{lifetime_label(days)}"
                                             }
                                         }
                                     }
                                     div { id: "cfat-expiry-help", class: "help",
-                                        "Maximum {policy.max_lifetime_days} days. Using a token does not extend its expiry."
+                                        "Expires {expiry}. Maximum {policy.max_lifetime_days} days; never extended by use."
                                     }
                                     div { id: "cfat-expiry-error", role: "alert", class: "cfat-error",
                                         if let Some(message) = current_errors.expires.clone() {
@@ -198,18 +231,19 @@ pub(super) fn CreateTokenDialog(
                             }
                         }
 
-                        fieldset { class: "cfat-fieldset", disabled: pending(),
-                            legend { "Environments" }
-                            p { class: "help", "Select at least one environment you can access. There is no all-environments option." }
+                        Section { n: "2", title: "Environments", disabled: pending(),
+                            p { class: "cfat-env-help", "{environments_help(user_role)}" }
                             if policy.environments.is_empty() {
                                 div { class: "sd-callout sd-callout-info",
                                     Icon { name: IconName::Info, size: 13 }
-                                    div { "You have no environments available for access tokens, so a token would grant nothing. Ask an administrator to assign one." }
+                                    div { "You have no assigned environments, so a token would grant nothing. Ask an admin to assign one." }
                                 }
                             } else {
-                                div { class: "cfat-check-grid",
+                                div { class: "cfat-env-list",
                                     for env in policy.environments.iter().cloned() {
-                                        label { key: "{env.id}", class: "cfat-check",
+                                        label {
+                                            key: "{env.id}",
+                                            class: if values.environment_ids.contains(&env.id) { "cfat-env cfat-env-on" } else { "cfat-env" },
                                             input {
                                                 r#type: "checkbox",
                                                 checked: values.environment_ids.contains(&env.id),
@@ -218,7 +252,12 @@ pub(super) fn CreateTokenDialog(
                                                     move |event: FormEvent| set_selected(&mut form.write().environment_ids, id, event.checked())
                                                 },
                                             }
-                                            span { "{env.name}" }
+                                            span {
+                                                class: "cfat-dot cfat-dot-lg",
+                                                aria_hidden: "true",
+                                                style: format!("background: {};", env_dot_color(env.color.as_deref())),
+                                            }
+                                            "{env.name}"
                                         }
                                     }
                                 }
@@ -228,10 +267,12 @@ pub(super) fn CreateTokenDialog(
                                     "{message}"
                                 }
                             }
+                            div { class: "cfat-fine",
+                                "No \"All environments\" option. Environments you are later removed from stop working on this token automatically."
+                            }
                         }
 
-                        fieldset { class: "cfat-fieldset", disabled: pending(),
-                            legend { "Capabilities" }
+                        Section { n: "3", title: "Capabilities", disabled: pending(),
                             div { class: "cfat-check-grid",
                                 for scope in policy.scopes.iter().cloned() {
                                     label {
@@ -248,9 +289,12 @@ pub(super) fn CreateTokenDialog(
                                         }
                                         span { class: "cfat-check-text",
                                             span { class: "cfat-check-title", "{scope.label}" }
-                                            span { class: "mono cfat-hint", "{scope.scope}" }
+                                            span { class: "mono cfat-check-key", "{scope.scope}" }
                                             if let Some(reason) = scope_unavailable_text(&scope) {
-                                                span { class: "cfat-hint", "Unavailable: {reason}" }
+                                                span { class: "cfat-check-why",
+                                                    Icon { name: IconName::Info, size: 10 }
+                                                    "{reason}"
+                                                }
                                             }
                                         }
                                     }
@@ -263,21 +307,18 @@ pub(super) fn CreateTokenDialog(
                             }
                         }
 
-                        div { class: "cfat-fieldset",
-                            div { class: "cfat-legend", "Review" }
+                        Section { n: "4", title: "Review",
                             div { class: "cfat-review",
                                 div {
                                     strong { "Effective access: " }
                                     "{summary}"
                                 }
-                                div { class: "help",
-                                    "Cannot exceed your current permissions. Grants are fixed after creation. To change them, create a replacement."
-                                }
+                                div { class: "help", "{review_note(user_role)}" }
                             }
                         }
                     }
                     div { class: "modal-foot",
-                        div { class: "cfat-live", role: "status", aria_live: "polite",
+                        div { class: "sr-only", role: "status", aria_live: "polite",
                             if pending() {
                                 "Creating token…"
                             }
@@ -292,10 +333,11 @@ pub(super) fn CreateTokenDialog(
                             class: "btn btn-primary focus-ring",
                             disabled: pending() || policy.environments.is_empty(),
                             onclick: move |_| submit(),
-                            Icon { name: IconName::Key, size: 13 }
                             if pending() {
+                                Spinner { size: 12 }
                                 "Creating…"
                             } else {
+                                Icon { name: IconName::Key, size: 13 }
                                 "Create token"
                             }
                         }
@@ -315,7 +357,8 @@ pub(super) fn CreateTokenDialog(
 /// secret. Copy runs only on user action.
 ///
 /// `mcp` describes the endpoint line. `rotated_from` holds the display hint of
-/// the token that a rotation revoked.
+/// the token that a rotation revoked. A response that names a replaced token
+/// without a hint still reads as a rotation.
 #[component]
 pub(super) fn RevealView(
     issued: CreatedAccessTokenDto,
@@ -332,16 +375,20 @@ pub(super) fn RevealView(
     let endpoint = mcp_endpoint_text(mcp.as_ref());
     let endpoint_url = mcp.as_ref().and_then(|status| status.url.clone());
     let config_example = format!(
-        "export CF_ACCESS_TOKEN=\"<paste token>\"   # from your secret store\nURL:    {endpoint}\nHeader: {AUTH_HEADER_EXAMPLE}"
+        "export CF_MCP_TOKEN=\"<paste token>\"   # from your secret store\nURL:    {endpoint}\nHeader: {AUTH_HEADER_EXAMPLE}"
     );
     let token_for_copy = issued.token.clone();
     let token_text = if shown() {
         issued.token.clone()
     } else {
-        MASKED_TOKEN.to_string()
+        masked_token(issued.metadata.id)
     };
-    let rotated = rotated_from.is_some();
-    let expires = format_date(issued.metadata.expires_at);
+    let rotated = rotated_from.is_some() || issued.replaced_token_id.is_some();
+    // The hint names the revoked token. Without it, the sentence still states
+    // that the response replaced a token.
+    let previous_unnamed = rotated_from.is_none() && issued.replaced_token_id.is_some();
+    let previous_hint = rotated_from;
+    let expires = format_short_date(issued.metadata.expires_at);
 
     rsx! {
         DialogInitialFocus { dialog_id }
@@ -349,18 +396,14 @@ pub(super) fn RevealView(
             // The head is a flex row, so the title and its description share one block.
             div {
                 h2 { id: "cfat-reveal-title",
-                    Icon { name: IconName::Check, size: 14 }
+                    span { class: "cfat-ico cfat-ico-ok", Icon { name: IconName::Check, size: 14 } }
                     if rotated {
-                        "Access Token Rotated"
+                        "Access token rotated"
                     } else {
-                        "Access Token Created"
+                        "Access token created"
                     }
                 }
-                p {
-                    "{issued.metadata.name} · "
-                    span { class: "mono", "{issued.metadata.display_hint}" }
-                    " · expires {expires}"
-                }
+                p { "{issued.metadata.name} · expires {expires}" }
             }
         }
         div { class: "modal-body",
@@ -369,15 +412,18 @@ pub(super) fn RevealView(
                 div {
                     strong { "This is the only time the secret will be displayed." }
                     " Store it in your agent's secret store now. Crystal Forge keeps only a hash and cannot show it again."
-                    if let Some(hint) = rotated_from.clone() {
+                    if let Some(hint) = previous_hint {
                         " The previous token "
                         span { class: "mono", "{hint}" }
-                        " was revoked. Agents that use it stop working until you update them."
+                        " was revoked; agents using it stop working until updated."
+                    }
+                    if previous_unnamed {
+                        " The previous token was revoked; agents using it stop working until updated."
                     }
                 }
             }
             div { class: "field",
-                label { r#for: "cfat-secret", "Token secret" }
+                label { r#for: "cfat-secret", "Token" }
                 div { class: "cfat-secret-row",
                     input {
                         id: "cfat-secret",
@@ -390,6 +436,7 @@ pub(super) fn RevealView(
                     }
                     button {
                         class: "btn btn-ghost focus-ring xs",
+                        r#type: "button",
                         aria_pressed: shown(),
                         aria_label: if shown() { "Hide token" } else { "Show token" },
                         onclick: move |_| shown.set(!shown()),
@@ -401,6 +448,7 @@ pub(super) fn RevealView(
                     }
                     button {
                         class: "btn btn-primary focus-ring xs",
+                        r#type: "button",
                         aria_label: "Copy token",
                         onclick: move |_| {
                             let value = token_for_copy.clone();
@@ -432,6 +480,7 @@ pub(super) fn RevealView(
                     if let Some(url) = endpoint_url.clone() {
                         button {
                             class: "btn btn-ghost focus-ring xs",
+                            r#type: "button",
                             aria_label: "Copy endpoint",
                             onclick: move |_| {
                                 let value = url.clone();
@@ -449,10 +498,10 @@ pub(super) fn RevealView(
                 }
             }
             div { class: "field",
-                div { class: "cfat-legend", "Client configuration (generic)" }
+                label { "Client configuration (generic)" }
                 pre { class: "mono cfat-pre", "{config_example}" }
                 div { class: "help",
-                    "Use any MCP client that supports a static HTTP bearer header. Never put the token in a URL."
+                    "Any MCP client that supports a static HTTP bearer header. Never put the token in a URL."
                 }
             }
             div { class: "cfat-live", role: "status", aria_live: "polite",
@@ -462,19 +511,20 @@ pub(super) fn RevealView(
                     None => rsx! {},
                 }
             }
-            label { class: "cfat-check",
+            label { class: "cfat-ack",
                 input {
                     r#type: "checkbox",
                     checked: saved(),
                     onchange: move |event| saved.set(event.checked()),
                 }
-                span { "I have saved the token in my agent's secret store" }
+                "I have saved the token in my agent's secret store."
             }
         }
         div { class: "modal-foot",
             button {
                 class: "btn btn-primary focus-ring",
                 disabled: !saved(),
+                style: if saved() { "opacity: 1;" } else { "opacity: 0.5;" },
                 onclick: move |_| on_done.call(()),
                 "Done"
             }

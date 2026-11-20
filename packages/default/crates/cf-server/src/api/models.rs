@@ -5402,6 +5402,9 @@ pub struct AccessTokenEnvironmentDto {
     pub name: String,
     /// Whether the environment is currently active.
     pub is_active: bool,
+    /// Display color as `#RRGGBB`, or `null` when the stored value is not
+    /// exactly that form. Never arbitrary text.
+    pub color: Option<String>,
 }
 
 /// Describes one access token without any secret or hash.
@@ -5531,6 +5534,9 @@ pub struct AccessTokenPolicyEnvironmentDto {
     pub id: Uuid,
     /// Display name.
     pub name: String,
+    /// Display color as `#RRGGBB`, or `null` when the stored value is not
+    /// exactly that form. Never arbitrary text.
+    pub color: Option<String>,
 }
 
 /// Describes one scope in the policy catalog.
@@ -5580,6 +5586,13 @@ pub struct AccessTokenPolicyDto {
     pub scopes: Vec<AccessTokenPolicyScopeDto>,
     /// Set when the owner cannot create a token now.
     pub create_blocked: Option<AccessTokenCreateBlockedDto>,
+    /// `true` when the owner has any external identity row. An OIDC-owned
+    /// token pauses while the owner's entitlements are older than
+    /// `entitlement_max_age_hours`.
+    pub oidc_owned: bool,
+    /// Configured entitlement max age in whole hours, rounded up. `null`
+    /// unless `oidc_owned` is `true`.
+    pub entitlement_max_age_hours: Option<u32>,
 }
 
 /// Carries the create request body.

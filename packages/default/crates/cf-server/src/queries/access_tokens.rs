@@ -68,6 +68,8 @@ pub struct TokenEnvironmentRow {
     pub name: String,
     /// Whether the environment is active now.
     pub is_active: bool,
+    /// Display color, `NULL` unless the stored value is `#RRGGBB`.
+    pub color: Option<String>,
 }
 
 /// Holds the owner's current account state.
@@ -193,10 +195,12 @@ pub async fn lock_owner_row_tx(
     )
 }
 
-/// Returns the active environments the owner may select, sorted by name.
+/// Returns the active environments the owner may select as
+/// `(id, name, color)`, sorted by name.
 ///
 /// An Admin sees every active environment. Other roles see active
-/// environments they are assigned to.
+/// environments they are assigned to. `color` is `None` unless the stored
+/// `color_hex` is exactly `#RRGGBB`; the database never returns other text.
 ///
 /// # Errors
 /// Returns database errors.
@@ -204,12 +208,14 @@ pub async fn selectable_environments<'e, E>(
     executor: E,
     user_id: Uuid,
     is_admin: bool,
-) -> Result<Vec<(Uuid, String)>>
+) -> Result<Vec<(Uuid, String, Option<String>)>>
 where
     E: Executor<'e, Database = Postgres>,
 {
-    Ok(sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT e.id, e.name FROM environments e
+    Ok(sqlx::query_as::<_, (Uuid, String, Option<String>)>(
+        "SELECT e.id, e.name,
+                CASE WHEN e.color_hex ~ '^#[0-9A-Fa-f]{6}$' THEN e.color_hex::text END
+         FROM environments e
          WHERE COALESCE(e.is_active, false)
            AND ($2 OR EXISTS (SELECT 1 FROM user_environment_memberships m
                               WHERE m.user_id = $1 AND m.environment_id = e.id))
@@ -540,6 +546,8 @@ where
 
 /// Returns granted environments for the given tokens, sorted by name.
 ///
+/// `color` is `None` unless the stored `color_hex` is exactly `#RRGGBB`.
+///
 /// # Errors
 /// Returns database errors.
 pub async fn token_environments<'e, E>(
@@ -550,7 +558,8 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     Ok(sqlx::query_as::<_, TokenEnvironmentRow>(
-        "SELECT te.token_id, e.id, e.name, COALESCE(e.is_active, false) AS is_active
+        "SELECT te.token_id, e.id, e.name, COALESCE(e.is_active, false) AS is_active,
+                CASE WHEN e.color_hex ~ '^#[0-9A-Fa-f]{6}$' THEN e.color_hex::text END AS color
          FROM api_access_token_environments te
          JOIN environments e ON e.id = te.environment_id
          WHERE te.token_id = ANY($1) ORDER BY e.name, e.id",

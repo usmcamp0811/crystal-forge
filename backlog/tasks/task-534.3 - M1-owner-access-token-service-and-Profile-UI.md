@@ -78,7 +78,7 @@ Errors use `{"error": code, "message": text, "details": null|object}` with codes
 
 `AccessTokenDto`: `id`, `name`, `audience` (`"mcp"`), `display_hint`
 (`cfat_v1_8d12…`), `scopes` (sorted strings), `environments`
-(`[{id, name, is_active}]`), `created_at`, `expires_at`, `revoked_at`,
+(`[{id, name, is_active, color}]`; `color` is `#RRGGBB` or null), `created_at`, `expires_at`, `revoked_at`,
 `last_used_at` (RFC 3339 or null), `status` (`active`, `expiring_soon` within 7
 days, `expired`, `revoked`, `owner_suspended`). No secret, no hash.
 
@@ -90,8 +90,11 @@ Create response: `AccessTokenDto` fields plus `token`. Detail adds
 
 Policy response: `{enabled, mcp: {enabled, url}, audience, default_lifetime_days,
 max_lifetime_days, lifetime_options_days, max_active_tokens,
-environments: [{id, name}], scopes: [{scope, label, available, default_selected,
-unavailable_reason}], create_blocked: null | {code, message}}`.
+environments: [{id, name, color}], scopes: [{scope, label, available, default_selected,
+unavailable_reason}], create_blocked: null | {code, message}, oidc_owned,
+entitlement_max_age_hours}`. `color` is `#RRGGBB` or null. `oidc_owned` is true
+when the owner has any external identity; then `entitlement_max_age_hours` is the
+entitlement max age in hours, rounded up, otherwise null.
 
 Limits: name 1–100 chars, unique per owner among non-revoked tokens
 (case-insensitive); at most 20 non-revoked unexpired tokens per owner; at most 50

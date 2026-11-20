@@ -40,9 +40,12 @@ Authority: TASK-534.3 API contract and acceptance criteria 1-4, 6 and 7, and
 [CF-AGENT-ACCESS-001 v1.1](../security/agent-access-tokens-mcp-remediation-context.md).
 These additions extend the existing Access `lifecycle-local-bootstrap` scenario
 as its last fragment. They add no scenario, VM, harness, check owner or flake
-check, and no approved visual baseline. The approved design has no access-token
-card or dialog, so visual comparison is **Blocked: design gap**. The screenshots
-are review candidates only.
+check, and no automated pixel baseline. The approved design is the single HTML
+file `docs/design/CrystalForge/crystal-forge.html` (`AccessTokensCard`,
+`CfatCreateModal`, `CfatReveal`, `CfatDetails` and `CfatConfirm`, about lines
+76440-77002). The scenario's screenshots are the images for design comparison.
+Visual comparison status: screenshots captured, side-by-side comparison done by
+the maintainer on the dev server, no automated pixel baseline.
 
 | Contract | Existing owner/scenario and fragment | Added mandatory proof | Status (exact commit) |
 | --- | --- | --- | --- |

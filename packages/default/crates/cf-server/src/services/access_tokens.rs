@@ -273,19 +273,29 @@ async fn oidc_block(
     owner: Uuid,
     entitlement_max_age_seconds: u64,
 ) -> Result<Option<AccessTokenCreateBlockedDto>, AccessTokenError> {
+    let identities = store::owner_identities(pool, owner).await?;
+    oidc_block_for(pool, owner, &identities, entitlement_max_age_seconds).await
+}
+
+/// Applies the [`oidc_block`] rule to identities the caller already loaded.
+async fn oidc_block_for(
+    pool: &PgPool,
+    owner: Uuid,
+    identities: &[store::OwnerIdentity],
+    entitlement_max_age_seconds: u64,
+) -> Result<Option<AccessTokenCreateBlockedDto>, AccessTokenError> {
     let blocked = |code: &str, message: &str| {
         Some(AccessTokenCreateBlockedDto {
             code: code.to_owned(),
             message: message.to_owned(),
         })
     };
-    let identities = store::owner_identities(pool, owner).await?;
     if identities.is_empty() {
         return Ok(None);
     }
     let unresolved = "Your identity ownership is not resolved. Ask an administrator to \
                       classify your access.";
-    let [identity] = identities.as_slice() else {
+    let [identity] = identities else {
         return Ok(blocked("ownership_unresolved", unresolved));
     };
     if identity.provider_key != "oidc" || identity.entitlement_sync_state == "legacy_unresolved" {
@@ -329,7 +339,10 @@ fn ensure_enabled(settings: &AccessTokenSettings) -> Result<(), AccessTokenError
 ///
 /// The policy is readable when tokens are disabled; `enabled` is then `false`
 /// and `create_blocked` stays `null`. `create_blocked` is set only for an
-/// OIDC owner who fails the freshness or ownership rule.
+/// OIDC owner who fails the freshness or ownership rule. `oidc_owned` is
+/// `true` when the owner has any `external_identities` row, even when tokens
+/// are disabled; `entitlement_max_age_hours` is then the configured maximum
+/// entitlement age in hours, rounded up, and is `None` otherwise.
 ///
 /// # Errors
 /// Returns [`AccessTokenError::OwnerUnavailable`] for a missing, disabled or
@@ -349,7 +362,7 @@ pub async fn policy(
     let environments = store::selectable_environments(pool, owner, access.is_admin())
         .await?
         .into_iter()
-        .map(|(id, name)| AccessTokenPolicyEnvironmentDto { id, name })
+        .map(|(id, name, color)| AccessTokenPolicyEnvironmentDto { id, name, color })
         .collect();
     let scopes = SCOPES
         .iter()
@@ -364,11 +377,25 @@ pub async fn policy(
             }
         })
         .collect();
+    // The same identity rows decide `oidc_owned` and `create_blocked`, so one
+    // lookup serves both, including when tokens are disabled.
+    let identities = store::owner_identities(pool, owner).await?;
+    let oidc_owned = !identities.is_empty();
     let create_blocked = if settings.enabled {
-        oidc_block(pool, owner, settings.entitlement_max_age_seconds).await?
+        oidc_block_for(
+            pool,
+            owner,
+            &identities,
+            settings.entitlement_max_age_seconds,
+        )
+        .await?
     } else {
         None
     };
+    // Rounded up so the UI never states a window shorter than the real one.
+    let entitlement_max_age_hours = oidc_owned.then(|| {
+        u32::try_from(settings.entitlement_max_age_seconds.div_ceil(3600)).unwrap_or(u32::MAX)
+    });
     Ok(AccessTokenPolicyDto {
         enabled: settings.enabled,
         // MCP ships in a later milestone; tokens are inert until then.
@@ -387,6 +414,8 @@ pub async fn policy(
         environments,
         scopes,
         create_blocked,
+        oidc_owned,
+        entitlement_max_age_hours,
     })
 }
 
@@ -579,6 +608,7 @@ fn assemble(
                         id: env.id,
                         name: env.name.clone(),
                         is_active: env.is_active,
+                        color: env.color.clone(),
                     })
                     .collect(),
                 created_at: row.created_at,

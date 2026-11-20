@@ -6593,6 +6593,10 @@ pub struct AccessTokenEnvironmentDto {
     pub name: String,
     /// `false` when the environment was deactivated after the grant.
     pub is_active: bool,
+    /// Display color as `#RRGGBB`. `None` for a server that sends no color or
+    /// whose stored value is not that form.
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 /// Access token metadata. Never carries the secret or its hash.
@@ -6640,6 +6644,10 @@ pub struct AccessTokenPolicyEnvironmentDto {
     pub id: Uuid,
     /// Environment display name.
     pub name: String,
+    /// Display color as `#RRGGBB`. `None` for a server that sends no color or
+    /// whose stored value is not that form.
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 /// Scope offered by the create form.
@@ -6701,6 +6709,15 @@ pub struct AccessTokenPolicyDto {
     /// Set when creation is blocked for this user.
     #[serde(default)]
     pub create_blocked: Option<AccessTokenCreateBlockedDto>,
+    /// `true` when the owner has an external (OIDC) identity. Such a token
+    /// pauses while the owner's group membership is older than
+    /// `entitlement_max_age_hours`. Absent on an older server, read as `false`.
+    #[serde(default)]
+    pub oidc_owned: bool,
+    /// Whole hours that group membership stays fresh. `None` unless
+    /// `oidc_owned` is `true`.
+    #[serde(default)]
+    pub entitlement_max_age_hours: Option<u32>,
 }
 
 /// Granted environment compared with the owner's current access.
@@ -6812,7 +6829,7 @@ mod access_token_dto_tests {
             "audience": "mcp",
             "display_hint": "cfat_v1_8d12…",
             "scopes": ["cves:read", "poams:read"],
-            "environments": [{"id": ENV_ID, "name": "staging", "is_active": true}],
+            "environments": [{"id": ENV_ID, "name": "staging", "is_active": true, "color": "#fbbf24"}],
             "created_at": "2026-11-02T10:00:00Z",
             "expires_at": "2026-12-02T10:00:00Z",
             "revoked_at": null,
@@ -6831,7 +6848,7 @@ mod access_token_dto_tests {
             "max_lifetime_days": 90,
             "lifetime_options_days": [7, 30, 90],
             "max_active_tokens": 20,
-            "environments": [{"id": ENV_ID, "name": "staging"}],
+            "environments": [{"id": ENV_ID, "name": "staging", "color": "#f87171"}],
             "scopes": [
                 {"scope": "cves:read", "label": "Read CVEs and systems",
                  "available": true, "default_selected": true, "unavailable_reason": null},
@@ -6839,9 +6856,14 @@ mod access_token_dto_tests {
                  "available": false, "default_selected": false,
                  "unavailable_reason": "Not supported yet"}
             ],
-            "create_blocked": {"code": "entitlements_stale", "message": "Sign in again."}
+            "create_blocked": {"code": "entitlements_stale", "message": "Sign in again."},
+            "oidc_owned": true,
+            "entitlement_max_age_hours": 24
         }))
         .expect("policy decodes");
+        assert_eq!(policy.environments[0].color.as_deref(), Some("#f87171"));
+        assert!(policy.oidc_owned);
+        assert_eq!(policy.entitlement_max_age_hours, Some(24));
         assert!(policy.enabled && !policy.mcp.enabled && policy.mcp.url.is_none());
         assert_eq!(policy.lifetime_options_days, vec![7, 30, 90]);
         assert_eq!(
@@ -6855,6 +6877,37 @@ mod access_token_dto_tests {
     }
 
     #[test]
+    fn payloads_without_color_and_oidc_fields_still_decode() {
+        let policy: AccessTokenPolicyDto = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "mcp": {"enabled": true, "url": "https://forge.example.com/mcp"},
+            "audience": "mcp",
+            "default_lifetime_days": 30,
+            "max_lifetime_days": 90,
+            "lifetime_options_days": [7, 30, 90],
+            "max_active_tokens": 20,
+            "environments": [{"id": ENV_ID, "name": "staging"}],
+            "scopes": []
+        }))
+        .expect("an older policy payload decodes");
+        assert_eq!(policy.environments[0].color, None);
+        assert!(!policy.oidc_owned);
+        assert_eq!(policy.entitlement_max_age_hours, None);
+        assert!(policy.create_blocked.is_none());
+
+        let mut value = metadata_json();
+        value["environments"] =
+            serde_json::json!([{"id": ENV_ID, "name": "staging", "is_active": true}]);
+        let token: AccessTokenDto = serde_json::from_value(value).expect("older token decodes");
+        assert_eq!(token.environments[0].color, None);
+
+        let mut value = metadata_json();
+        value["environments"] = serde_json::json!([{"id": ENV_ID, "name": "staging", "is_active": true, "color": null}]);
+        let token: AccessTokenDto = serde_json::from_value(value).expect("null color decodes");
+        assert_eq!(token.environments[0].color, None);
+    }
+
+    #[test]
     fn list_payload_decodes_and_item_has_no_secret_field() {
         let page: AccessTokenListResponse = serde_json::from_value(serde_json::json!({
             "items": [metadata_json()],
@@ -6863,6 +6916,10 @@ mod access_token_dto_tests {
         .expect("list decodes");
         assert_eq!(page.next_offset, Some(25));
         assert_eq!(page.items[0].status, AccessTokenStatus::ExpiringSoon);
+        assert_eq!(
+            page.items[0].environments[0].color.as_deref(),
+            Some("#fbbf24")
+        );
         let reencoded = serde_json::to_value(&page.items[0]).expect("item encodes");
         assert!(reencoded.get("token").is_none());
         assert!(reencoded.get("secret_hash").is_none());

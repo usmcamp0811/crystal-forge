@@ -262,7 +262,16 @@ one controller VM/database:
    bearer refusal and the Admin audit log. The CJS runs three registered phases
    (`access-token-create`, `access-token-rotate`, `access-token-revoke`) as the
    Operator in the real Profile UI, with SQL checks between phases.
-   **Implemented, not yet run.**
+       **Implemented, not yet run.**
+
+    Design reference for the Access tokens card: the approved design is the
+    single HTML file `docs/design/CrystalForge/crystal-forge.html`
+    (`AccessTokensCard`, `CfatCreateModal`, `CfatReveal`, `CfatDetails` and
+    `CfatConfirm`, about lines 76440-77002). The scenario's screenshots are the
+    images for design comparison. Visual comparison status: screenshots
+    captured, side-by-side comparison done by the maintainer on the dev server,
+    no automated pixel baseline. The CJS asserts accessible names and
+    behavior only.
 
 Every browser run signs in independently using authored facts and verifies its
 identity against same-run receipts. Operator, Viewer and target identities and

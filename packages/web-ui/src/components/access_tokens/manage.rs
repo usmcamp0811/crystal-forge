@@ -13,12 +13,13 @@ use crate::components::dialog_focus::{
 };
 use crate::components::icon::{Icon, IconName};
 
-use super::TokenStatusChip;
 use super::create::RevealView;
 use super::logic::{
-    REVOKE_UNKNOWN_OUTCOME, ROTATE_UNKNOWN_OUTCOME, audience_label, can_manage, environment_label,
-    event_label, failure_message, format_date, last_used_text, relative_expiry,
+    REVOKE_UNKNOWN_OUTCOME, ROTATE_UNKNOWN_OUTCOME, event_label, failure_message, format_date,
+    format_short_date, is_live, last_used_short, last_used_title, no_effective_access_text,
+    relative_expiry, unavailable_environments_text, unpermitted_scopes_text,
 };
+use super::{EnvChip, EnvChips, Spinner, TokenStatusChip};
 
 /// DOM id of the details drawer.
 const DRAWER_ID: &str = "cfat-details-dialog";
@@ -31,21 +32,25 @@ const ROTATE_ID: &str = "cfat-rotate-dialog";
 /// events.
 ///
 /// Granted access and effective access are separate sections. An environment
-/// that the owner lost, and a scope that the owner's role no longer permits,
-/// carry explicit text. Rotate and Revoke appear only for a token that can
-/// authenticate.
+/// that the owner lost carries explicit text. Rotate and Revoke appear only
+/// for a live token. `owner` is the name of the signed-in user, who owns every
+/// token the card lists.
 #[component]
 pub(super) fn TokenDetailsDrawer(
     token_id: Uuid,
+    owner: String,
     on_close: EventHandler<()>,
     on_rotate: EventHandler<AccessTokenDto>,
     on_revoke: EventHandler<AccessTokenDto>,
 ) -> Element {
     let mut detail = use_resource(move || async move { fetch_access_token(token_id).await });
     let now = Utc::now();
-    let title = match &*detail.read() {
-        Some(Ok(loaded)) => loaded.token.name.clone(),
-        _ => "Token details".to_string(),
+    let (title, subtitle) = match &*detail.read() {
+        Some(Ok(loaded)) => (
+            loaded.token.name.clone(),
+            Some(format!("{} · MCP", loaded.token.display_hint)),
+        ),
+        _ => ("Token details".to_string(), None),
     };
 
     let content = match &*detail.read() {
@@ -70,17 +75,54 @@ pub(super) fn TokenDetailsDrawer(
             let token = loaded.token.clone();
             let for_rotate = token.clone();
             let for_revoke = token.clone();
-            let manage = can_manage(token.status);
-            let created = format_date(token.created_at);
-            let last_used = last_used_text(token.last_used_at, now);
-            let expires = format!(
+            let live = is_live(token.status);
+            let created = format_short_date(token.created_at);
+            let created_title = format_date(token.created_at);
+            let last_used = last_used_short(token.last_used_at);
+            let last_used_hint = last_used_title(token.last_used_at, now);
+            let expires = format_short_date(token.expires_at);
+            let expires_title = format!(
                 "{} ({})",
                 format_date(token.expires_at),
                 relative_expiry(token.expires_at, now)
             );
-            let revoked = token.revoked_at.map(format_date);
-            let effective_environments = loaded.effective.environments.clone();
-            let effective_scopes = loaded.effective.scopes.clone();
+            // Effective environments carry no color. The granted list does,
+            // so the dot of an effective chip is looked up by id there.
+            let effective_environments: Vec<_> = if live {
+                loaded
+                    .effective
+                    .environments
+                    .iter()
+                    .filter(|env| env.available)
+                    .map(|env| {
+                        let color = token
+                            .environments
+                            .iter()
+                            .find(|granted| granted.id == env.id)
+                            .and_then(|granted| granted.color.clone());
+                        (env.id, env.name.clone(), color)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let unavailable_names: Vec<&str> = loaded
+                .effective
+                .environments
+                .iter()
+                .filter(|env| !env.available)
+                .map(|env| env.name.as_str())
+                .collect();
+            let unavailable_text = unavailable_environments_text(&unavailable_names);
+            let unpermitted: Vec<&str> = loaded
+                .effective
+                .scopes
+                .iter()
+                .filter(|scope| !scope.permitted)
+                .map(|scope| scope.scope.as_str())
+                .collect();
+            let unpermitted_text = unpermitted_scopes_text(&unpermitted);
+            let no_access_text = no_effective_access_text(token.status);
             let events = loaded.recent_events.clone();
             rsx! {
                 div { class: "modal-body",
@@ -88,61 +130,52 @@ pub(super) fn TokenDetailsDrawer(
                     if token.status == AccessTokenStatus::OwnerSuspended {
                         div { class: "sd-callout sd-callout-warn",
                             Icon { name: IconName::Warn, size: 13 }
-                            div { "Your current role or environments do not allow this token to grant any access. Create a new token for your current access." }
+                            div { "None of this token's environments are currently assigned to you, so it grants no access. Create a new token for your current environments." }
                         }
                     }
                     dl { class: "kv-grid",
                         dt { "Owner" }
-                        dd { "You" }
+                        dd { "{owner} (you)" }
                         dt { "Audience" }
-                        dd { "{audience_label(&token.audience)}" }
+                        dd { class: "mono", "{token.audience}" }
                         dt { "Created" }
-                        dd { "{created}" }
+                        dd { title: "{created_title}", "{created}" }
                         dt { "Last used" }
-                        dd { "{last_used}" }
+                        dd { title: "{last_used_hint}", "{last_used}" }
                         dt { "Expires" }
-                        dd { "{expires}" }
-                        if let Some(revoked_on) = revoked {
-                            dt { "Revoked" }
-                            dd { "{revoked_on}" }
-                        }
+                        dd { title: "{expires_title}", "{expires}" }
                     }
                     section { aria_labelledby: "cfat-granted-title",
                         h3 { id: "cfat-granted-title", class: "cfat-subtitle", "Granted at creation" }
-                        div { class: "cfat-chips",
-                            for env in token.environments.iter().cloned() {
-                                span { key: "{env.id}", class: "chip chip-unknown cfat-chip", "{environment_label(&env)}" }
-                            }
-                            for scope in token.scopes.iter().cloned() {
-                                span { key: "{scope}", class: "chip chip-info mono cfat-chip", "{scope}" }
+                        div { class: "cfat-stack",
+                            div { EnvChips { environments: token.environments.clone() } }
+                            div { class: "cfat-chips",
+                                for scope in token.scopes.iter().cloned() {
+                                    span { key: "{scope}", class: "chip chip-info mono cfat-chip", "{scope}" }
+                                }
                             }
                         }
                     }
                     section { aria_labelledby: "cfat-effective-title",
                         h3 { id: "cfat-effective-title", class: "cfat-subtitle", "Effective now" }
-                        div { class: "cfat-chips",
-                            for env in effective_environments {
-                                span {
-                                    key: "{env.id}",
-                                    class: if env.available { "chip chip-unknown cfat-chip" } else { "chip chip-warning cfat-chip cfat-chip-off" },
-                                    "{env.name}"
-                                    if !env.available {
-                                        " (unavailable)"
-                                    }
-                                }
-                            }
-                            for scope in effective_scopes {
-                                span {
-                                    key: "{scope.scope}",
-                                    class: if scope.permitted { "chip chip-info mono cfat-chip" } else { "chip chip-warning mono cfat-chip cfat-chip-off" },
-                                    "{scope.scope}"
-                                    if !scope.permitted {
-                                        " (not permitted)"
+                        if effective_environments.is_empty() {
+                            div { class: "cfat-muted-line", "{no_access_text}" }
+                        } else {
+                            div { class: "cfat-stack",
+                                span { class: "cfat-env-chips",
+                                    for (id, name, color) in effective_environments {
+                                        EnvChip { key: "{id}", name, color }
                                     }
                                 }
                             }
                         }
-                        div { class: "help",
+                        if let Some(text) = unavailable_text {
+                            div { class: "help cfat-help-tight", "{text}" }
+                        }
+                        if let Some(text) = unpermitted_text {
+                            div { class: "help cfat-help-tight", "{text}" }
+                        }
+                        div { class: "help cfat-help-tight",
                             "Effective access is your current role and environments intersected with the grant. It can shrink, never grow."
                         }
                     }
@@ -153,26 +186,26 @@ pub(super) fn TokenDetailsDrawer(
                         } else {
                             ul { class: "cfat-events",
                                 for (index, event) in events.into_iter().enumerate() {
-                                    li { key: "{index}",
-                                        "{event_label(&event.action)} · {format_date(event.created_at)}"
+                                    li { key: "{index}", title: "{format_date(event.created_at)}",
+                                        "{event_label(&event.action)} · {format_short_date(event.created_at)}"
                                     }
                                 }
                             }
                         }
                     }
                 }
-                if manage {
+                if live {
                     div { class: "modal-foot",
                         button {
                             class: "btn btn-ghost focus-ring",
-                            aria_label: "Rotate token {token.name}",
+                            aria_label: "Rotate {token.name}",
                             onclick: move |_| on_rotate.call(for_rotate.clone()),
                             Icon { name: IconName::Sync, size: 12 }
                             "Rotate"
                         }
                         button {
-                            class: "btn btn-ghost focus-ring cfat-danger",
-                            aria_label: "Revoke token {token.name}",
+                            class: "btn btn-ghost focus-ring cfat-danger cfat-danger-line",
+                            aria_label: "Revoke {token.name}",
                             onclick: move |_| on_revoke.call(for_revoke.clone()),
                             Icon { name: IconName::Trash, size: 12 }
                             "Revoke"
@@ -203,9 +236,15 @@ pub(super) fn TokenDetailsDrawer(
                 DialogInitialFocus { dialog_id: DRAWER_ID.to_string() }
                 DialogFocusSentinel { dialog_id: DRAWER_ID.to_string(), boundary: DialogFocusBoundary::Last }
                 div { class: "modal-head cfat-drawer-head",
-                    h2 { id: "cfat-details-title", "{title}" }
+                    div { class: "cfat-drawer-head-copy",
+                        h2 { id: "cfat-details-title", "{title}" }
+                        if let Some(text) = subtitle {
+                            p { class: "mono", "{text}" }
+                        }
+                    }
                     button {
-                        class: "btn-icon focus-ring",
+                        class: "btn btn-icon focus-ring",
+                        r#type: "button",
                         aria_label: "Close details",
                         onclick: move |_| on_close.call(()),
                         Icon { name: IconName::X, size: 14 }
@@ -245,7 +284,7 @@ pub(super) fn RevokeDialog(
         spawn(async move {
             match revoke_access_token(id).await {
                 Ok(_) => {
-                    on_changed.call(format!("Revoked token \"{name}\"."));
+                    on_changed.call(format!("Revoked \"{name}\"."));
                     on_close.call(());
                 }
                 Err(failure) => {
@@ -285,14 +324,14 @@ pub(super) fn RevokeDialog(
                 }
                 div { class: "modal-body",
                     p { class: "cfat-confirm-text",
-                        "This immediately blocks new requests from any agent that uses this token. A tool call already in progress may finish. Revocation cannot be undone."
+                        "This immediately blocks new requests from any agent using this token. A tool call already in progress may finish. Revocation cannot be undone."
                     }
                     if let Some(message) = error() {
                         div { class: "sd-callout sd-callout-danger", role: "alert", "{message}" }
                     }
                 }
                 div { class: "modal-foot",
-                    div { class: "cfat-live", role: "status", aria_live: "polite",
+                    div { class: "sr-only", role: "status", aria_live: "polite",
                         if pending() {
                             "Revoking token…"
                         }
@@ -308,6 +347,7 @@ pub(super) fn RevokeDialog(
                         disabled: pending(),
                         onclick: move |_| confirm(),
                         if pending() {
+                            Spinner { size: 12 }
                             "Revoking…"
                         } else {
                             "Revoke token"
@@ -353,7 +393,7 @@ pub(super) fn RotateDialog(
             match rotate_access_token(id).await {
                 Ok(created) => {
                     issued.set(Some(created));
-                    on_changed.call(format!("Rotated token \"{name}\"."));
+                    on_changed.call(format!("Rotated \"{name}\"."));
                 }
                 Err(failure) => {
                     if failure.outcome_unknown() {
@@ -380,7 +420,7 @@ pub(super) fn RotateDialog(
             },
             div {
                 id: ROTATE_ID,
-                class: "modal cfat-modal cfat-modal-narrow",
+                class: if revealed { "modal cfat-modal cfat-modal-reveal" } else { "modal cfat-modal cfat-modal-narrow" },
                 role: "dialog",
                 aria_modal: "true",
                 aria_labelledby: if revealed { "cfat-reveal-title" } else { "cfat-rotate-title" },
@@ -412,7 +452,7 @@ pub(super) fn RotateDialog(
                     }
                     div { class: "modal-body",
                         p { class: "cfat-confirm-text",
-                            "A replacement token with the same grant is issued, and the current token is revoked atomically at the same moment. Agents that use the current token stop connecting immediately, until you update them with the new secret."
+                            "A replacement token with the same grant is issued and the current token is revoked at the same moment. The agent stops connecting until you update it with the new secret."
                         }
                         div { class: "sd-callout sd-callout-info",
                             Icon { name: IconName::Info, size: 13 }
@@ -423,7 +463,7 @@ pub(super) fn RotateDialog(
                         }
                     }
                     div { class: "modal-foot",
-                        div { class: "cfat-live", role: "status", aria_live: "polite",
+                        div { class: "sr-only", role: "status", aria_live: "polite",
                             if pending() {
                                 "Rotating token…"
                             }
@@ -439,6 +479,7 @@ pub(super) fn RotateDialog(
                             disabled: pending(),
                             onclick: move |_| confirm(),
                             if pending() {
+                                Spinner { size: 12 }
                                 "Rotating…"
                             } else {
                                 "Rotate token"

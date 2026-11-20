@@ -71,6 +71,22 @@ Another user's token returns `404 resource_not_found`.
 The list filter `q` must not contain a control character (including NUL); the
 endpoint returns 400 `validation_failed` with `details.fields.q`.
 
+Environment entries in the policy (`environments[]`: `id`, `name`, `color`) and
+in token metadata (`environments[]`: `id`, `name`, `is_active`, `color`) carry
+`color`. The server returns `color` only when `environments.color_hex` is
+exactly `#RRGGBB` (three hex pairs, either letter case). Any other stored value
+returns `null`. The response never contains arbitrary stored text.
+
+The policy also carries `oidc_owned` and `entitlement_max_age_hours`.
+`oidc_owned` is `true` when the owner has any `external_identities` row. This is
+the same test that `create_blocked` uses, and the policy reports it when tokens
+are disabled. When `oidc_owned` is `true`, `entitlement_max_age_hours` is the
+configured entitlement maximum age in seconds divided by 3600, rounded up.
+Otherwise it is `null`. The UI uses these two fields to state that tokens of an
+OIDC owner pause when the owner's entitlements are older than that age. An
+unreadable configuration value fails closed as 0 seconds, and the field is then
+`0`.
+
 Errors use `{"error", "message", "details"}`. `validation_failed` (400) lists
 field messages in `details.fields`. Other codes are `unauthorized`, `forbidden`,
 `access_tokens_disabled`, `resource_not_found`, `conflict` and `rate_limited`.

@@ -2578,4 +2578,132 @@ async fn policy_reports_limits_selectable_environments_and_role_scopes(pool: PgP
         );
     }
     assert!(!admin_ids.contains(&inactive.to_string()));
+
+    // Local owners report no OIDC ownership and no entitlement window.
+    assert_eq!(body["oidc_owned"], false);
+    assert!(body["entitlement_max_age_hours"].is_null());
+    assert!(
+        body.get("entitlement_max_age_hours").is_some(),
+        "entitlement_max_age_hours is always present"
+    );
+}
+
+async fn set_environment_color(pool: &PgPool, environment: Uuid, color: &str) {
+    sqlx::query("UPDATE environments SET color_hex = $2 WHERE id = $1")
+        .bind(environment)
+        .bind(color)
+        .execute(pool)
+        .await
+        .expect("set environment color");
+}
+
+/// Finds the entry with `id` in a JSON `environments` array.
+fn environment_entry(environments: &Value, id: Uuid) -> &Value {
+    environments
+        .as_array()
+        .expect("environments array")
+        .iter()
+        .find(|item| item["id"] == id.to_string())
+        .unwrap_or_else(|| panic!("environments lack {id}"))
+}
+
+/// Asserts the migration default, a valid custom color and two malformed
+/// stored values for the environments in `environments`.
+fn assert_environment_colors(environments: &Value, ids: [Uuid; 4]) {
+    let [default, custom, word, non_hex] = ids;
+    assert_eq!(environment_entry(environments, default)["color"], "#6B7280");
+    assert_eq!(environment_entry(environments, custom)["color"], "#f87171");
+    for malformed in [word, non_hex] {
+        let entry = environment_entry(environments, malformed);
+        assert!(entry.get("color").is_some(), "color key is always present");
+        assert!(entry["color"].is_null(), "malformed color leaked: {entry}");
+    }
+}
+
+#[sqlx::test]
+async fn environment_colors_are_validated_in_policy_and_token_metadata(pool: PgPool) {
+    let api = start(&pool).await;
+    // Created without a color, so the migration default applies.
+    let default = environment(&pool, "color-default").await;
+    let custom = environment(&pool, "color-custom").await;
+    let word = environment(&pool, "color-word").await;
+    let non_hex = environment(&pool, "color-nonhex").await;
+    set_environment_color(&pool, custom, "#f87171").await;
+    set_environment_color(&pool, word, "red").await;
+    set_environment_color(&pool, non_hex, "#GGGGGG").await;
+    let ids = [default, custom, word, non_hex];
+    let owner = member(&pool, AuthRole::Operator, &ids).await;
+
+    let policy = api.policy(&owner).await;
+    assert_eq!(policy.status, 200, "{}", policy.text);
+    assert_environment_colors(&policy.body["environments"], ids);
+
+    let created = api.create(&owner, &read_body("colors", &ids)).await;
+    let (id, _) = issued(&created);
+    assert_environment_colors(&created.body["environments"], ids);
+
+    let detail = api.detail(&owner, id).await;
+    assert_eq!(detail.status, 200, "{}", detail.text);
+    assert_environment_colors(&detail.body["environments"], ids);
+
+    let listed = api.list(&owner, "").await;
+    assert_eq!(listed.status, 200, "{}", listed.text);
+    assert_environment_colors(&listed.body["items"][0]["environments"], ids);
+
+    let rotated = api.rotate(&owner, id).await;
+    assert_eq!(rotated.status, 201, "{}", rotated.text);
+    assert_environment_colors(&rotated.body["environments"], ids);
+}
+
+#[sqlx::test]
+async fn policy_reports_oidc_ownership_and_rounded_up_entitlement_max_age(pool: PgPool) {
+    let api = start(&pool).await;
+
+    let (local, _) = operator_with_environment(&pool).await;
+    let local_policy = api.policy(&local).await;
+    assert_eq!(local_policy.status, 200, "{}", local_policy.text);
+    assert_eq!(local_policy.body["oidc_owned"], false);
+    assert!(local_policy.body["entitlement_max_age_hours"].is_null());
+
+    // The handler uses the 86400-second default, which is 24 hours.
+    let (oidc, identity, _) = oidc_operator(&pool).await;
+    let oidc_policy = api.policy(&oidc).await;
+    assert_eq!(oidc_policy.status, 200, "{}", oidc_policy.text);
+    assert_eq!(oidc_policy.body["oidc_owned"], true);
+    assert_eq!(oidc_policy.body["entitlement_max_age_hours"], 24);
+
+    // The window is reported even when the owner's entitlements are stale.
+    make_entitlements_stale(&pool, identity).await;
+    let stale_policy = api.policy(&oidc).await;
+    assert_eq!(stale_policy.body["oidc_owned"], true);
+    assert_eq!(stale_policy.body["entitlement_max_age_hours"], 24);
+    assert_eq!(
+        stale_policy.body["create_blocked"]["code"],
+        "entitlements_stale"
+    );
+
+    // Service level: whole hours are exact, partial hours round up, a local
+    // owner never gets a window, and disabling tokens keeps ownership visible.
+    let hours = |policy: &crystal_forge::api::models::AccessTokenPolicyDto| {
+        (policy.oidc_owned, policy.entitlement_max_age_hours)
+    };
+    let exact = service::policy(&pool, oidc.id, &settings(MAX_AGE))
+        .await
+        .expect("OIDC policy");
+    assert_eq!(hours(&exact), (true, Some(24)));
+    let partial = service::policy(&pool, oidc.id, &settings(MAX_AGE + 1))
+        .await
+        .expect("OIDC policy");
+    assert_eq!(hours(&partial), (true, Some(25)));
+    let mut disabled = settings(MAX_AGE);
+    disabled.enabled = false;
+    let off = service::policy(&pool, oidc.id, &disabled)
+        .await
+        .expect("OIDC policy while disabled");
+    assert_eq!(hours(&off), (true, Some(24)));
+    assert!(off.create_blocked.is_none());
+    let local_service = service::policy(&pool, local.id, &settings(MAX_AGE + 1))
+        .await
+        .expect("local policy");
+    assert_eq!(hours(&local_service), (false, None));
 }

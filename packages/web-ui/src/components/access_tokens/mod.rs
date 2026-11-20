@@ -1,8 +1,10 @@
 //! Access tokens card of the Profile view (TASK-534.3).
 //!
 //! The card lets any signed-in user list, create, inspect, rotate, and revoke
-//! their own `cfat_v1_` access tokens. It performs no role check: the server
-//! decides what a user may grant.
+//! their own `cfat_v1_` access tokens. It performs no authorization: the
+//! server decides what a user may grant. The signed-in user's role only
+//! selects wording, as in the approved design (`CFAT_*` in
+//! `docs/design/CrystalForge/crystal-forge.html`).
 //!
 //! # Secret handling
 //!
@@ -25,15 +27,16 @@ use uuid::Uuid;
 use crate::api::client::{
     AccessTokenApiError, AccessTokenListQuery, fetch_access_token_policy, fetch_access_tokens,
 };
-use crate::api::models::{AccessTokenDto, AccessTokenStatus};
+use crate::api::models::{AccessTokenDto, AccessTokenEnvironmentDto, AccessTokenStatus};
 use crate::components::icon::{Icon, IconName};
 use crate::state::app_state::AppState;
 
 use create::CreateTokenDialog;
 use logic::{
-    LIST_PAGE_SIZE, StatusFilter, audience_label, can_manage, create_disabled_reason,
-    environment_summary, feature_disabled_message, format_date, last_used_text, merge_page,
-    relative_expiry, scope_summary, status_presentation,
+    LIST_PAGE_SIZE, StatusFilter, audience_label, card_description, create_disabled_reason,
+    empty_list_text, env_dot_color, existing_token_names, feature_disabled_message, footer_note,
+    format_date, format_short_date, highest_role, is_live, last_used_short, last_used_title,
+    merge_page, owner_name, relative_expiry, scope_summary, status_presentation,
 };
 use manage::{RevokeDialog, RotateDialog, TokenDetailsDrawer};
 
@@ -179,6 +182,23 @@ pub fn AccessTokensCard() -> Element {
     };
 
     let now = Utc::now();
+    // The card is keyed by auth generation, so the role and the owner never
+    // change during its lifetime. `peek` avoids a needless subscription.
+    let (role, owner) = {
+        let state = app_state.peek();
+        let roles = state
+            .auth
+            .as_ref()
+            .map(|ctx| ctx.roles.clone())
+            .unwrap_or_default();
+        let owner = state
+            .auth
+            .as_ref()
+            .and_then(|ctx| ctx.user.as_ref())
+            .map(|user| owner_name(user.display_name.as_deref(), &user.email))
+            .unwrap_or_else(|| "You".to_string());
+        (highest_role(&roles), owner)
+    };
     let policy_state = (*policy.read()).clone();
     let disabled_message = feature_disabled_message(policy_state.as_ref(), list_error().as_ref());
     let (can_create, create_reason) = match &policy_state {
@@ -195,6 +215,13 @@ pub fn AccessTokensCard() -> Element {
         .as_ref()
         .and_then(|loaded| loaded.as_ref().ok())
         .map(|loaded| loaded.mcp.clone());
+    let footer = match policy_state
+        .as_ref()
+        .and_then(|loaded| loaded.as_ref().ok())
+    {
+        Some(loaded) => footer_note(loaded.oidc_owned, loaded.entitlement_max_age_hours),
+        None => footer_note(false, None),
+    };
 
     rsx! {
         section {
@@ -210,13 +237,7 @@ pub fn AccessTokensCard() -> Element {
                         "Access tokens"
                         span { class: "chip chip-info", style: "font-size: 9px;", "MCP" }
                     }
-                    p { class: "cfat-lead",
-                        "Connect a coding agent to your CVE and POA&M work. No administrator approval is needed for permissions you already have. A token never exceeds your role or assigned environments."
-                    }
-                    p { class: "help cfat-note",
-                        Icon { name: IconName::Info, size: 11 }
-                        span { "Tokens survive browser sign-out, but not revocation, account disable, owner permission removal, or expiry." }
-                    }
+                    p { class: "cfat-lead", "{card_description(role)}" }
                 }
                 button {
                     class: "btn btn-primary focus-ring",
@@ -241,22 +262,17 @@ pub fn AccessTokensCard() -> Element {
                 }
             }
 
-            div { class: "cfat-live", role: "status", aria_live: "polite",
-                if let Some(text) = notice() {
-                    "{text}"
-                }
-            }
-
             if let Some(message) = disabled_message.clone() {
                 div { class: "cfat-empty", role: "status",
-                    Icon { name: IconName::Key, size: 20 }
+                    span { class: "cfat-empty-icon", Icon { name: IconName::Key, size: 20 } }
                     div { class: "cfat-empty-title", "Access tokens are disabled" }
-                    div { class: "help", "{message}" }
+                    div { class: "cfat-empty-text", "{message}" }
                 }
             } else {
                 div { class: "cfat-filters",
                     label { class: "cfat-search",
                         span { class: "sr-only", "Search tokens by name" }
+                        span { class: "cfat-search-icon", Icon { name: IconName::Search, size: 12 } }
                         input {
                             class: "input focus-ring",
                             r#type: "search",
@@ -280,6 +296,11 @@ pub fn AccessTokensCard() -> Element {
                     if list_loading() && !items().is_empty() {
                         span { class: "help", "Refreshing…" }
                     }
+                    div { class: "cfat-notice", role: "status", aria_live: "polite",
+                        if let Some(text) = notice() {
+                            "{text}"
+                        }
+                    }
                 }
 
                 if let Some(error) = list_error() {
@@ -297,8 +318,8 @@ pub fn AccessTokensCard() -> Element {
                     p { class: "help", role: "status", "Loading access tokens…" }
                 } else if items().is_empty() && list_error().is_none() {
                     if filters_active {
-                        div { class: "cfat-empty",
-                            div { class: "help", "No tokens match." }
+                        div { class: "cfat-nomatch",
+                            "No tokens match. "
                             button {
                                 class: "btn btn-ghost focus-ring xs",
                                 onclick: move |_| {
@@ -310,10 +331,18 @@ pub fn AccessTokensCard() -> Element {
                         }
                     } else {
                         div { class: "cfat-empty",
-                            Icon { name: IconName::Key, size: 20 }
+                            span { class: "cfat-empty-icon", Icon { name: IconName::Key, size: 20 } }
                             div { class: "cfat-empty-title", "No access tokens yet" }
-                            div { class: "help",
-                                "Create one to let an MCP coding agent read CVEs and POA&Ms in your environments."
+                            div { class: "cfat-empty-text", "{empty_list_text(role)}" }
+                            button {
+                                class: "btn btn-ghost focus-ring",
+                                disabled: !can_create,
+                                onclick: move |_| {
+                                    notice.set(None);
+                                    dialog.set(Dialog::Create);
+                                },
+                                Icon { name: IconName::Plus, size: 12 }
+                                "Create access token"
                             }
                         }
                     }
@@ -323,7 +352,7 @@ pub fn AccessTokensCard() -> Element {
                             thead {
                                 tr {
                                     th { "Name" }
-                                    th { "Audience" }
+                                    th { "Type" }
                                     th { "Environments" }
                                     th { "Scopes" }
                                     th { "Created" }
@@ -353,7 +382,6 @@ pub fn AccessTokensCard() -> Element {
                             TokenCard {
                                 key: "{token.id}",
                                 token: token.clone(),
-                                now,
                                 on_open: move |request: Dialog| {
                                     notice.set(None);
                                     dialog.set(request);
@@ -376,12 +404,19 @@ pub fn AccessTokensCard() -> Element {
                 }
             }
 
+            p { class: "help cfat-note",
+                Icon { name: IconName::Info, size: 11 }
+                span { "{footer}" }
+            }
+
             match dialog() {
                 Dialog::None => rsx! {},
                 Dialog::Create => match &policy_state {
                     Some(Ok(loaded)) => rsx! {
                         CreateTokenDialog {
                             policy: loaded.clone(),
+                            user_role: role,
+                            existing_names: existing_token_names(&items()),
                             on_close: move |_| dialog.set(Dialog::None),
                             on_changed,
                         }
@@ -391,6 +426,7 @@ pub fn AccessTokensCard() -> Element {
                 Dialog::Details(id) => rsx! {
                     TokenDetailsDrawer {
                         token_id: id,
+                        owner: owner.clone(),
                         on_close: move |_| dialog.set(Dialog::None),
                         on_rotate: move |token: AccessTokenDto| dialog.set(Dialog::Rotate(token)),
                         on_revoke: move |token: AccessTokenDto| dialog.set(Dialog::Revoke(token)),
@@ -416,6 +452,19 @@ pub fn AccessTokensCard() -> Element {
     }
 }
 
+/// Renders a small spinner for a pending button. Decorative: the button text
+/// carries the meaning.
+#[component]
+fn Spinner(#[props(default = 12)] size: u32) -> Element {
+    rsx! {
+        span {
+            class: "cfat-spinner",
+            aria_hidden: "true",
+            style: "width: {size}px; height: {size}px;",
+        }
+    }
+}
+
 /// Renders a status as text plus a glyph. Color only reinforces the text.
 #[component]
 fn TokenStatusChip(status: AccessTokenStatus) -> Element {
@@ -428,34 +477,82 @@ fn TokenStatusChip(status: AccessTokenStatus) -> Element {
     }
 }
 
+/// Renders one environment as a chip: a color dot and the name.
+///
+/// `off` strikes the name through and explains why in a tooltip. The dot color
+/// comes from [`env_dot_color`], which never passes arbitrary text to CSS.
+#[component]
+fn EnvChip(name: String, color: Option<String>, #[props(default = false)] off: bool) -> Element {
+    let dot = env_dot_color(color.as_deref());
+    rsx! {
+        span {
+            class: if off { "chip chip-unknown cfat-chip cfat-chip-off" } else { "chip chip-unknown cfat-chip" },
+            title: if off { "No longer in your assigned environments" } else { "" },
+            span { class: "cfat-dot", aria_hidden: "true", style: "background: {dot};" }
+            "{name}"
+        }
+    }
+}
+
+/// Renders the granted environments of a token as chips.
+///
+/// With `mark_inactive`, a deactivated environment reads as unavailable. The
+/// list endpoint reports no per-owner availability, so deactivation is the
+/// only signal a row has.
+#[component]
+fn EnvChips(
+    environments: Vec<AccessTokenEnvironmentDto>,
+    #[props(default = false)] mark_inactive: bool,
+) -> Element {
+    rsx! {
+        span { class: "cfat-env-chips",
+            if environments.is_empty() {
+                span { class: "cfat-hint", "None" }
+            }
+            for env in environments {
+                EnvChip {
+                    key: "{env.id}",
+                    name: env.name.clone(),
+                    color: env.color.clone(),
+                    off: mark_inactive && !env.is_active,
+                }
+            }
+        }
+    }
+}
+
 /// Renders the Details, Rotate, and Revoke buttons of one token.
 ///
-/// Rotate and Revoke exist only for a token that can authenticate. Every
-/// accessible name includes the token name, so rows stay distinguishable.
+/// Rotate and Revoke exist only for a live token. Every accessible name
+/// includes the token name, so rows stay distinguishable.
 #[component]
-fn TokenActions(token: AccessTokenDto, on_open: EventHandler<Dialog>) -> Element {
-    let manage = can_manage(token.status);
+fn TokenActions(
+    token: AccessTokenDto,
+    on_open: EventHandler<Dialog>,
+    #[props(default = false)] in_card: bool,
+) -> Element {
+    let live = is_live(token.status);
     let id = token.id;
     let for_rotate = token.clone();
     let for_revoke = token.clone();
     rsx! {
-        div { class: "cfat-row-actions",
+        div { class: if in_card { "cfat-card-actions" } else { "cfat-row-actions" },
             button {
                 class: "btn btn-ghost focus-ring xs",
-                aria_label: "Details for token {token.name}",
+                aria_label: "Details for {token.name}",
                 onclick: move |_| on_open.call(Dialog::Details(id)),
                 "Details"
             }
-            if manage {
+            if live {
                 button {
                     class: "btn btn-ghost focus-ring xs",
-                    aria_label: "Rotate token {token.name}",
+                    aria_label: "Rotate {token.name}",
                     onclick: move |_| on_open.call(Dialog::Rotate(for_rotate.clone())),
                     "Rotate"
                 }
                 button {
                     class: "btn btn-ghost focus-ring xs cfat-danger",
-                    aria_label: "Revoke token {token.name}",
+                    aria_label: "Revoke {token.name}",
                     onclick: move |_| on_open.call(Dialog::Revoke(for_revoke.clone())),
                     "Revoke"
                 }
@@ -467,14 +564,19 @@ fn TokenActions(token: AccessTokenDto, on_open: EventHandler<Dialog>) -> Element
 /// Renders one token as a table row.
 #[component]
 fn TokenRow(token: AccessTokenDto, now: DateTime<Utc>, on_open: EventHandler<Dialog>) -> Element {
-    let environments = environment_summary(&token.environments);
     let scopes = scope_summary(&token.scopes);
     let scope_list = token.scopes.join(", ");
-    let created = format_date(token.created_at);
-    let last_used = last_used_text(token.last_used_at, now);
-    let expires = format_date(token.expires_at);
-    let expires_relative = relative_expiry(token.expires_at, now);
-    let inactive = !can_manage(token.status);
+    let created = format_short_date(token.created_at);
+    let created_title = format_date(token.created_at);
+    let last_used = last_used_short(token.last_used_at);
+    let last_used_hint = last_used_title(token.last_used_at, now);
+    let expires = format_short_date(token.expires_at);
+    let expires_title = format!(
+        "{} ({})",
+        format_date(token.expires_at),
+        relative_expiry(token.expires_at, now)
+    );
+    let inactive = !is_live(token.status);
     rsx! {
         tr {
             class: if inactive { "cfat-row cfat-row-inactive" } else { "cfat-row" },
@@ -484,16 +586,13 @@ fn TokenRow(token: AccessTokenDto, now: DateTime<Utc>, on_open: EventHandler<Dia
                 div { class: "mono cfat-hint", "{token.display_hint}" }
             }
             td {
-                span { class: "chip chip-unknown", style: "font-size: 10px;", "{audience_label(&token.audience)}" }
+                span { class: "chip chip-unknown cfat-chip", "{audience_label(&token.audience)}" }
             }
-            td { "{environments}" }
-            td { title: "{scope_list}", "{scopes}" }
-            td { "{created}" }
-            td { "{last_used}" }
-            td {
-                div { "{expires}" }
-                div { class: "cfat-hint", "{expires_relative}" }
-            }
+            td { EnvChips { environments: token.environments.clone(), mark_inactive: true } }
+            td { class: "cfat-cell", title: "{scope_list}", "{scopes}" }
+            td { class: "cfat-cell", title: "{created_title}", "{created}" }
+            td { class: "cfat-cell", title: "{last_used_hint}", "{last_used}" }
+            td { class: "cfat-cell", title: "{expires_title}", "{expires}" }
             td { TokenStatusChip { status: token.status } }
             td { TokenActions { token: token.clone(), on_open } }
         }
@@ -502,24 +601,22 @@ fn TokenRow(token: AccessTokenDto, now: DateTime<Utc>, on_open: EventHandler<Dia
 
 /// Renders one token as a labeled card for narrow screens.
 #[component]
-fn TokenCard(token: AccessTokenDto, now: DateTime<Utc>, on_open: EventHandler<Dialog>) -> Element {
-    let environments = environment_summary(&token.environments);
+fn TokenCard(token: AccessTokenDto, on_open: EventHandler<Dialog>) -> Element {
     let scopes = scope_summary(&token.scopes);
-    let last_used = last_used_text(token.last_used_at, now);
-    let expires = format_date(token.expires_at);
-    let expires_relative = relative_expiry(token.expires_at, now);
+    let scope_list = token.scopes.join(", ");
+    let last_used = last_used_short(token.last_used_at);
+    let expires = format_short_date(token.expires_at);
     rsx! {
         div { class: "cfat-card-item", "data-testid": "access-token-card-item",
             div { class: "cfat-card-top",
                 strong { "{token.name}" }
                 TokenStatusChip { status: token.status }
             }
-            div { class: "mono cfat-hint", "{token.display_hint}" }
-            div { "Environments: {environments}" }
-            div { class: "cfat-hint",
-                "{audience_label(&token.audience)} · {scopes} · Last used: {last_used} · Expires {expires} ({expires_relative})"
+            div { EnvChips { environments: token.environments.clone(), mark_inactive: true } }
+            div { class: "cfat-card-meta", title: "{scope_list}",
+                "{audience_label(&token.audience)} · {scopes} · used {last_used} · expires {expires}"
             }
-            TokenActions { token: token.clone(), on_open }
+            TokenActions { token: token.clone(), on_open, in_card: true }
         }
     }
 }
