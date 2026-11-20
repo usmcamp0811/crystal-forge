@@ -16,6 +16,10 @@
 //! 6. Four requests of the same token already in flight: 429.
 //! 7. A body over 1 MiB: 413. Malformed JSON-RPC: 400.
 //!
+//! Every stage after step 1 runs under one 30-second deadline
+//! ([`REQUEST_TIMEOUT`]). A tool call that runs out of time returns a tool
+//! error; any earlier stage that runs out of time returns 503.
+//!
 //! SECURITY: Authentication runs before the body is read, so an
 //! unauthenticated client cannot make the server buffer a body, and no tool
 //! runs for an unauthenticated request. Only the bearer header authenticates;
@@ -44,6 +48,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::config::{ServerConfig, mcp_public_url_origin};
@@ -83,9 +88,15 @@ pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// Maximum requests of one token in flight at the same time.
 const MAX_CONCURRENT_PER_TOKEN: usize = 4;
 
-/// Upper bound on one tool execution. A slower call returns a tool error and
-/// its future is dropped, which cancels its pending database queries.
-const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound on one MCP request, from the enabled check to the response.
+///
+/// The deadline covers token validation, the `last_used_at` write, reading the
+/// body and the tool call. When it expires, the request future is dropped,
+/// which cancels pending database queries and releases the concurrency permit.
+/// A tool call that runs out of time returns a tool error with the request id;
+/// any earlier stage that runs out of time returns HTTP 503 with a JSON-RPC
+/// error, because no request id is known yet.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Minimum interval between `last_used_at` writes for one token, in seconds.
 const LAST_USED_THROTTLE_SECONDS: f64 = 300.0;
@@ -101,6 +112,7 @@ const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
+const INTERNAL_ERROR: i64 = -32603;
 
 const INSTRUCTIONS: &str = "Crystal Forge provides read-only CVE and POA&M remediation \
 context for NixOS systems. Results are limited to the environments and scopes of the access \
@@ -256,12 +268,40 @@ pub async fn method_not_allowed(State(state): State<CFState>) -> Response {
 /// 200 with a JSON-RPC result or error. Supported methods: `initialize`,
 /// `ping`, `tools/list` and `tools/call`; any other method gets -32601.
 pub async fn handle(State(state): State<CFState>, request: Request) -> Response {
-    let config = &state.server_config;
+    handle_within(state, request, REQUEST_TIMEOUT).await
+}
+
+/// Handles one MCP message with an explicit total time limit.
+///
+/// [`handle`] calls this function with [`REQUEST_TIMEOUT`]. Tests call it with
+/// a short limit to prove that every stage after the enabled check is bounded.
+pub async fn handle_within(state: CFState, request: Request, limit: Duration) -> Response {
     // SECURITY: A disabled endpoint answers like an unknown route before any
     // other check, so it reveals nothing about tokens or configuration.
-    if !config.mcp_enable {
+    if !state.server_config.mcp_enable {
         return empty(StatusCode::NOT_FOUND);
     }
+    let deadline = Instant::now() + limit;
+    match tokio::time::timeout_at(deadline, process(&state, request, deadline)).await {
+        Ok(response) => response,
+        Err(_elapsed) => {
+            tracing::warn!("mcp: request exceeded the time limit before the tool call");
+            rpc_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                Value::Null,
+                INTERNAL_ERROR,
+                "The request timed out",
+            )
+        }
+    }
+}
+
+/// Runs the checks and the method for one enabled-endpoint request.
+///
+/// The caller bounds the whole future with `deadline`; `tools/call` also uses
+/// `deadline` so that a slow tool returns a tool error with its request id.
+async fn process(state: &CFState, request: Request, deadline: Instant) -> Response {
+    let config = &state.server_config;
     let (parts, body) = request.into_parts();
     let headers = &parts.headers;
     if !origin_allowed(headers, config) {
@@ -339,11 +379,16 @@ pub async fn handle(State(state): State<CFState>, request: Request) -> Response 
             "Request body too large",
         );
     };
-    dispatch(&state, &caller, &bytes).await
+    dispatch(state, &caller, &bytes, deadline).await
 }
 
 /// Parses one JSON-RPC message and routes it to a method.
-async fn dispatch(state: &CFState, caller: &ToolCaller, bytes: &Bytes) -> Response {
+async fn dispatch(
+    state: &CFState,
+    caller: &ToolCaller,
+    bytes: &Bytes,
+    deadline: Instant,
+) -> Response {
     let Ok(message) = serde_json::from_slice::<Value>(bytes) else {
         return rpc_error(
             StatusCode::BAD_REQUEST,
@@ -408,7 +453,7 @@ async fn dispatch(state: &CFState, caller: &ToolCaller, bytes: &Bytes) -> Respon
         "initialize" => rpc_result(id, initialize_result(&params)),
         "ping" => rpc_result(id, json!({})),
         "tools/list" => rpc_result(id, tools_list_result(caller)),
-        "tools/call" => tools_call(state, caller, id, &params).await,
+        "tools/call" => tools_call(state, caller, id, &params, deadline).await,
         _ => rpc_error(StatusCode::OK, id, METHOD_NOT_FOUND, "Method not found"),
     }
 }
@@ -457,7 +502,13 @@ fn internal_tool_error(message: &str) -> Value {
     tool_error("internal_error", message)
 }
 
-async fn tools_call(state: &CFState, caller: &ToolCaller, id: Value, params: &Value) -> Response {
+async fn tools_call(
+    state: &CFState,
+    caller: &ToolCaller,
+    id: Value,
+    params: &Value,
+    deadline: Instant,
+) -> Response {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return rpc_error(
             StatusCode::OK,
@@ -470,8 +521,10 @@ async fn tools_call(state: &CFState, caller: &ToolCaller, id: Value, params: &Va
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let outcome = tokio::time::timeout(
-        TOOL_TIMEOUT,
+    // The tool gets the time left before the request deadline, so the request
+    // as a whole never exceeds REQUEST_TIMEOUT.
+    let outcome = tokio::time::timeout_at(
+        deadline,
         tools::call_tool(&state.pool, caller, name, arguments),
     )
     .await;

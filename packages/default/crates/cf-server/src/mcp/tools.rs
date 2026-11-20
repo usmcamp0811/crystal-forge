@@ -854,27 +854,8 @@ async fn get_remediation_context(
         )));
     }
     let system = authorized_system(pool, effective, args.system_id).await?;
-    // The inventory search is a substring match, so exact CVE and package
-    // equality is applied below. One CVE has far fewer packages than the
-    // largest inventory page on one system.
-    let page = inventory_request(
-        MAX_SYSTEM_CVE_INVENTORY_PAGE_SIZE,
-        None,
-        Some(cve_id.clone()),
-        &[],
-    )?;
-    let inventory = cves::fetch_system_cve_inventory_page(pool, system.id, &page)
-        .await
-        .map_err(inventory_error)?;
-    let row = inventory
-        .rows
-        .iter()
-        .find(|row| {
-            row.cve_id == cve_id
-                && (row.canonical_package_name == args.package_name
-                    || row.package_name == args.package_name)
-        })
-        .ok_or(ToolError::NotFound)?;
+    let (inventory, row) =
+        find_inventory_occurrence(pool, system.id, &cve_id, &args.package_name).await?;
     // SECURITY: The target query selects no flake repository URL. The target
     // is reported only when it names the same scan as the inventory row.
     let target = cves::fetch_current_cve_authority_target(pool, system.id)
@@ -925,6 +906,66 @@ async fn get_remediation_context(
         "hints": hints,
         "hints_are_authoritative": false,
     }))
+}
+
+/// Finds the current inventory row for one exact CVE and package on a system.
+///
+/// The inventory search is a substring match on the CVE, so one search can
+/// return more rows than one page holds. The lookup follows the inventory
+/// cursor until it finds an exact CVE and package match or the inventory ends.
+/// A missing finding therefore means the current inventory has no such row,
+/// never that the row sits on a later page. Returns the page that holds the
+/// row, because its `source` describes the scan for that row.
+///
+/// The loop ends: every page either finds the row, ends the inventory, or
+/// advances the inventory cursor, and the inventory is finite. The MCP request
+/// deadline bounds the total time.
+async fn find_inventory_occurrence(
+    pool: &PgPool,
+    system_id: Uuid,
+    cve_id: &str,
+    package_name: &str,
+) -> Result<
+    (
+        cves::SystemCveInventoryQuery,
+        cves::ExactSystemVulnerabilityRow,
+    ),
+    ToolError,
+> {
+    let mut after = None;
+    loop {
+        let page = inventory_request(
+            MAX_SYSTEM_CVE_INVENTORY_PAGE_SIZE,
+            after,
+            Some(cve_id.to_owned()),
+            &[],
+        )?;
+        let mut inventory = cves::fetch_system_cve_inventory_page(pool, system_id, &page)
+            .await
+            .map_err(|error| match system_cve_inventory_page_error(&error) {
+                // The caller sent no cursor; the cursor here is internal. An
+                // inventory that changes between pages is a retryable failure.
+                Some(
+                    SystemCveInventoryPageError::InvalidCursor
+                    | SystemCveInventoryPageError::InventoryChanged,
+                ) => ToolError::Internal(anyhow::anyhow!(
+                    "system CVE inventory changed during the remediation lookup"
+                )),
+                _ => inventory_error(error),
+            })?;
+        let found = inventory.rows.iter().position(|row| {
+            row.cve_id == cve_id
+                && (row.canonical_package_name == package_name || row.package_name == package_name)
+        });
+        if let Some(index) = found {
+            let row = inventory.rows.swap_remove(index);
+            return Ok((inventory, row));
+        }
+        match (inventory.has_more, inventory.next_cursor) {
+            (true, Some(cursor)) => after = Some(cursor),
+            _ => return Err(ToolError::NotFound),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

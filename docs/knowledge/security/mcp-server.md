@@ -180,7 +180,8 @@ unauthenticated request.
 | Limit | Value | Result when exceeded |
 | --- | --- | --- |
 | Request body | 1 MiB | 413 with -32600 |
-| Tool execution | 30 s per request | Tool error `internal_error`, message `The request timed out`; the call is cancelled |
+| Whole request (authentication, `last_used_at` write, body read, tool call) | 30 s from the enabled check | During the tool call: tool error `internal_error`, message `The request timed out`. Before the tool call (slow token lookup or slow body upload): 503 with -32603 `The request timed out`. The pending work is cancelled and the concurrency permit is released. |
+| Remediation lookup | Follows the system CVE inventory pages until the exact CVE and package match or the inventory ends | Bounded by the request deadline; an inventory that changes between pages gives `internal_error` (retry) |
 | Concurrent requests per token | 4 | 429 with -32002 `Too many concurrent requests for this token` |
 | `last_used_at` write | at most once per 5 minutes per token | Later requests do not write |
 
