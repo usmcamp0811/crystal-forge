@@ -6,7 +6,9 @@
 //! transaction token-row check sees real rows. Tests call the tool functions
 //! directly.
 
-use chrono::Utc;
+use std::time::Duration;
+
+use chrono::{NaiveDate, Utc};
 use crystal_forge::api::models::CreateAccessTokenRequest;
 use crystal_forge::auth::authorization::CredentialIdentity;
 use crystal_forge::mcp::poam_write::{update_poam_progress, verify_poam};
@@ -14,6 +16,7 @@ use crystal_forge::mcp::tools::{ToolCaller, ToolError};
 use crystal_forge::models::auth_identity::AuthRole;
 use crystal_forge::models::poam::{
     AddCveFindingRequest, AddNoteRequest, CreateCvePoamRequest, CveObservationReference, PoamRisk,
+    UpdateMilestoneRequest,
 };
 use crystal_forge::queries::auth_identity::{
     clear_user_environment_memberships, insert_user_environment_membership, sync_user_role,
@@ -731,4 +734,414 @@ async fn verify_poam_records_an_attributed_attempt_and_never_closes(pool: PgPool
         .await,
         Err(ToolError::NotFound)
     ));
+}
+
+// ---------------------------------------------------------------------------
+// No-op milestone updates
+// ---------------------------------------------------------------------------
+
+async fn history_counts(pool: &PgPool, poam_id: Uuid) -> (i64, i64) {
+    sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM poam_activity WHERE poam_id=$1), \
+                (SELECT COUNT(*) FROM admin_audit_events WHERE target='poam:'||$1::text)",
+    )
+    .bind(poam_id)
+    .fetch_one(pool)
+    .await
+    .expect("history counts")
+}
+
+async fn milestone_updated_at(pool: &PgPool, milestone_id: Uuid) -> chrono::DateTime<Utc> {
+    sqlx::query_scalar("SELECT updated_at FROM poam_milestones WHERE id=$1")
+        .bind(milestone_id)
+        .fetch_one(pool)
+        .await
+        .expect("milestone updated_at")
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn update_milestone_with_current_values_changes_nothing(pool: PgPool) {
+    let fleet = fleet(&pool).await;
+    let owner = user(&pool, AuthRole::Operator, &[fleet.env_a]).await;
+    let token = issue(&pool, owner, WRITE, &[fleet.env_a]).await;
+    let (poam_id, revision) = create_poam(&pool, &fleet.creator, &fleet.observations_a[0]).await;
+    let added = progress(
+        &pool,
+        &token,
+        poam_id,
+        revision,
+        json!({"type": "add_milestone", "title": "Deploy fix", "target_date": "2099-01-31"}),
+    )
+    .await
+    .expect("add milestone");
+    let milestone_id: Uuid =
+        serde_json::from_value(added["changed"]["milestone_id"].clone()).expect("milestone id");
+    let revision = revision_of(&added);
+    let history = history_counts(&pool, poam_id).await;
+    let updated_at = milestone_updated_at(&pool, milestone_id).await;
+
+    // MCP: every present field already has the requested value (the title
+    // after trimming), so the tool reports no change at the same revision.
+    let unchanged = progress(
+        &pool,
+        &token,
+        poam_id,
+        revision,
+        json!({
+            "type": "update_milestone",
+            "milestone_id": milestone_id,
+            "title": "  Deploy fix ",
+            "target_date": "2099-01-31",
+            "completed": false,
+        }),
+    )
+    .await
+    .expect("no-op update");
+    assert!(unchanged["changed"].is_null(), "{unchanged}");
+    assert_eq!(revision_of(&unchanged), revision);
+    assert_eq!(current_revision(&pool, poam_id).await, revision);
+    assert_eq!(history_counts(&pool, poam_id).await, history);
+    assert_eq!(milestone_updated_at(&pool, milestone_id).await, updated_at);
+
+    // Browser: the same request returns the detail at the same revision.
+    let detail = poam_service::update_milestone(
+        &pool,
+        &fleet.creator,
+        poam_id,
+        milestone_id,
+        UpdateMilestoneRequest {
+            revision,
+            title: Some("Deploy fix".into()),
+            target_date: NaiveDate::from_ymd_opt(2099, 1, 31),
+            completed: Some(false),
+        },
+        &SystemClock,
+    )
+    .await
+    .expect("browser no-op update");
+    assert_eq!(detail.poam.revision, revision);
+    assert_eq!(history_counts(&pool, poam_id).await, history);
+    assert_eq!(milestone_updated_at(&pool, milestone_id).await, updated_at);
+
+    // A real change still records one event and one revision.
+    let completed = progress(
+        &pool,
+        &token,
+        poam_id,
+        revision,
+        json!({"type": "update_milestone", "milestone_id": milestone_id, "completed": true}),
+    )
+    .await
+    .expect("complete milestone");
+    assert_eq!(revision_of(&completed), revision + 1);
+    assert!(!completed["changed"]["new"]["completed_at"].is_null());
+    assert_eq!(
+        history_counts(&pool, poam_id).await,
+        (history.0 + 1, history.1 + 1)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Durable attribution
+// ---------------------------------------------------------------------------
+
+fn restricted_reader(token: &Token, owner: Uuid) -> PoamActor {
+    PoamActor {
+        credential: CredentialIdentity::Restricted(token.caller.grant.clone()),
+        user_id: owner,
+        identifier: String::new(),
+        is_admin: false,
+        can_mutate: false,
+        environment_ids: Vec::new(),
+        request_origin: None,
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn agent_attribution_is_stored_on_history_rows(pool: PgPool) {
+    let fleet = fleet(&pool).await;
+    let owner = user(&pool, AuthRole::Operator, &[fleet.env_a]).await;
+    let token = issue(&pool, owner, WRITE_VERIFY, &[fleet.env_a]).await;
+    let token_id = token.caller.token_id;
+    let (poam_id, revision) = create_poam(&pool, &fleet.creator, &fleet.observations_a[0]).await;
+    let awaiting = progress(
+        &pool,
+        &token,
+        poam_id,
+        revision,
+        json!({"type": "set_status", "status": "awaiting_verification"}),
+    )
+    .await
+    .expect("await verification");
+    verify_poam(
+        &pool,
+        &token.caller,
+        json!({"poam_id": poam_id, "revision": revision_of(&awaiting)}),
+    )
+    .await
+    .expect("verify");
+
+    // Agent rows store the marker and the name snapshot; the browser
+    // creation keeps the defaults.
+    let activity: Vec<(String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT kind,via_agent,access_token_name FROM poam_activity \
+         WHERE poam_id=$1 ORDER BY created_at,id",
+    )
+    .bind(poam_id)
+    .fetch_all(&pool)
+    .await
+    .expect("activity rows");
+    assert_eq!(activity.len(), 3);
+    assert_eq!(activity[0], ("created".to_owned(), false, None));
+    for (kind, via_agent, name) in &activity[1..] {
+        assert!(*via_agent, "{kind}");
+        assert_eq!(name.as_deref(), Some(token.name.as_str()), "{kind}");
+    }
+    let attempt: (bool, Option<String>) = sqlx::query_as(
+        "SELECT via_agent,access_token_name FROM poam_verification_attempts WHERE poam_id=$1",
+    )
+    .bind(poam_id)
+    .fetch_one(&pool)
+    .await
+    .expect("attempt row");
+    assert_eq!(attempt, (true, Some(token.name.clone())));
+
+    // Hard deletion of the token is rejected: the ON DELETE SET NULL action of
+    // migration 0341 updates the immutable history rows, and their triggers
+    // raise. The token row and every attribution column stay unchanged.
+    let error = sqlx::query("DELETE FROM api_access_tokens WHERE id=$1")
+        .bind(token_id)
+        .execute(&pool)
+        .await
+        .expect_err("token deletion is rejected while POA&M history names it");
+    assert!(
+        error.to_string().contains("history is immutable"),
+        "unexpected deletion error: {error}"
+    );
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_access_tokens WHERE id=$1")
+        .bind(token_id)
+        .fetch_one(&pool)
+        .await
+        .expect("token count");
+    assert_eq!(remaining, 1);
+
+    // The view prefers the snapshot over the live token row: a later rename
+    // of the token does not change the recorded name.
+    sqlx::query("UPDATE api_access_tokens SET name='renamed-after-write' WHERE id=$1")
+        .bind(token_id)
+        .execute(&pool)
+        .await
+        .expect("rename token");
+    let detail = poam_service::restricted_detail(
+        &pool,
+        &restricted_reader(&token, owner),
+        poam_id,
+        &SystemClock,
+    )
+    .await
+    .expect("detail");
+    let status_view = detail
+        .activity
+        .iter()
+        .find(|item| item.kind == "status_changed")
+        .expect("status activity");
+    assert!(status_view.via_agent);
+    assert_eq!(status_view.access_token_id, Some(token_id));
+    assert_eq!(
+        status_view.access_token_name.as_deref(),
+        Some(token.name.as_str())
+    );
+    let created_view = detail
+        .activity
+        .iter()
+        .find(|item| item.kind == "created")
+        .expect("created activity");
+    assert!(!created_view.via_agent);
+    assert_eq!(created_view.access_token_name, None);
+    let attempt_view = detail
+        .verification_attempts
+        .first()
+        .expect("verification attempt");
+    assert!(attempt_view.via_agent);
+    assert_eq!(
+        attempt_view.access_token_name.as_deref(),
+        Some(token.name.as_str())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent scope changes
+// ---------------------------------------------------------------------------
+
+/// Bounds each race so that a locking defect fails the test instead of
+/// hanging it.
+const RACE_TIMEOUT: Duration = Duration::from_secs(30);
+
+// The exact statements of the service locks; `pg_stat_activity.query` shows
+// the waiting statement text.
+const ENVIRONMENT_LOCK_SQL: &str =
+    "SELECT id FROM environments WHERE id=ANY($1) ORDER BY id FOR SHARE";
+const SYSTEM_LOCK_SQL: &str = "SELECT id FROM systems WHERE id=ANY($1) ORDER BY id FOR SHARE";
+const POAM_LOCK_SQL: &str = "SELECT revision,status FROM poams WHERE id=$1 FOR UPDATE";
+
+/// Polls for up to five seconds for a backend that waits for a lock while it
+/// runs `statement`.
+async fn lock_waiter_seen(pool: &PgPool, statement: &str) -> bool {
+    for _ in 0..200 {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+             WHERE datname=current_database() AND wait_event_type='Lock' AND query=$1)",
+        )
+        .bind(statement)
+        .fetch_one(pool)
+        .await
+        .expect("pg_stat_activity");
+        if waiting {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
+/// Runs `statement` with a 300 ms lock timeout in a transaction that always
+/// rolls back, and reports whether a lock blocked it (SQLSTATE 55P03).
+async fn blocked_by_lock(pool: &PgPool, statement: &str) -> bool {
+    let mut tx = pool.begin().await.expect("begin probe");
+    sqlx::query("SET LOCAL lock_timeout = '300ms'")
+        .execute(&mut *tx)
+        .await
+        .expect("set lock_timeout");
+    let result = sqlx::query(statement).execute(&mut *tx).await;
+    tx.rollback().await.expect("roll back probe");
+    match result {
+        Ok(_) => false,
+        Err(error) => {
+            let code = error
+                .as_database_error()
+                .and_then(|database| database.code())
+                .map(|code| code.into_owned());
+            assert_eq!(
+                code.as_deref(),
+                Some("55P03"),
+                "unexpected probe error: {error}"
+            );
+            true
+        }
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn environment_deactivation_committed_during_the_lock_wait_is_observed(pool: PgPool) {
+    let fleet = fleet(&pool).await;
+    let owner = user(&pool, AuthRole::Operator, &[fleet.env_a]).await;
+    let token = issue(&pool, owner, WRITE, &[fleet.env_a]).await;
+    let (poam_id, revision) = create_poam(&pool, &fleet.creator, &fleet.observations_a[0]).await;
+    let history = history_counts(&pool, poam_id).await;
+
+    let mut deactivation = pool.begin().await.expect("begin deactivation");
+    sqlx::query("UPDATE environments SET is_active=false WHERE id=$1")
+        .bind(fleet.env_a)
+        .execute(&mut *deactivation)
+        .await
+        .expect("deactivate environment");
+    let release = async {
+        let waited = lock_waiter_seen(&pool, ENVIRONMENT_LOCK_SQL).await;
+        deactivation.commit().await.expect("commit deactivation");
+        waited
+    };
+    let (result, waited) = tokio::time::timeout(
+        RACE_TIMEOUT,
+        futures::future::join(progress(&pool, &token, poam_id, revision, note()), release),
+    )
+    .await
+    .expect("race finishes");
+
+    assert!(waited, "the write must wait for the environment row lock");
+    assert!(matches!(result, Err(ToolError::NotFound)), "{result:?}");
+    assert_eq!(current_revision(&pool, poam_id).await, revision);
+    assert_eq!(history_counts(&pool, poam_id).await, history);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn subject_system_move_committed_during_the_lock_wait_is_observed(pool: PgPool) {
+    let fleet = fleet(&pool).await;
+    let owner = user(&pool, AuthRole::Operator, &[fleet.env_a]).await;
+    let token = issue(&pool, owner, WRITE, &[fleet.env_a]).await;
+    let (poam_id, revision) = create_poam(&pool, &fleet.creator, &fleet.observations_a[0]).await;
+    let history = history_counts(&pool, poam_id).await;
+
+    let mut move_system = pool.begin().await.expect("begin move");
+    sqlx::query("UPDATE systems SET environment_id=$2 WHERE id=$1")
+        .bind(fleet.observations_a[0].system_id)
+        .bind(fleet.env_b)
+        .execute(&mut *move_system)
+        .await
+        .expect("move system to B");
+    let release = async {
+        let waited = lock_waiter_seen(&pool, SYSTEM_LOCK_SQL).await;
+        move_system.commit().await.expect("commit move");
+        waited
+    };
+    let (result, waited) = tokio::time::timeout(
+        RACE_TIMEOUT,
+        futures::future::join(progress(&pool, &token, poam_id, revision, note()), release),
+    )
+    .await
+    .expect("race finishes");
+
+    assert!(
+        waited,
+        "the write must wait for the subject system row lock"
+    );
+    assert!(matches!(result, Err(ToolError::NotFound)), "{result:?}");
+    assert_eq!(current_revision(&pool, poam_id).await, revision);
+    assert_eq!(history_counts(&pool, poam_id).await, history);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_write_in_progress_blocks_deactivation_and_moves_until_it_commits(pool: PgPool) {
+    let fleet = fleet(&pool).await;
+    let owner = user(&pool, AuthRole::Operator, &[fleet.env_a]).await;
+    let token = issue(&pool, owner, WRITE, &[fleet.env_a]).await;
+    let (poam_id, revision) = create_poam(&pool, &fleet.creator, &fleet.observations_a[0]).await;
+    let deactivate = format!(
+        "UPDATE environments SET is_active=false WHERE id='{}'",
+        fleet.env_a
+    );
+    let move_system = format!(
+        "UPDATE systems SET environment_id='{}' WHERE id='{}'",
+        fleet.env_b, fleet.observations_a[0].system_id
+    );
+
+    // Holding the POA&M row stops the write at its last lock (step 6), after
+    // it has taken the environment and system locks.
+    let mut holder = pool.begin().await.expect("begin holder");
+    sqlx::query("SELECT id FROM poams WHERE id=$1 FOR UPDATE")
+        .bind(poam_id)
+        .execute(&mut *holder)
+        .await
+        .expect("hold POA&M row");
+    let probe = async {
+        let waited = lock_waiter_seen(&pool, POAM_LOCK_SQL).await;
+        let deactivation_blocked = blocked_by_lock(&pool, &deactivate).await;
+        let move_blocked = blocked_by_lock(&pool, &move_system).await;
+        holder.rollback().await.expect("release POA&M row");
+        (waited, deactivation_blocked, move_blocked)
+    };
+    let (result, (waited, deactivation_blocked, move_blocked)) = tokio::time::timeout(
+        RACE_TIMEOUT,
+        futures::future::join(progress(&pool, &token, poam_id, revision, note()), probe),
+    )
+    .await
+    .expect("race finishes");
+
+    assert!(waited, "the write must reach the POA&M row lock");
+    assert!(deactivation_blocked, "deactivation must wait for the write");
+    assert!(move_blocked, "a subject move must wait for the write");
+    let written = result.expect("the write commits after the POA&M row is released");
+    assert_eq!(revision_of(&written), revision + 1);
+    // The committed write releases its scope locks.
+    assert!(!blocked_by_lock(&pool, &deactivate).await);
+    assert!(!blocked_by_lock(&pool, &move_system).await);
 }

@@ -1353,8 +1353,10 @@ pub async fn detail(
                OR system.environment_id=ANY($3))
            ORDER BY reference.added_at,reference.assignment_version_id"#)
         .bind(poam_id).bind(is_admin).bind(environment_ids).fetch_all(&mut **tx).await?;
-    let attempt_rows = sqlx::query_as::<_, (Uuid,String,i64,Uuid,chrono::DateTime<chrono::Utc>,Option<Uuid>,Option<String>)>(
-        "SELECT attempt.id,attempt.outcome,attempt.poam_revision,attempt.attempted_by,attempt.attempted_at,attempt.access_token_id,token.name FROM poam_verification_attempts attempt LEFT JOIN api_access_tokens token ON token.id=attempt.access_token_id WHERE attempt.poam_id=$1 AND ($3::timestamptz IS NULL OR (attempt.attempted_at,attempt.id)<($3,$4)) ORDER BY attempt.attempted_at DESC,attempt.id DESC LIMIT $2")
+    // COMPATIBILITY: Attempts written before migration 0342 have no stored
+    // marker or name; the token id and the live token name stand in for them.
+    let attempt_rows = sqlx::query_as::<_, (Uuid,String,i64,Uuid,chrono::DateTime<chrono::Utc>,Option<Uuid>,Option<String>,bool)>(
+        "SELECT attempt.id,attempt.outcome,attempt.poam_revision,attempt.attempted_by,attempt.attempted_at,attempt.access_token_id,COALESCE(attempt.access_token_name,token.name),(attempt.via_agent OR attempt.access_token_id IS NOT NULL) FROM poam_verification_attempts attempt LEFT JOIN api_access_tokens token ON token.id=attempt.access_token_id WHERE attempt.poam_id=$1 AND ($3::timestamptz IS NULL OR (attempt.attempted_at,attempt.id)<($3,$4)) ORDER BY attempt.attempted_at DESC,attempt.id DESC LIMIT $2")
         .bind(poam_id).bind(verification_limit + 1).bind(verification_before_at).bind(verification_before_id).fetch_all(&mut **tx).await?;
     let verification_has_more = attempt_rows.len() as i64 > verification_limit;
     let attempt_rows = attempt_rows
@@ -1414,6 +1416,7 @@ pub async fn detail(
             attempted_at: row.4,
             access_token_id: row.5,
             access_token_name: row.6,
+            via_agent: row.7,
             items: verification_items
                 .iter()
                 .filter(|item| item.attempt_id == row.0)
@@ -1426,11 +1429,15 @@ pub async fn detail(
                 .collect(),
         })
         .collect();
+    // COMPATIBILITY: As for attempts, rows written before migration 0342 use
+    // the token id and the live token name.
     let activity = sqlx::query_as::<_, ActivityView>(r#"
         SELECT activity.id,activity.actor_user_id,
                COALESCE(actor.username,actor.email) AS actor_display,
                activity.kind,activity.payload,activity.created_at,
-               activity.access_token_id,token.name AS access_token_name
+               activity.access_token_id,
+               COALESCE(activity.access_token_name,token.name) AS access_token_name,
+               (activity.via_agent OR activity.access_token_id IS NOT NULL) AS via_agent
         FROM poam_activity activity
         LEFT JOIN users actor ON actor.id=activity.actor_user_id
         LEFT JOIN api_access_tokens token ON token.id=activity.access_token_id
@@ -1689,11 +1696,12 @@ pub async fn bundle_rollups(
 /// together with the mutation they describe.
 ///
 /// `access_token_id` identifies the owner access token that made the change,
-/// or `None` for a browser session. A token id is stored on both rows, and the
-/// audit metadata (never the activity payload) also receives
-/// `{"via": "mcp", "access_token_id", "access_token_name"}`. The name is a
-/// snapshot that stays in the audit event after the token is deleted. The
-/// human owner remains `actor_id`.
+/// or `None` for a browser session. A token id is stored on both rows. The
+/// activity row also stores `via_agent = true` and the token name in its
+/// `access_token_name` column (migration 0342); the audit metadata (never the
+/// activity payload) receives `{"via": "mcp", "access_token_id",
+/// "access_token_name"}`. Both names are snapshots that do not depend on the
+/// token row. The human owner remains `actor_id`.
 ///
 /// # Errors
 ///
@@ -1709,7 +1717,10 @@ pub async fn insert_activity_and_audit(
     access_token_id: Option<Uuid>,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO poam_activity(poam_id,actor_user_id,kind,payload,created_at,access_token_id) VALUES($1,$2,$3,$4,clock_timestamp(),$5)",
+        r#"INSERT INTO poam_activity(poam_id,actor_user_id,kind,payload,created_at,
+               access_token_id,via_agent,access_token_name)
+           VALUES($1,$2,$3,$4,clock_timestamp(),$5,$5::uuid IS NOT NULL,
+               (SELECT name FROM api_access_tokens WHERE id=$5::uuid))"#,
     )
     .bind(poam_id)
     .bind(actor_id)

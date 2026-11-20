@@ -1257,6 +1257,13 @@ pub struct VerificationAttemptView {
     pub attempted_by: Uuid,
     /// Records when verification was committed.
     pub attempted_at: DateTime<Utc>,
+    /// Reports that an owner access token (agent) requested the attempt. The
+    /// server keeps it `true` after the token is deleted.
+    #[serde(default)]
+    pub via_agent: bool,
+    /// Contains the token name recorded for the attempt, when known.
+    #[serde(default)]
+    pub access_token_name: Option<String>,
     /// Contains the immutable finding results from this attempt.
     pub items: Vec<VerificationItemView>,
     /// Contains immutable exact-CVE results without changing `items` semantics.
@@ -1379,7 +1386,12 @@ pub struct ActivityView {
     /// `None` for a browser session or server action.
     #[serde(default)]
     pub access_token_id: Option<Uuid>,
-    /// Contains the current name of `access_token_id`, when known.
+    /// Reports that an owner access token (agent) made the change. The server
+    /// keeps it `true` after the token is deleted and `access_token_id` is
+    /// `None`.
+    #[serde(default)]
+    pub via_agent: bool,
+    /// Contains the token name recorded for the change, when known.
     #[serde(default)]
     pub access_token_name: Option<String>,
 }

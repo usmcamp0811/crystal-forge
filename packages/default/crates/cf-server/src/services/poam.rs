@@ -392,11 +392,13 @@ async fn current_restricted_mutating_actor_tx(
         return Err(PoamError::Forbidden);
     };
     // CONCURRENCY: Lock order is owner row, token row, roles, memberships,
-    // all `FOR SHARE`, after any domain writer locks. Token revoke and issue
-    // lock the owner row and then the token row in the same order, and role or
-    // membership writers lock the owner row `FOR UPDATE`. A revocation or
-    // grant change that committed first is visible here; a later one waits
-    // for this transaction and linearizes after the mutation.
+    // all `FOR SHARE`, after any domain writer locks and after
+    // `lock_restricted_scope_environments_tx` and
+    // `lock_poam_subject_systems_tx`. Token revoke and issue lock the owner
+    // row and then the token row in the same order, and role or membership
+    // writers lock the owner row `FOR UPDATE`. A revocation or grant change
+    // that committed first is visible here; a later one waits for this
+    // transaction and linearizes after the mutation.
     let user = sqlx::query_as::<_, (String, bool)>(
         "SELECT email,is_active FROM users WHERE id=$1 FOR SHARE",
     )
@@ -454,7 +456,10 @@ async fn current_restricted_mutating_actor_tx(
         .reading_environments(owner_is_admin, memberships, &[scope], Utc::now())
         .ok_or(PoamError::Forbidden)?;
     // SECURITY: A deactivated environment grants nothing. NULL `is_active` is
-    // treated as inactive, as in `restricted_detail`.
+    // treated as inactive, as in `restricted_detail`. The caller locked every
+    // granted environment row before this statement, so this new READ
+    // COMMITTED snapshot includes a deactivation that committed while the
+    // lock waited, and no deactivation can commit until this transaction ends.
     let environment_ids = sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM environments WHERE id=ANY($1) AND COALESCE(is_active,false) ORDER BY id",
     )
@@ -470,6 +475,137 @@ async fn current_restricted_mutating_actor_tx(
         environment_ids,
         request_origin: request_actor.request_origin.clone(),
     })
+}
+
+// CONCURRENCY: A restricted POA&M write locks its authorization scope in this
+// order, and every step is optional only where noted:
+//
+// 1. canonical CVE advisory keys (verification only);
+// 2. every environment of the admitted grant, `FOR SHARE`, in id order
+//    (`lock_restricted_scope_environments_tx`);
+// 3. system, policy-finding and CVE-finding advisory keys (verification
+//    only);
+// 4. every subject system of the POA&M, `FOR SHARE`, in id order
+//    (`lock_poam_subject_systems_tx`);
+// 5. owner, token, roles and memberships, `FOR SHARE`
+//    (`current_restricted_mutating_actor_tx`);
+// 6. the POA&M row `FOR UPDATE` (`lock_mutable_poam`).
+//
+// This is the order of the writers that change the scope. A system move
+// (`update_system_handler`) locks CVE keys, then source and destination
+// environments `FOR UPDATE` in id order, then the system advisory key and
+// finding keys, then the system row `FOR UPDATE`, then the user `FOR SHARE`.
+// Fleet triage, CVE acceptance renewal and scheduled-disposition
+// reconciliation lock environments `FOR UPDATE` before systems. Those
+// writers, `reopen` and `validate_cve_create_context_tx` lock systems before
+// the actor and the POA&M row. Scan admission locks the environment and then
+// the system `FOR SHARE`.
+// Environment deletion is one DELETE that locks the environment row before
+// its cascades reach memberships. The system metadata trigger only try-locks
+// advisory keys and never waits. Because each transaction acquires these
+// resources in the same relative order, no wait-for cycle can form.
+//
+// The environment `is_active` check and the POA&M visibility check run in
+// statements after steps 2 and 4. Under READ COMMITTED they therefore observe
+// a deactivation or a system move that committed while a lock waited, and no
+// such change can commit before this transaction ends.
+
+/// Locks every environment row of a restricted grant `FOR SHARE`.
+///
+/// The set is the admitted grant without the membership filter, so it is a
+/// superset of every effective environment set that the later actor refresh
+/// can compute. A browser session, or a grant that cannot use `scope`, locks
+/// nothing; the actor refresh then returns `Forbidden`.
+async fn lock_restricted_scope_environments_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    request_actor: &PoamActor,
+    scope: &'static str,
+) -> Result<(), PoamError> {
+    if request_actor.credential.is_browser_session() {
+        return Ok(());
+    }
+    let granted = request_actor
+        .credential
+        .reading_environments(true, Vec::new(), &[scope], Utc::now())
+        .unwrap_or_default();
+    sqlx::query("SELECT id FROM environments WHERE id=ANY($1) ORDER BY id FOR SHARE")
+        .bind(&granted)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Returns the systems whose environment decides restricted POA&M
+/// visibility: every current and retired policy and exact-CVE subject, and
+/// every directly assigned system. Environment-scoped assignments depend on
+/// the environment row, which step 2 of the restricted lock order locks.
+async fn poam_subject_system_ids_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> Result<BTreeSet<Uuid>, PoamError> {
+    let ids = sqlx::query_scalar::<_, Uuid>(
+        r#"SELECT finding.system_id FROM poam_finding_links link
+           JOIN poam_findings finding ON finding.id=link.finding_id
+           WHERE link.poam_id=$1
+           UNION
+           SELECT link.system_id FROM poam_cve_finding_links link WHERE link.poam_id=$1
+           UNION
+           SELECT assignment.system_id FROM poam_assignment_references reference
+           JOIN compliance_bundle_assignment_versions version
+             ON version.id=reference.assignment_version_id
+           JOIN compliance_bundle_assignments assignment ON assignment.id=version.assignment_id
+           WHERE reference.poam_id=$1 AND assignment.system_id IS NOT NULL"#,
+    )
+    .bind(id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(ids.into_iter().collect())
+}
+
+/// Locks every subject system row of POA&M `id` `FOR SHARE` in id order and
+/// returns the locked set.
+///
+/// The set is read before the POA&M row lock. The caller must pass the result
+/// to [`require_locked_subject_systems_tx`] after it locks the POA&M row.
+///
+/// SECURITY: This runs before the actor refresh and returns nothing to the
+/// caller. An unauthorized request only takes short `FOR SHARE` locks and
+/// then fails with the same result as before.
+async fn lock_poam_subject_systems_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> Result<BTreeSet<Uuid>, PoamError> {
+    let ids = poam_subject_system_ids_tx(tx, id).await?;
+    sqlx::query("SELECT id FROM systems WHERE id=ANY($1) ORDER BY id FOR SHARE")
+        .bind(ids.iter().copied().collect::<Vec<_>>())
+        .execute(&mut **tx)
+        .await?;
+    Ok(ids)
+}
+
+/// Requires that the POA&M has no subject system outside `locked`.
+///
+/// A link that committed after [`lock_poam_subject_systems_tx`] can add an
+/// unlocked subject. Locking it after the POA&M row would invert the lock
+/// order, so the request fails instead and the caller retries.
+///
+/// # Errors
+///
+/// Returns `Conflict` with `concurrent_finding_change` when a subject system
+/// is not in `locked`.
+async fn require_locked_subject_systems_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    locked: &BTreeSet<Uuid>,
+) -> Result<(), PoamError> {
+    if poam_subject_system_ids_tx(tx, id).await?.is_subset(locked) {
+        Ok(())
+    } else {
+        Err(PoamError::Conflict(
+            "concurrent_finding_change",
+            "The POA&M subject set changed; retry the request".into(),
+        ))
+    }
 }
 
 async fn current_reading_actor_tx(
@@ -2771,8 +2907,13 @@ async fn add_milestone_tx(
     Ok((revision, change))
 }
 
-/// Returns `None`, without a revision bump or activity, when the update
-/// leaves the milestone row unchanged.
+/// Applies the present milestone fields and records `milestone_updated`.
+///
+/// Returns `None` when every present field already has the requested value
+/// (title compared after trimming, completion compared as a state). In that
+/// case the function writes nothing: the milestone row, `updated_at`,
+/// `updated_by`, the POA&M revision and the activity and audit rows stay
+/// unchanged. The browser and access-token paths share this rule.
 async fn update_milestone_tx(
     tx: &mut Transaction<'_, Postgres>,
     actor: &PoamActor,
@@ -2782,18 +2923,27 @@ async fn update_milestone_tx(
     target_date: Option<NaiveDate>,
     completed: Option<bool>,
 ) -> Result<Option<(i64, Value)>, PoamError> {
-    let old: Option<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(milestone) FROM poam_milestones milestone WHERE poam_id=$1 AND id=$2 FOR UPDATE",
+    // CONCURRENCY: The caller holds the POA&M row lock; the milestone row lock
+    // keeps the no-op decision and the UPDATE on the same row version.
+    let current = sqlx::query_as::<_, (Value, String, NaiveDate, bool)>(
+        "SELECT to_jsonb(milestone),title,target_date,completed_at IS NOT NULL FROM poam_milestones milestone WHERE poam_id=$1 AND id=$2 FOR UPDATE",
     )
     .bind(id)
     .bind(milestone_id)
     .fetch_optional(&mut **tx)
     .await?;
-    let Some(old) = old else {
+    let Some((old, old_title, old_target_date, old_completed)) = current else {
         return Err(PoamError::NotFound);
     };
+    let title = title.map(str::trim);
+    let changes_title = title.is_some_and(|title| title != old_title);
+    let changes_target_date = target_date.is_some_and(|date| date != old_target_date);
+    let changes_completed = completed.is_some_and(|completed| completed != old_completed);
+    if !changes_title && !changes_target_date && !changes_completed {
+        return Ok(None);
+    }
     sqlx::query("UPDATE poam_milestones SET title=COALESCE($3,title),target_date=COALESCE($4,target_date),completed_at=CASE WHEN $5::bool IS NULL THEN completed_at WHEN $5 THEN COALESCE(completed_at,NOW()) ELSE NULL END,completed_by=CASE WHEN $5::bool IS NULL THEN completed_by WHEN $5 THEN COALESCE(completed_by,$6) ELSE NULL END,updated_by=$6,updated_at=NOW() WHERE poam_id=$1 AND id=$2")
-      .bind(id).bind(milestone_id).bind(title.map(str::trim)).bind(target_date).bind(completed).bind(actor.user_id).execute(&mut **tx).await?;
+      .bind(id).bind(milestone_id).bind(title).bind(target_date).bind(completed).bind(actor.user_id).execute(&mut **tx).await?;
     let new: Value = sqlx::query_scalar(
         "SELECT to_jsonb(milestone) FROM poam_milestones milestone WHERE poam_id=$1 AND id=$2",
     )
@@ -2801,9 +2951,6 @@ async fn update_milestone_tx(
     .bind(milestone_id)
     .fetch_one(&mut **tx)
     .await?;
-    if old == new {
-        return Ok(None);
-    }
     let change = json!({"milestone_id":milestone_id,"old":old,"new":new});
     let revision = bump_and_audit(tx, actor, id, "milestone_updated", change.clone()).await?;
     Ok(Some((revision, change)))
@@ -2910,6 +3057,10 @@ pub async fn add_milestone(
 }
 
 /// Updates one milestone and records the changed state in the audit history.
+///
+/// A request whose present fields already match the milestone changes
+/// nothing: it returns the detail at the request revision and records no
+/// activity or audit event.
 ///
 /// # Errors
 ///
@@ -3036,11 +3187,15 @@ fn stored_status(status: &str) -> Result<PoamStatus, PoamError> {
 
 /// Applies one progress action for an access-token actor.
 ///
-/// One transaction reauthorizes the token and owner with scope `poams:write`,
-/// locks the POA&M at `revision`, requires every current and recorded subject
-/// in the effective environments, validates and applies the action, and
-/// records activity and audit rows with the token id. The owner is the
-/// recorded actor. The refreshed actor is never Admin.
+/// One transaction locks the granted environments and the POA&M subject
+/// systems `FOR SHARE`, reauthorizes the token and owner with scope
+/// `poams:write`, locks the POA&M at `revision`, requires every current and
+/// recorded subject in the effective environments, validates and applies the
+/// action, and records activity and audit rows with the token id. An
+/// environment deactivation or a subject system move therefore either
+/// commits before the authorization check and is observed, or waits for this
+/// transaction. The owner is the recorded actor. The refreshed actor is never
+/// Admin.
 ///
 /// # Errors
 ///
@@ -3051,8 +3206,9 @@ fn stored_status(status: &str) -> Result<PoamStatus, PoamError> {
 ///   POA&M subject is outside the effective environments.
 /// - [`PoamError::Validation`] for invalid input, including `close_required`
 ///   for `SetStatus` to `Completed`.
-/// - [`PoamError::Conflict`] with `stale_revision`, `poam_completed` or
-///   `invalid_transition`.
+/// - [`PoamError::Conflict`] with `stale_revision`, `poam_completed`,
+///   `invalid_transition`, or `concurrent_finding_change` when a subject
+///   system was linked after the subject lock was taken.
 /// - [`PoamError::Database`] on a persistence failure.
 pub async fn restricted_progress(
     pool: &PgPool,
@@ -3065,8 +3221,14 @@ pub async fn restricted_progress(
         return Err(PoamError::Forbidden);
     }
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: Steps 2, 4, 5 and 6 of the restricted lock order (see
+    // `lock_restricted_scope_environments_tx`). The environment and system
+    // locks keep the authorization scope fixed until commit.
+    lock_restricted_scope_environments_tx(&mut tx, actor, "poams:write").await?;
+    let locked_systems = lock_poam_subject_systems_tx(&mut tx, id).await?;
     let actor = current_restricted_mutating_actor_tx(&mut tx, actor, "poams:write").await?;
     let from = lock_mutable_poam(&mut tx, &actor, id, revision).await?;
+    require_locked_subject_systems_tx(&mut tx, id, &locked_systems).await?;
     // SECURITY: Inputs are validated after authorization, so a caller without
     // authority receives the same result for every input.
     let mut status = stored_status(&from)?;
@@ -11696,7 +11858,8 @@ pub async fn verify(
 /// Records a sealed verification attempt for an access-token actor.
 ///
 /// The checks, locks, evidence rules, retries and response match [`verify`].
-/// The transaction reauthorizes the token and owner with scope
+/// The transaction also locks the granted environments and the POA&M subject
+/// systems `FOR SHARE` before it reauthorizes the token and owner with scope
 /// `poams:verify` instead of the browser refresh, never acts as Admin, and
 /// requires every current and recorded POA&M subject in the effective
 /// environments. The attempt, activity and audit rows record the token id;
@@ -11708,7 +11871,9 @@ pub async fn verify(
 /// Returns [`PoamError::Forbidden`] for a browser session, a revoked, expired
 /// or foreign token, a token without `poams:verify`, or an owner without
 /// Operator or Admin. Returns [`PoamError::NotFound`] when the POA&M is absent
-/// or any subject is outside the effective environments. Other errors are as
+/// or any subject is outside the effective environments. Returns
+/// [`PoamError::Conflict`] with `concurrent_finding_change` when a subject
+/// system was linked after the subject lock was taken. Other errors are as
 /// for [`verify`].
 pub async fn restricted_verify(
     pool: &PgPool,
@@ -11767,6 +11932,13 @@ async fn verify_once(
     // READ COMMITTED, statements after a wait see the writer that just committed.
     let mut tx = pool.begin().await?;
     lock_cve_keys_tx(&mut tx, &expected_cve_findings).await?;
+    // CONCURRENCY: A restricted actor adds steps 2 and 4 of the restricted
+    // lock order (see `lock_restricted_scope_environments_tx`) between the
+    // existing advisory keys, as a system move does. The browser path is
+    // unchanged.
+    if restricted {
+        lock_restricted_scope_environments_tx(&mut tx, actor, "poams:verify").await?;
+    }
     for system_id in expected_findings
         .iter()
         .map(|row| row.1)
@@ -11784,12 +11956,20 @@ async fn verify_once(
         .collect::<Vec<_>>();
     lock_policy_finding_keys_for_systems_tx(&mut tx, &affected_system_ids).await?;
     lock_cve_finding_keys_tx(&mut tx, &expected_cve_findings).await?;
+    let locked_systems = if restricted {
+        Some(lock_poam_subject_systems_tx(&mut tx, id).await?)
+    } else {
+        None
+    };
     let actor = if restricted {
         current_restricted_mutating_actor_tx(&mut tx, actor, "poams:verify").await?
     } else {
         current_mutating_actor_tx(&mut tx, actor).await?
     };
     let status = lock_mutable_poam(&mut tx, &actor, id, revision).await?;
+    if let Some(locked_systems) = &locked_systems {
+        require_locked_subject_systems_tx(&mut tx, id, locked_systems).await?;
+    }
     if status != "awaiting_verification" {
         return Err(PoamError::Conflict(
             "invalid_transition",
@@ -11840,7 +12020,10 @@ async fn verify_once(
         .all(|item| closure_result_is_accepted(&item.result))
         && cve_items.iter().all(|item| item.result == "pass")
         && !uncovered_environment_cve_subject_tx(&mut tx, id).await?;
-    let attempt_id:Uuid=sqlx::query_scalar("INSERT INTO poam_verification_attempts(poam_id,attempted_by,outcome,poam_revision,attempted_at,access_token_id) VALUES($1,$2,$3,$4,$5,$6) RETURNING id")
+    // INVARIANT: An access-token attempt stores `via_agent` and a token name
+    // snapshot (migration 0342), so attribution does not depend on the token
+    // row that `access_token_id` references.
+    let attempt_id:Uuid=sqlx::query_scalar("INSERT INTO poam_verification_attempts(poam_id,attempted_by,outcome,poam_revision,attempted_at,access_token_id,via_agent,access_token_name) VALUES($1,$2,$3,$4,$5,$6,$6::uuid IS NOT NULL,(SELECT name FROM api_access_tokens WHERE id=$6::uuid)) RETURNING id")
       .bind(id).bind(actor.user_id).bind(if accepted{"accepted"}else{"rejected"}).bind(revision).bind(now).bind(actor.access_token_id()).fetch_one(&mut *tx).await?;
     insert_verification_items(&mut tx, attempt_id, &items, now).await?;
     insert_cve_verification_items(&mut tx, attempt_id, &cve_items, now).await?;
@@ -11965,7 +12148,7 @@ async fn close_once(
          let accepted = !uncovered_environment_cve_subject_tx(&mut tx, id).await?
              && items.iter().all(|item| closure_result_is_accepted(&item.result))
              && cve_items.iter().all(|item| item.result == "pass");
-        let attempt_id:Uuid=sqlx::query_scalar("INSERT INTO poam_verification_attempts(poam_id,attempted_by,outcome,poam_revision,attempted_at,access_token_id) VALUES($1,$2,$3,$4,$5,$6) RETURNING id")
+        let attempt_id:Uuid=sqlx::query_scalar("INSERT INTO poam_verification_attempts(poam_id,attempted_by,outcome,poam_revision,attempted_at,access_token_id,via_agent,access_token_name) VALUES($1,$2,$3,$4,$5,$6,$6::uuid IS NOT NULL,(SELECT name FROM api_access_tokens WHERE id=$6::uuid)) RETURNING id")
           .bind(id).bind(actor.user_id).bind(if accepted{"accepted"}else{"rejected"}).bind(revision).bind(now).bind(actor.access_token_id()).fetch_one(&mut *tx).await?;
         insert_verification_items(&mut tx, attempt_id, &items, now).await?;
         insert_cve_verification_items(&mut tx, attempt_id, &cve_items, now).await?;

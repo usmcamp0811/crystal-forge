@@ -17,11 +17,10 @@ use crate::components::icon::{Icon, IconName};
 
 use super::Spinner;
 use super::logic::{
-    AUTH_HEADER_EXAMPLE, CreateErrors, PRODUCTION_WRITE_CONFIRM_PREFIX,
-    PRODUCTION_WRITE_CONFIRM_SUFFIX, build_create_request, create_failure, create_intro,
+    AUTH_HEADER_EXAMPLE, CreateErrors, build_create_request, create_failure, create_intro,
     env_dot_color, environments_help, expiry_date, format_short_date, initial_form, lifetime_label,
-    masked_token, mcp_endpoint_text, production_write_selected, review_note, review_summary,
-    scope_unavailable_text, set_selected, validate_create,
+    masked_token, mcp_endpoint_text, production_write_confirmation_text, production_write_selected,
+    review_note, review_summary, scope_unavailable_text, set_selected, validate_create,
 };
 
 /// DOM id of the create dialog. Focus handling addresses the dialog by id.
@@ -62,7 +61,8 @@ fn Section(
 /// message before the request, and the server still decides.
 ///
 /// When the selection combines a write scope with a production environment,
-/// the Review section shows the design's production write confirmation. The
+/// the Review section shows the production write confirmation, which names the
+/// selected write capabilities and production environments. The
 /// form requires it before the request, and the server requires
 /// `confirm_production_write` too.
 ///
@@ -125,6 +125,7 @@ pub(super) fn CreateTokenDialog(
     );
     let expiry = expiry_date(Utc::now(), values.expires_in_days);
     let production_write = production_write_selected(&values, &policy);
+    let production_confirmation = production_write_confirmation_text(&values, &policy);
 
     rsx! {
         div { class: "modal-backdrop cfat-backdrop",
@@ -332,11 +333,7 @@ pub(super) fn CreateTokenDialog(
                                         "aria-describedby": "cfat-prod-err",
                                         onchange: move |event: FormEvent| form.write().confirm_production = event.checked(),
                                     }
-                                    div {
-                                        "{PRODUCTION_WRITE_CONFIRM_PREFIX}"
-                                        b { "production" }
-                                        "{PRODUCTION_WRITE_CONFIRM_SUFFIX}"
-                                    }
+                                    div { "{production_confirmation}" }
                                 }
                             }
                             div { id: "cfat-prod-err", role: "alert", class: "cfat-error",

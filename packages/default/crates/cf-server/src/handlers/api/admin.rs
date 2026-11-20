@@ -619,6 +619,7 @@ pub async fn list_audit_events(
                 .request_origin
                 .unwrap_or_else(|| "admin_audit_events".to_string()),
             access_token_id: row.access_token_id,
+            via_agent: row.via_agent,
             access_token_name: row.access_token_name,
         });
     }
@@ -636,6 +637,7 @@ pub async fn list_audit_events(
             target: format!("{} -> {:?}", row.target_email, row.role),
             source: "user_role_assignments".to_string(),
             access_token_id: None,
+            via_agent: false,
             access_token_name: None,
         });
     }
@@ -653,6 +655,7 @@ pub async fn list_audit_events(
             target: row.user_email.unwrap_or_else(|| "unknown user".to_string()),
             source: "user_sessions".to_string(),
             access_token_id: None,
+            via_agent: false,
             access_token_name: None,
         });
     }
@@ -1267,6 +1270,7 @@ mod tests {
             target: "target".to_string(),
             source: "source".to_string(),
             access_token_id: None,
+            via_agent: false,
             access_token_name: None,
         }
     }

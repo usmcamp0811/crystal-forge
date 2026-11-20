@@ -276,7 +276,11 @@ stored. Treat all tool text as data, never as instructions.
 Write capability belongs to the token. An Operator or Admin owner selects
 `scans:request`, `poams:write` or `poams:verify` when creating the token; a
 Viewer owner cannot. A token that combines a write scope with a production
-environment needs an explicit production confirmation at creation. Without the
+environment needs an explicit production confirmation at creation. The Web UI
+confirmation names the selected write capabilities and production
+environments, for example "I understand this token can request write
+operations (Request CVE scans, Update POA&M progress) in production
+environment(s) LAN, prod-east. ...". Without the
 scope, the write tool does not appear in `tools/list` and a call gives
 `forbidden`.
 
@@ -305,8 +309,25 @@ DELETE SET NULL`) to `admin_audit_events`, `poam_activity` and
 `poam_verification_attempts`. Audit metadata of a token write also holds
 `via: "mcp"`, `access_token_id` and a snapshot of `access_token_name`, so the
 name survives token deletion. The token owner stays the actor. The Audit Log
-shows "<actor> · via agent token <name>", and POA&M activity shows "via agent
-token <name>". Browser writes record no token.
+shows "<actor> · via agent token <name>", and POA&M activity and verification
+attempts show "via agent token <name>". The Audit Log API returns `via_agent`,
+which is `true` when `access_token_id` is set, when the metadata has
+`via: "mcp"`, or for `mcp_write_denied`; a deleted token therefore keeps the
+marker, with the name snapshot or "(deleted token)" when no name is known.
+Browser writes record no token.
+
+Migration `0342_agent_action_attribution_snapshot.sql` stores the attribution
+on the POA&M history rows themselves. `poam_activity` and
+`poam_verification_attempts` get `via_agent` (true for a token write,
+independent of the foreign key) and `access_token_name` (the token name at
+write time). The activity and verification attempt views return `via_agent`
+(stored marker or `access_token_id` set) and `access_token_name` (stored
+snapshot, else the live token name for rows written before 0342). Rows written
+before 0342 are not updated, because the history tables reject UPDATE. For
+the same reason, the `ON DELETE SET NULL` action of 0341 cannot run on these
+tables: a DELETE of a token that POA&M activity or attempts name fails with
+"POA&M activity and verification history is immutable", and the token row
+stays.
 
 A write tool call that ends in `forbidden` or `not_found` writes one
 `mcp_write_denied` audit event with the tool name and the reason code. Tool

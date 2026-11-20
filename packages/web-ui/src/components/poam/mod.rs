@@ -2057,6 +2057,9 @@ fn LifecycleSection(props: LifecycleSectionProps) -> Element {
                     div { class: "poam-verification-head",
                         strong { if index == 0 { "Latest verification · {attempt.outcome:?}" } else { "Earlier verification · {attempt.outcome:?}" } }
                         time { class: "mono", "{attempt.attempted_at}" }
+                        if let Some(agent) = agent_token_label(attempt.via_agent, attempt.access_token_name.as_deref()) {
+                            span { class: "poam-verification-agent", "data-testid": "poam-verification-agent", "{agent}" }
+                        }
                     }
                     for item in attempt.items.clone() {
                         {
@@ -2237,17 +2240,21 @@ fn activity_actor(activity: &ActivityView) -> String {
             "System".to_string()
         }
     });
-    match activity_agent_label(activity) {
+    match agent_token_label(activity.via_agent, activity.access_token_name.as_deref()) {
         Some(agent) => format!("{actor} {agent}"),
         None => actor,
     }
 }
 
 /// Returns "via agent token <name>" when an owner access token made the
-/// change. The owner stays the actor; the token only qualifies it.
-fn activity_agent_label(activity: &ActivityView) -> Option<String> {
-    activity.access_token_id?;
-    Some(match activity.access_token_name.as_deref() {
+/// change, or "via agent token (deleted)" when the server no longer knows the
+/// token name. The owner stays the actor; the token only qualifies it.
+/// `via_agent` comes from the server and stays `true` after token deletion.
+fn agent_token_label(via_agent: bool, token_name: Option<&str>) -> Option<String> {
+    if !via_agent {
+        return None;
+    }
+    Some(match token_name {
         Some(name) => format!("via agent token {name}"),
         None => "via agent token (deleted)".to_string(),
     })
@@ -2742,6 +2749,7 @@ mod tests {
                 .unwrap()
                 .with_timezone(&chrono::Utc),
             access_token_id: None,
+            via_agent: false,
             access_token_name: None,
         }
     }
@@ -2751,10 +2759,42 @@ mod tests {
         let mut item = activity("note", serde_json::json!({"text":"Patched"}));
         assert_eq!(activity_actor(&item), "j.okafor");
         item.access_token_id = Some(Uuid::from_u128(22));
+        item.via_agent = true;
         item.access_token_name = Some("OpenCode".into());
+        assert_eq!(activity_actor(&item), "j.okafor via agent token OpenCode");
+        // A deleted token clears `access_token_id`; `via_agent` keeps the
+        // marker and the snapshot name, when present, still shows.
+        item.access_token_id = None;
         assert_eq!(activity_actor(&item), "j.okafor via agent token OpenCode");
         item.access_token_name = None;
         assert_eq!(activity_actor(&item), "j.okafor via agent token (deleted)");
+    }
+
+    #[test]
+    fn verification_attempts_name_the_agent_token() {
+        let attempt: poam_api::VerificationAttemptView =
+            serde_json::from_value(serde_json::json!({
+                "id": "00000000-0000-0000-0000-00000000001e",
+                "outcome": "rejected",
+                "poam_revision": 4,
+                "attempted_by": "00000000-0000-0000-0000-000000000015",
+                "attempted_at": "2026-08-21T14:15:16Z",
+                "items": [],
+            }))
+            .expect("an attempt without agent fields decodes");
+        assert!(!attempt.via_agent);
+        assert_eq!(
+            agent_token_label(attempt.via_agent, attempt.access_token_name.as_deref()),
+            None
+        );
+        assert_eq!(
+            agent_token_label(true, Some("OpenCode")).as_deref(),
+            Some("via agent token OpenCode")
+        );
+        assert_eq!(
+            agent_token_label(true, None).as_deref(),
+            Some("via agent token (deleted)")
+        );
     }
 
     #[test]

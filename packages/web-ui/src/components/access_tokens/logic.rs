@@ -541,13 +541,37 @@ pub(super) struct CreateForm {
     pub(super) confirm_production: bool,
 }
 
-/// Production write confirmation text before the bold word `production`, as
-/// in the approved design.
-pub(super) const PRODUCTION_WRITE_CONFIRM_PREFIX: &str =
-    "I understand this token can request write operations in ";
-/// Production write confirmation text after the bold word `production`.
-pub(super) const PRODUCTION_WRITE_CONFIRM_SUFFIX: &str =
-    ". Server authorization and approval workflows still apply.";
+/// Returns the production write confirmation text for the current selection.
+///
+/// The text names the selected write capabilities by their policy labels and
+/// the selected production environments by name, both in policy order, so the
+/// owner confirms the exact grant. It extends the approved design sentence
+/// ("... write operations in production. ...") with these names. The text is
+/// shown only while [`production_write_selected`] is `true`; for another
+/// selection the lists can be empty.
+pub(super) fn production_write_confirmation_text(
+    form: &CreateForm,
+    policy: &AccessTokenPolicyDto,
+) -> String {
+    let capabilities: Vec<&str> = policy
+        .scopes
+        .iter()
+        .filter(|scope| !is_read_scope(&scope.scope) && form.scopes.contains(&scope.scope))
+        .map(|scope| scope.label.as_str())
+        .collect();
+    let environments: Vec<&str> = policy
+        .environments
+        .iter()
+        .filter(|env| env.is_production && form.environment_ids.contains(&env.id))
+        .map(|env| env.name.as_str())
+        .collect();
+    format!(
+        "I understand this token can request write operations ({}) in production \
+         environment(s) {}. Server authorization and approval workflows still apply.",
+        capabilities.join(", "),
+        environments.join(", ")
+    )
+}
 
 /// Returns whether the selection combines a write scope with a production
 /// environment. The dialog then shows the production write confirmation and
@@ -1461,11 +1485,57 @@ mod tests {
         assert!(!build_create_request(&form, &policy).confirm_production_write);
     }
 
+    /// Returns a policy with two production environments and both write
+    /// scopes available under their server labels.
+    fn labeled_write_policy() -> AccessTokenPolicyDto {
+        let mut policy = write_policy();
+        policy.environments[0].name = "LAN".to_string();
+        policy.environments.push(AccessTokenPolicyEnvironmentDto {
+            id: env_id(3),
+            name: "prod-east".to_string(),
+            color: None,
+            is_production: true,
+        });
+        policy.scopes[3].label = "Update POA&M progress".to_string();
+        policy.scopes.insert(
+            3,
+            AccessTokenPolicyScopeDto {
+                scope: "scans:request".to_string(),
+                label: "Request CVE scans".to_string(),
+                available: true,
+                default_selected: false,
+                unavailable_reason: None,
+            },
+        );
+        policy
+    }
+
     #[test]
-    fn production_confirmation_text_matches_the_design() {
+    fn production_confirmation_names_one_environment_and_one_capability() {
+        let policy = labeled_write_policy();
+        let mut form = valid_form();
+        // The staging selection and the read scope are not named.
+        form.environment_ids = vec![env_id(2), env_id(1)];
+        form.scopes = vec!["cves:read".to_string(), "poams:write".to_string()];
+        assert!(production_write_selected(&form, &policy));
         assert_eq!(
-            format!("{PRODUCTION_WRITE_CONFIRM_PREFIX}production{PRODUCTION_WRITE_CONFIRM_SUFFIX}"),
-            "I understand this token can request write operations in production. Server authorization and approval workflows still apply."
+            production_write_confirmation_text(&form, &policy),
+            "I understand this token can request write operations (Update POA&M progress) in \
+             production environment(s) LAN. Server authorization and approval workflows still apply."
+        );
+    }
+
+    #[test]
+    fn production_confirmation_names_every_environment_and_capability_in_policy_order() {
+        let policy = labeled_write_policy();
+        let mut form = valid_form();
+        form.environment_ids = vec![env_id(3), env_id(1)];
+        form.scopes = vec!["poams:write".to_string(), "scans:request".to_string()];
+        assert_eq!(
+            production_write_confirmation_text(&form, &policy),
+            "I understand this token can request write operations (Request CVE scans, Update \
+             POA&M progress) in production environment(s) LAN, prod-east. Server authorization \
+             and approval workflows still apply."
         );
     }
 

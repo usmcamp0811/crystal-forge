@@ -7092,6 +7092,10 @@ pub struct AuditEvent {
     /// server actions, and for servers that do not send the field.
     #[serde(default)]
     pub access_token_id: Option<Uuid>,
+    /// `true` when an agent acted through an access token. The server keeps
+    /// it `true` after the token is deleted, when `access_token_id` is `None`.
+    #[serde(default)]
+    pub via_agent: bool,
     /// Token name recorded for the action, or `None` when the server no
     /// longer knows it.
     #[serde(default)]

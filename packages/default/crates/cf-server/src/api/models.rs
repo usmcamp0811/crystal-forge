@@ -5296,6 +5296,10 @@ pub struct AuditEvent {
     /// `NULL` when the token row is deleted with its owner.
     #[serde(default)]
     pub access_token_id: Option<Uuid>,
+    /// `true` when an agent acted through an access token. Unlike
+    /// `access_token_id`, the marker stays `true` after the token is deleted.
+    #[serde(default)]
+    pub via_agent: bool,
     /// Name of the token at the time of the action (the metadata snapshot),
     /// else its current name. `None` when neither is known.
     #[serde(default)]

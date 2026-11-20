@@ -2749,25 +2749,24 @@ struct AuditActorLabel {
 /// Returns the actor cell text of one audit event.
 ///
 /// The human owner stays the actor. An event made through an access token
-/// adds `via agent token <name>`; a token whose name the server no longer
-/// knows reads `(deleted token)`. An event without an actor reads `system`.
+/// (`via_agent`, which stays set after the token is deleted) adds
+/// `via agent token <name>`; a token whose name the server no longer knows
+/// reads `(deleted token)`. An event without an actor reads `system`.
 fn audit_actor_label(event: &AuditEvent) -> AuditActorLabel {
     let actor = event.actor.as_deref().unwrap_or("system");
-    match event.access_token_id {
-        None => AuditActorLabel {
+    if !event.via_agent {
+        return AuditActorLabel {
             visible: actor.to_string(),
             spoken: actor.to_string(),
-        },
-        Some(_) => {
-            let token = event
-                .access_token_name
-                .as_deref()
-                .unwrap_or("(deleted token)");
-            AuditActorLabel {
-                visible: format!("{actor} · via agent token {token}"),
-                spoken: format!("{actor}, via agent token {token}"),
-            }
-        }
+        };
+    }
+    let token = event
+        .access_token_name
+        .as_deref()
+        .unwrap_or("(deleted token)");
+    AuditActorLabel {
+        visible: format!("{actor} · via agent token {token}"),
+        spoken: format!("{actor}, via agent token {token}"),
     }
 }
 
@@ -3512,6 +3511,7 @@ mod audit_actor_tests {
             target: "web-01".to_string(),
             source: "admin_audit_events".to_string(),
             access_token_id: token.map(|(id, _)| id),
+            via_agent: token.is_some(),
             access_token_name: token.and_then(|(_, name)| name.map(str::to_string)),
         }
     }
@@ -3541,6 +3541,24 @@ mod audit_actor_tests {
     }
 
     #[test]
+    fn agent_marker_survives_token_deletion() {
+        // A hard delete sets `access_token_id` to `None`; the server still
+        // reports `via_agent` and the name snapshot.
+        let mut snapshot = event(Some("ops@example.com"), None);
+        snapshot.via_agent = true;
+        snapshot.access_token_name = Some("OpenCode".to_string());
+        assert_eq!(
+            audit_actor_label(&snapshot).visible,
+            "ops@example.com · via agent token OpenCode"
+        );
+        snapshot.access_token_name = None;
+        assert_eq!(
+            audit_actor_label(&snapshot).visible,
+            "ops@example.com · via agent token (deleted token)"
+        );
+    }
+
+    #[test]
     fn agent_write_actions_have_labels_and_categories() {
         for (action, label) in [
             (AuditAction::McpWriteDenied, "mcp.write_denied"),
@@ -3564,5 +3582,6 @@ mod audit_actor_tests {
         .expect("an event without token fields decodes");
         assert_eq!(decoded.action, AuditAction::PoamVerificationAttempted);
         assert_eq!(decoded.access_token_id, None);
+        assert!(!decoded.via_agent);
     }
 }
