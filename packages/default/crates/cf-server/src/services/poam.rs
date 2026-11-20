@@ -13,8 +13,15 @@
 //! `poams:read`, and returns a complete POA&M only when every subject is in the
 //! effective environments.
 //! Other public reads require a browser session until safe MCP projections are
-//! implemented. All restricted mutations fail closed pending a released,
-//! capability-specific transactional token-row validator (TASK-534).
+//! implemented.
+//!
+//! Restricted credentials can mutate only through [`restricted_progress`]
+//! (scope `poams:write`) and [`restricted_verify`] (scope `poams:verify`).
+//! Each one revalidates the owner row, the token row, the scope and the owner
+//! roles and memberships in the mutation transaction, never acts as Admin, and
+//! requires every POA&M subject in the effective environments. Their activity
+//! and audit rows record the access token id. Every other mutation rejects
+//! restricted credentials.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -111,6 +118,19 @@ pub struct PoamActor {
     pub environment_ids: Vec<Uuid>,
     /// Identifies the request origin recorded with audit events, when available.
     pub request_origin: Option<String>,
+}
+
+impl PoamActor {
+    /// Returns the public id of the acting access token, or `None` for a
+    /// browser session. Activity, audit and verification rows record it.
+    pub fn access_token_id(&self) -> Option<Uuid> {
+        match &self.credential {
+            crate::auth::authorization::CredentialIdentity::BrowserSession => None,
+            crate::auth::authorization::CredentialIdentity::Restricted(grant) => {
+                Some(grant.token_id())
+            }
+        }
+    }
 }
 
 /// Represents an expected POA&M service failure.
@@ -304,7 +324,8 @@ async fn current_mutating_actor_tx(
     tx: &mut Transaction<'_, Postgres>,
     request_actor: &PoamActor,
 ) -> Result<PoamActor, PoamError> {
-    // SECURITY: No released transactional token-row validator exists yet.
+    // SECURITY: Access-token actors must use
+    // `current_restricted_mutating_actor_tx`, which validates the token row.
     require_browser_session(request_actor)?;
     // SECURITY: Lock the identity rows after domain writer locks. A revocation
     // that won the race becomes visible before authorization; a later
@@ -342,6 +363,110 @@ async fn current_mutating_actor_tx(
         identifier: user.0,
         is_admin,
         can_mutate,
+        environment_ids,
+        request_origin: request_actor.request_origin.clone(),
+    })
+}
+
+/// Reauthorizes an access-token actor for one POA&M mutation.
+///
+/// The returned actor has `is_admin = false` and `can_mutate = true`. Its
+/// environments are the token grant intersected with the owner's current
+/// memberships (an Admin owner skips only the membership side) and with the
+/// active environments. An empty set is valid; the caller's visibility check
+/// then returns `NotFound`.
+///
+/// # Errors
+///
+/// Returns `Forbidden` for a browser session, a missing or inactive owner, a
+/// missing, revoked, expired or foreign token, a token or grant without
+/// `scope`, and an owner without Operator or Admin.
+async fn current_restricted_mutating_actor_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    request_actor: &PoamActor,
+    scope: &'static str,
+) -> Result<PoamActor, PoamError> {
+    let crate::auth::authorization::CredentialIdentity::Restricted(grant) =
+        &request_actor.credential
+    else {
+        return Err(PoamError::Forbidden);
+    };
+    // CONCURRENCY: Lock order is owner row, token row, roles, memberships,
+    // all `FOR SHARE`, after any domain writer locks. Token revoke and issue
+    // lock the owner row and then the token row in the same order, and role or
+    // membership writers lock the owner row `FOR UPDATE`. A revocation or
+    // grant change that committed first is visible here; a later one waits
+    // for this transaction and linearizes after the mutation.
+    let user = sqlx::query_as::<_, (String, bool)>(
+        "SELECT email,is_active FROM users WHERE id=$1 FOR SHARE",
+    )
+    .bind(request_actor.user_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(PoamError::Forbidden)?;
+    if !user.1 {
+        return Err(PoamError::Forbidden);
+    }
+    // SECURITY: The token row is the revocation authority. The admitted grant
+    // is not proof that the token is still live at mutation time.
+    let token_live = sqlx::query_scalar::<_, Uuid>(
+        r#"SELECT id FROM api_access_tokens
+           WHERE id=$1 AND user_id=$2 AND audience='mcp' AND revoked_at IS NULL
+             AND expires_at>clock_timestamp()
+           FOR SHARE"#,
+    )
+    .bind(grant.token_id())
+    .bind(request_actor.user_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .is_some();
+    let scope_granted: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM api_access_token_scopes WHERE token_id=$1 AND scope=$2)",
+    )
+    .bind(grant.token_id())
+    .bind(scope)
+    .fetch_one(&mut **tx)
+    .await?;
+    if !token_live || !scope_granted {
+        return Err(PoamError::Forbidden);
+    }
+    let roles = sqlx::query_scalar::<_, AuthRole>(
+        "SELECT role FROM user_role_assignments WHERE user_id=$1 ORDER BY role FOR SHARE",
+    )
+    .bind(request_actor.user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let owner_is_admin = roles.contains(&AuthRole::Admin);
+    if !owner_is_admin && !roles.contains(&AuthRole::Operator) {
+        return Err(PoamError::Forbidden);
+    }
+    let memberships = sqlx::query_scalar::<_, Uuid>(
+        "SELECT environment_id FROM user_environment_memberships WHERE user_id=$1 ORDER BY environment_id FOR SHARE",
+    )
+    .bind(request_actor.user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    // SECURITY: The grant check repeats audience, expiry and scope against the
+    // immutable admitted grant and intersects its environments. Admin removes
+    // only the membership side, never the grant side.
+    let granted = request_actor
+        .credential
+        .reading_environments(owner_is_admin, memberships, &[scope], Utc::now())
+        .ok_or(PoamError::Forbidden)?;
+    // SECURITY: A deactivated environment grants nothing. NULL `is_active` is
+    // treated as inactive, as in `restricted_detail`.
+    let environment_ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM environments WHERE id=ANY($1) AND COALESCE(is_active,false) ORDER BY id",
+    )
+    .bind(&granted)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(PoamActor {
+        credential: request_actor.credential.clone(),
+        user_id: request_actor.user_id,
+        identifier: user.0,
+        is_admin: false,
+        can_mutate: true,
         environment_ids,
         request_origin: request_actor.request_origin.clone(),
     })
@@ -1614,12 +1739,13 @@ async fn create_policy_poam_tx<'a>(
         "created",
         &payload,
         actor.request_origin.as_deref(),
+        actor.access_token_id(),
     )
     .await?;
     for assignment_version_id in &assignment_version_ids {
         insert_activity_and_audit(&mut tx,poam_id,actor.user_id,&actor.identifier,"assignment_linked",
           &json!({"poam_id":poam_id,"revision":1,"assignment_version_id":assignment_version_id,"initial":true}),
-          actor.request_origin.as_deref()).await?;
+          actor.request_origin.as_deref(),actor.access_token_id()).await?;
     }
     if request.default_milestones {
         let milestones=sqlx::query_as::<_,(Uuid,i32,String,NaiveDate)>("SELECT id,ordinal,title,target_date FROM poam_milestones WHERE poam_id=$1 ORDER BY ordinal")
@@ -1627,7 +1753,8 @@ async fn create_policy_poam_tx<'a>(
         for (milestone_id, ordinal, title, target_date) in milestones {
             insert_activity_and_audit(&mut tx,poam_id,actor.user_id,&actor.identifier,"milestone_added",
               &json!({"poam_id":poam_id,"revision":1,"milestone_id":milestone_id,"ordinal":ordinal,
-                "title":title,"target_date":target_date,"initial":true}),actor.request_origin.as_deref()).await?;
+                "title":title,"target_date":target_date,"initial":true}),actor.request_origin.as_deref(),
+              actor.access_token_id()).await?;
         }
     }
     Ok((tx, poam_id))
@@ -1782,6 +1909,7 @@ pub async fn create_cve(
             }
         }),
         actor.request_origin.as_deref(),
+        actor.access_token_id(),
     )
     .await?;
     let detail = cve_poam_detail_tx(&mut tx, actor, poam_id, clock).await?;
@@ -2375,6 +2503,11 @@ async fn lock_mutable_poam(
     .await?
     .ok_or(PoamError::NotFound)?;
     require_poam_contexts_tx(tx, actor, id).await?;
+    // SECURITY: A restricted actor needs every current and recorded subject in
+    // scope. The check runs under the row lock and before the revision and
+    // status checks, so a hidden POA&M never reveals its revision or state.
+    // Browser sessions return early without a query.
+    require_restricted_poam_visibility_tx(tx, actor, &[id]).await?;
     if row.0 != revision {
         return Err(PoamError::Conflict(
             "stale_revision",
@@ -2413,6 +2546,7 @@ async fn bump_and_audit(
         kind,
         &payload,
         actor.request_origin.as_deref(),
+        actor.access_token_id(),
     )
     .await?;
     Ok(revision)
@@ -2508,6 +2642,194 @@ fn transition_allowed(from: &str, to: PoamStatus) -> bool {
     )
 }
 
+fn validate_transition(status: PoamStatus, note: Option<&str>) -> Result<(), PoamError> {
+    if status == PoamStatus::Completed {
+        return Err(PoamError::Validation(
+            "close_required",
+            "Completed is only entered through close".into(),
+        ));
+    }
+    if let Some(note) = note {
+        validate_text_length(note, MAX_NOTE_BYTES, "text_too_long", "note")?;
+    }
+    Ok(())
+}
+
+fn validated_note(text: &str) -> Result<&str, PoamError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(PoamError::Validation(
+            "invalid_note",
+            "Note is required".into(),
+        ));
+    }
+    validate_text_length(text, MAX_NOTE_BYTES, "text_too_long", "note")?;
+    Ok(text)
+}
+
+fn validated_new_milestone_title(title: &str) -> Result<&str, PoamError> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(PoamError::Validation(
+            "invalid_milestone",
+            "Milestone title is required".into(),
+        ));
+    }
+    validate_text_length(
+        title,
+        MAX_SHORT_TEXT_BYTES,
+        "text_too_long",
+        "milestone title",
+    )?;
+    Ok(title)
+}
+
+fn validate_milestone_update(title: Option<&str>) -> Result<(), PoamError> {
+    if title.is_some_and(|v| v.trim().is_empty()) {
+        return Err(PoamError::Validation(
+            "invalid_milestone",
+            "Milestone title cannot be empty".into(),
+        ));
+    }
+    if let Some(title) = title {
+        validate_text_length(
+            title.trim(),
+            MAX_SHORT_TEXT_BYTES,
+            "text_too_long",
+            "milestone title",
+        )?;
+    }
+    Ok(())
+}
+
+// The progress helpers below share one contract. The caller has authorized
+// `actor`, called `lock_mutable_poam` for `id` in `tx` (which returned `from`),
+// and validated the inputs with the matching `validate*` function. Each helper
+// applies the change, bumps the revision, records activity and audit through
+// `bump_and_audit`, and returns the new revision with the activity payload.
+// The caller commits. Browser and access-token paths use the same helpers, so
+// the transition rules, limits and SQL cannot diverge.
+
+async fn transition_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    id: Uuid,
+    from: &str,
+    status: PoamStatus,
+    note: Option<&str>,
+) -> Result<(i64, Value), PoamError> {
+    if !transition_allowed(from, status) {
+        return Err(PoamError::Conflict(
+            "invalid_transition",
+            format!("Cannot transition from {from} to {}", status.as_str()),
+        ));
+    }
+    sqlx::query("UPDATE poams SET status=$2 WHERE id=$1")
+        .bind(id)
+        .bind(status.as_str())
+        .execute(&mut **tx)
+        .await?;
+    let change = json!({"from":from,"to":status,"note":note});
+    let revision = bump_and_audit(tx, actor, id, "status_changed", change.clone()).await?;
+    Ok((revision, change))
+}
+
+async fn add_note_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    id: Uuid,
+    text: &str,
+) -> Result<(i64, Value), PoamError> {
+    let change = json!({"text":text});
+    let revision = bump_and_audit(tx, actor, id, "note", change.clone()).await?;
+    Ok((revision, change))
+}
+
+async fn add_milestone_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    id: Uuid,
+    title: &str,
+    target_date: NaiveDate,
+) -> Result<(i64, Value), PoamError> {
+    let milestone_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM poam_milestones WHERE poam_id=$1")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await?;
+    if milestone_count >= MAX_POAM_RELATIONSHIPS {
+        return Err(PoamError::Validation(
+            "too_many_milestones",
+            "A POA&M can contain at most 100 milestones".into(),
+        ));
+    }
+    let (mid,ordinal):(Uuid,i32)=sqlx::query_as("INSERT INTO poam_milestones(poam_id,ordinal,title,target_date,created_by,updated_by) VALUES($1,(SELECT COALESCE(MAX(ordinal)+1,0) FROM poam_milestones WHERE poam_id=$1),$2,$3,$4,$4) RETURNING id,ordinal")
+      .bind(id).bind(title).bind(target_date).bind(actor.user_id).fetch_one(&mut **tx).await?;
+    let change =
+        json!({"milestone_id":mid,"ordinal":ordinal,"title":title,"target_date":target_date});
+    let revision = bump_and_audit(tx, actor, id, "milestone_added", change.clone()).await?;
+    Ok((revision, change))
+}
+
+/// Returns `None`, without a revision bump or activity, when the update
+/// leaves the milestone row unchanged.
+async fn update_milestone_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    id: Uuid,
+    milestone_id: Uuid,
+    title: Option<&str>,
+    target_date: Option<NaiveDate>,
+    completed: Option<bool>,
+) -> Result<Option<(i64, Value)>, PoamError> {
+    let old: Option<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(milestone) FROM poam_milestones milestone WHERE poam_id=$1 AND id=$2 FOR UPDATE",
+    )
+    .bind(id)
+    .bind(milestone_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(old) = old else {
+        return Err(PoamError::NotFound);
+    };
+    sqlx::query("UPDATE poam_milestones SET title=COALESCE($3,title),target_date=COALESCE($4,target_date),completed_at=CASE WHEN $5::bool IS NULL THEN completed_at WHEN $5 THEN COALESCE(completed_at,NOW()) ELSE NULL END,completed_by=CASE WHEN $5::bool IS NULL THEN completed_by WHEN $5 THEN COALESCE(completed_by,$6) ELSE NULL END,updated_by=$6,updated_at=NOW() WHERE poam_id=$1 AND id=$2")
+      .bind(id).bind(milestone_id).bind(title.map(str::trim)).bind(target_date).bind(completed).bind(actor.user_id).execute(&mut **tx).await?;
+    let new: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(milestone) FROM poam_milestones milestone WHERE poam_id=$1 AND id=$2",
+    )
+    .bind(id)
+    .bind(milestone_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if old == new {
+        return Ok(None);
+    }
+    let change = json!({"milestone_id":milestone_id,"old":old,"new":new});
+    let revision = bump_and_audit(tx, actor, id, "milestone_updated", change.clone()).await?;
+    Ok(Some((revision, change)))
+}
+
+async fn remove_milestone_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    id: Uuid,
+    milestone_id: Uuid,
+) -> Result<(i64, Value), PoamError> {
+    let old: Option<Value> = sqlx::query_scalar(
+        "DELETE FROM poam_milestones WHERE poam_id=$1 AND id=$2 RETURNING to_jsonb(poam_milestones)",
+    )
+    .bind(id)
+    .bind(milestone_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(old) = old else {
+        return Err(PoamError::NotFound);
+    };
+    let change = json!({"milestone_id":milestone_id,"old":old});
+    let revision = bump_and_audit(tx, actor, id, "milestone_removed", change.clone()).await?;
+    Ok((revision, change))
+}
+
 /// Transitions an active POA&M between non-terminal workflow states.
 ///
 /// Completion is excluded and must use [`close`].
@@ -2525,37 +2847,16 @@ pub async fn transition(
 ) -> Result<PoamDetail, PoamError> {
     require_mutator(actor)?;
     require_visible(pool, actor, id).await?;
-    if request.status == PoamStatus::Completed {
-        return Err(PoamError::Validation(
-            "close_required",
-            "Completed is only entered through close".into(),
-        ));
-    }
-    if let Some(note) = request.note.as_deref() {
-        validate_text_length(note, MAX_NOTE_BYTES, "text_too_long", "note")?;
-    }
+    validate_transition(request.status, request.note.as_deref())?;
     let mut tx = pool.begin().await?;
     let from = lock_mutable_poam(&mut tx, actor, id, request.revision).await?;
-    if !transition_allowed(&from, request.status) {
-        return Err(PoamError::Conflict(
-            "invalid_transition",
-            format!(
-                "Cannot transition from {from} to {}",
-                request.status.as_str()
-            ),
-        ));
-    }
-    sqlx::query("UPDATE poams SET status=$2 WHERE id=$1")
-        .bind(id)
-        .bind(request.status.as_str())
-        .execute(&mut *tx)
-        .await?;
-    bump_and_audit(
+    transition_tx(
         &mut tx,
         actor,
         id,
-        "status_changed",
-        json!({"from":from,"to":request.status,"note":request.note}),
+        &from,
+        request.status,
+        request.note.as_deref(),
     )
     .await?;
     tx.commit().await?;
@@ -2577,17 +2878,10 @@ pub async fn add_note(
 ) -> Result<PoamDetail, PoamError> {
     require_mutator(actor)?;
     require_visible(pool, actor, id).await?;
-    let text = request.text.trim();
-    if text.is_empty() {
-        return Err(PoamError::Validation(
-            "invalid_note",
-            "Note is required".into(),
-        ));
-    }
-    validate_text_length(text, MAX_NOTE_BYTES, "text_too_long", "note")?;
+    let text = validated_note(&request.text)?;
     let mut tx = pool.begin().await?;
     lock_mutable_poam(&mut tx, actor, id, request.revision).await?;
-    bump_and_audit(&mut tx, actor, id, "note", json!({"text":text})).await?;
+    add_note_tx(&mut tx, actor, id, text).await?;
     tx.commit().await?;
     detail(pool, actor, id, clock).await
 }
@@ -2607,34 +2901,10 @@ pub async fn add_milestone(
 ) -> Result<PoamDetail, PoamError> {
     require_mutator(actor)?;
     require_visible(pool, actor, id).await?;
-    if request.title.trim().is_empty() {
-        return Err(PoamError::Validation(
-            "invalid_milestone",
-            "Milestone title is required".into(),
-        ));
-    }
-    validate_text_length(
-        request.title.trim(),
-        MAX_SHORT_TEXT_BYTES,
-        "text_too_long",
-        "milestone title",
-    )?;
+    let title = validated_new_milestone_title(&request.title)?;
     let mut tx = pool.begin().await?;
     lock_mutable_poam(&mut tx, actor, id, request.revision).await?;
-    let milestone_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM poam_milestones WHERE poam_id=$1")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if milestone_count >= MAX_POAM_RELATIONSHIPS {
-        return Err(PoamError::Validation(
-            "too_many_milestones",
-            "A POA&M can contain at most 100 milestones".into(),
-        ));
-    }
-    let (mid,ordinal):(Uuid,i32)=sqlx::query_as("INSERT INTO poam_milestones(poam_id,ordinal,title,target_date,created_by,updated_by) VALUES($1,(SELECT COALESCE(MAX(ordinal)+1,0) FROM poam_milestones WHERE poam_id=$1),$2,$3,$4,$4) RETURNING id,ordinal")
-      .bind(id).bind(request.title.trim()).bind(request.target_date).bind(actor.user_id).fetch_one(&mut *tx).await?;
-    bump_and_audit(&mut tx,actor,id,"milestone_added",json!({"milestone_id":mid,"ordinal":ordinal,"title":request.title.trim(),"target_date":request.target_date})).await?;
+    add_milestone_tx(&mut tx, actor, id, title, request.target_date).await?;
     tx.commit().await?;
     detail(pool, actor, id, clock).await
 }
@@ -2655,55 +2925,17 @@ pub async fn update_milestone(
 ) -> Result<PoamDetail, PoamError> {
     require_mutator(actor)?;
     require_visible(pool, actor, id).await?;
-    if request
-        .title
-        .as_deref()
-        .is_some_and(|v| v.trim().is_empty())
-    {
-        return Err(PoamError::Validation(
-            "invalid_milestone",
-            "Milestone title cannot be empty".into(),
-        ));
-    }
-    if let Some(title) = request.title.as_deref() {
-        validate_text_length(
-            title.trim(),
-            MAX_SHORT_TEXT_BYTES,
-            "text_too_long",
-            "milestone title",
-        )?;
-    }
+    validate_milestone_update(request.title.as_deref())?;
     let mut tx = pool.begin().await?;
     lock_mutable_poam(&mut tx, actor, id, request.revision).await?;
-    let old: Option<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(milestone) FROM poam_milestones milestone WHERE poam_id=$1 AND id=$2 FOR UPDATE",
-    )
-    .bind(id)
-    .bind(milestone_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some(old) = old else {
-        return Err(PoamError::NotFound);
-    };
-    sqlx::query("UPDATE poam_milestones SET title=COALESCE($3,title),target_date=COALESCE($4,target_date),completed_at=CASE WHEN $5::bool IS NULL THEN completed_at WHEN $5 THEN COALESCE(completed_at,NOW()) ELSE NULL END,completed_by=CASE WHEN $5::bool IS NULL THEN completed_by WHEN $5 THEN COALESCE(completed_by,$6) ELSE NULL END,updated_by=$6,updated_at=NOW() WHERE poam_id=$1 AND id=$2")
-      .bind(id).bind(milestone_id).bind(request.title.as_deref().map(str::trim)).bind(request.target_date).bind(request.completed).bind(actor.user_id).execute(&mut *tx).await?;
-    let new: Value = sqlx::query_scalar(
-        "SELECT to_jsonb(milestone) FROM poam_milestones milestone WHERE poam_id=$1 AND id=$2",
-    )
-    .bind(id)
-    .bind(milestone_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    if old == new {
-        tx.commit().await?;
-        return detail(pool, actor, id, clock).await;
-    }
-    bump_and_audit(
+    update_milestone_tx(
         &mut tx,
         actor,
         id,
-        "milestone_updated",
-        json!({"milestone_id":milestone_id,"old":old,"new":new}),
+        milestone_id,
+        request.title.as_deref(),
+        request.target_date,
+        request.completed,
     )
     .await?;
     tx.commit().await?;
@@ -2728,27 +2960,164 @@ pub async fn remove_milestone(
     require_visible(pool, actor, id).await?;
     let mut tx = pool.begin().await?;
     lock_mutable_poam(&mut tx, actor, id, revision).await?;
-    let old: Option<Value> = sqlx::query_scalar(
-        "DELETE FROM poam_milestones WHERE poam_id=$1 AND id=$2 RETURNING to_jsonb(poam_milestones)",
-    )
-        .bind(id)
-        .bind(milestone_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        ;
-    let Some(old) = old else {
-        return Err(PoamError::NotFound);
-    };
-    bump_and_audit(
-        &mut tx,
-        actor,
-        id,
-        "milestone_removed",
-        json!({"milestone_id":milestone_id,"old":old}),
-    )
-    .await?;
+    remove_milestone_tx(&mut tx, actor, id, milestone_id).await?;
     tx.commit().await?;
     detail(pool, actor, id, clock).await
+}
+
+/// Selects the one progress change of an access-token POA&M write.
+///
+/// The set is closed. It excludes risk, title, plan, owner, assignee, target
+/// date, finding links, waivers, closure and reopening. Each variant has the
+/// same validation, limits and SQL as the matching browser function.
+#[derive(Debug, Clone)]
+pub enum RestrictedProgressAction {
+    /// Adds a note, as [`add_note`]. The text is trimmed, required and at
+    /// most 4096 bytes.
+    AddNote {
+        /// Gives the note text.
+        text: String,
+    },
+    /// Changes the workflow status, as [`transition`]. Only the non-terminal
+    /// transitions of [`PoamStatus`] are allowed. `Completed` is rejected
+    /// with `close_required`, so this action never closes a POA&M.
+    SetStatus {
+        /// Gives the destination status.
+        status: PoamStatus,
+        /// Gives optional context of at most 4096 bytes for the activity.
+        note: Option<String>,
+    },
+    /// Adds a milestone, as [`add_milestone`]. The title is trimmed,
+    /// required and at most 256 bytes. A POA&M has at most 100 milestones.
+    AddMilestone {
+        /// Gives the milestone title.
+        title: String,
+        /// Gives the planned completion date.
+        target_date: NaiveDate,
+    },
+    /// Changes the fields that are present, as [`update_milestone`].
+    UpdateMilestone {
+        /// Identifies a milestone of the POA&M.
+        milestone_id: Uuid,
+        /// Replaces the title when present; it cannot be blank.
+        title: Option<String>,
+        /// Replaces the target date when present.
+        target_date: Option<NaiveDate>,
+        /// Marks the milestone complete or incomplete when present.
+        completed: Option<bool>,
+    },
+    /// Removes one milestone, as [`remove_milestone`].
+    RemoveMilestone {
+        /// Identifies a milestone of the POA&M.
+        milestone_id: Uuid,
+    },
+}
+
+/// Reports the committed result of [`restricted_progress`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RestrictedWriteOutcome {
+    /// Identifies the POA&M.
+    pub poam_id: Uuid,
+    /// Gives the current revision. It equals the request revision when the
+    /// action changed nothing.
+    pub revision: i64,
+    /// Gives the current workflow status.
+    pub status: PoamStatus,
+    /// Gives the recorded activity payload, or `None` when the action changed
+    /// nothing and recorded no activity.
+    pub changed: Option<Value>,
+}
+
+fn stored_status(status: &str) -> Result<PoamStatus, PoamError> {
+    serde_json::from_value(Value::String(status.to_owned())).map_err(|error| {
+        PoamError::Database(anyhow::anyhow!("invalid stored POA&M status: {error}"))
+    })
+}
+
+/// Applies one progress action for an access-token actor.
+///
+/// One transaction reauthorizes the token and owner with scope `poams:write`,
+/// locks the POA&M at `revision`, requires every current and recorded subject
+/// in the effective environments, validates and applies the action, and
+/// records activity and audit rows with the token id. The owner is the
+/// recorded actor. The refreshed actor is never Admin.
+///
+/// # Errors
+///
+/// - [`PoamError::Forbidden`] for a browser session, an inactive owner, a
+///   revoked, expired or foreign token, a token without `poams:write`, or an
+///   owner without Operator or Admin.
+/// - [`PoamError::NotFound`] when the POA&M or milestone is absent or any
+///   POA&M subject is outside the effective environments.
+/// - [`PoamError::Validation`] for invalid input, including `close_required`
+///   for `SetStatus` to `Completed`.
+/// - [`PoamError::Conflict`] with `stale_revision`, `poam_completed` or
+///   `invalid_transition`.
+/// - [`PoamError::Database`] on a persistence failure.
+pub async fn restricted_progress(
+    pool: &PgPool,
+    actor: &PoamActor,
+    id: Uuid,
+    revision: i64,
+    action: RestrictedProgressAction,
+) -> Result<RestrictedWriteOutcome, PoamError> {
+    if actor.credential.is_browser_session() {
+        return Err(PoamError::Forbidden);
+    }
+    let mut tx = pool.begin().await?;
+    let actor = current_restricted_mutating_actor_tx(&mut tx, actor, "poams:write").await?;
+    let from = lock_mutable_poam(&mut tx, &actor, id, revision).await?;
+    // SECURITY: Inputs are validated after authorization, so a caller without
+    // authority receives the same result for every input.
+    let mut status = stored_status(&from)?;
+    let change = match action {
+        RestrictedProgressAction::AddNote { text } => {
+            let text = validated_note(&text)?;
+            Some(add_note_tx(&mut tx, &actor, id, text).await?)
+        }
+        RestrictedProgressAction::SetStatus { status: to, note } => {
+            validate_transition(to, note.as_deref())?;
+            let change = transition_tx(&mut tx, &actor, id, &from, to, note.as_deref()).await?;
+            status = to;
+            Some(change)
+        }
+        RestrictedProgressAction::AddMilestone { title, target_date } => {
+            let title = validated_new_milestone_title(&title)?;
+            Some(add_milestone_tx(&mut tx, &actor, id, title, target_date).await?)
+        }
+        RestrictedProgressAction::UpdateMilestone {
+            milestone_id,
+            title,
+            target_date,
+            completed,
+        } => {
+            validate_milestone_update(title.as_deref())?;
+            update_milestone_tx(
+                &mut tx,
+                &actor,
+                id,
+                milestone_id,
+                title.as_deref(),
+                target_date,
+                completed,
+            )
+            .await?
+        }
+        RestrictedProgressAction::RemoveMilestone { milestone_id } => {
+            Some(remove_milestone_tx(&mut tx, &actor, id, milestone_id).await?)
+        }
+    };
+    tx.commit().await?;
+    let (revision, changed) = match change {
+        Some((revision, change)) => (revision, Some(change)),
+        None => (revision, None),
+    };
+    Ok(RestrictedWriteOutcome {
+        poam_id: id,
+        revision,
+        status,
+        changed,
+    })
 }
 
 /// Links a current failing finding to an active POA&M.
@@ -4949,6 +5318,7 @@ async fn insert_fleet_cve_poam_tx(
             "subject_count":subjects.len()
         }),
         actor.request_origin.as_deref(),
+        actor.access_token_id(),
     )
     .await?;
     Ok(poam_id)
@@ -7792,6 +8162,7 @@ async fn create_batch_schedule_poams_tx(
                     "subject_count":members.iter().map(|target| target.subjects.len()).sum::<usize>()
                 }),
                 actor.request_origin.as_deref(),
+                actor.access_token_id(),
             )
             .await?;
         }
@@ -11319,8 +11690,49 @@ pub async fn verify(
     revision: i64,
     clock: &dyn PoamClock,
 ) -> Result<Value, PoamError> {
+    verify_with_retry(pool, actor, id, revision, clock, false).await
+}
+
+/// Records a sealed verification attempt for an access-token actor.
+///
+/// The checks, locks, evidence rules, retries and response match [`verify`].
+/// The transaction reauthorizes the token and owner with scope
+/// `poams:verify` instead of the browser refresh, never acts as Admin, and
+/// requires every current and recorded POA&M subject in the effective
+/// environments. The attempt, activity and audit rows record the token id;
+/// the owner is the recorded actor. This function never closes a POA&M: an
+/// accepted attempt leaves it awaiting verification.
+///
+/// # Errors
+///
+/// Returns [`PoamError::Forbidden`] for a browser session, a revoked, expired
+/// or foreign token, a token without `poams:verify`, or an owner without
+/// Operator or Admin. Returns [`PoamError::NotFound`] when the POA&M is absent
+/// or any subject is outside the effective environments. Other errors are as
+/// for [`verify`].
+pub async fn restricted_verify(
+    pool: &PgPool,
+    actor: &PoamActor,
+    id: Uuid,
+    revision: i64,
+    clock: &dyn PoamClock,
+) -> Result<Value, PoamError> {
+    if actor.credential.is_browser_session() {
+        return Err(PoamError::Forbidden);
+    }
+    verify_with_retry(pool, actor, id, revision, clock, true).await
+}
+
+async fn verify_with_retry(
+    pool: &PgPool,
+    actor: &PoamActor,
+    id: Uuid,
+    revision: i64,
+    clock: &dyn PoamClock,
+    restricted: bool,
+) -> Result<Value, PoamError> {
     for retry in 0..3 {
-        match verify_once(pool, actor, id, revision, clock).await {
+        match verify_once(pool, actor, id, revision, clock, restricted).await {
             Err(PoamError::Database(error)) if retry < 2 && is_serialization_failure(&error) => {
                 continue;
             }
@@ -11330,15 +11742,25 @@ pub async fn verify(
     unreachable!()
 }
 
+/// Runs one verification transaction. `restricted` selects the in-transaction
+/// actor refresh: the access-token refresh with scope `poams:verify`, or the
+/// browser-session refresh.
 async fn verify_once(
     pool: &PgPool,
     actor: &PoamActor,
     id: Uuid,
     revision: i64,
     clock: &dyn PoamClock,
+    restricted: bool,
 ) -> Result<Value, PoamError> {
-    require_mutator(actor)?;
-    require_visible(pool, actor, id).await?;
+    // SECURITY: An access-token actor has no browser pre-check. The finding
+    // keys below only select the advisory locks; the transaction authorizes
+    // the actor before any POA&M state is returned, and a hidden POA&M ends
+    // with `NotFound` without writes.
+    if !restricted {
+        require_mutator(actor)?;
+        require_visible(pool, actor, id).await?;
+    }
     let expected_findings = poam_finding_keys(pool, id).await?;
     let expected_cve_findings = poam_cve_finding_keys(pool, id).await?;
     // Acquire the shared writer locks before reading authoritative state. Under
@@ -11362,7 +11784,11 @@ async fn verify_once(
         .collect::<Vec<_>>();
     lock_policy_finding_keys_for_systems_tx(&mut tx, &affected_system_ids).await?;
     lock_cve_finding_keys_tx(&mut tx, &expected_cve_findings).await?;
-    let actor = current_mutating_actor_tx(&mut tx, actor).await?;
+    let actor = if restricted {
+        current_restricted_mutating_actor_tx(&mut tx, actor, "poams:verify").await?
+    } else {
+        current_mutating_actor_tx(&mut tx, actor).await?
+    };
     let status = lock_mutable_poam(&mut tx, &actor, id, revision).await?;
     if status != "awaiting_verification" {
         return Err(PoamError::Conflict(
@@ -11414,8 +11840,8 @@ async fn verify_once(
         .all(|item| closure_result_is_accepted(&item.result))
         && cve_items.iter().all(|item| item.result == "pass")
         && !uncovered_environment_cve_subject_tx(&mut tx, id).await?;
-    let attempt_id:Uuid=sqlx::query_scalar("INSERT INTO poam_verification_attempts(poam_id,attempted_by,outcome,poam_revision,attempted_at) VALUES($1,$2,$3,$4,$5) RETURNING id")
-      .bind(id).bind(actor.user_id).bind(if accepted{"accepted"}else{"rejected"}).bind(revision).bind(now).fetch_one(&mut *tx).await?;
+    let attempt_id:Uuid=sqlx::query_scalar("INSERT INTO poam_verification_attempts(poam_id,attempted_by,outcome,poam_revision,attempted_at,access_token_id) VALUES($1,$2,$3,$4,$5,$6) RETURNING id")
+      .bind(id).bind(actor.user_id).bind(if accepted{"accepted"}else{"rejected"}).bind(revision).bind(now).bind(actor.access_token_id()).fetch_one(&mut *tx).await?;
     insert_verification_items(&mut tx, attempt_id, &items, now).await?;
     insert_cve_verification_items(&mut tx, attempt_id, &cve_items, now).await?;
     sqlx::query("UPDATE poam_verification_attempts SET sealed_at=$2 WHERE id=$1")
@@ -11539,8 +11965,8 @@ async fn close_once(
          let accepted = !uncovered_environment_cve_subject_tx(&mut tx, id).await?
              && items.iter().all(|item| closure_result_is_accepted(&item.result))
              && cve_items.iter().all(|item| item.result == "pass");
-        let attempt_id:Uuid=sqlx::query_scalar("INSERT INTO poam_verification_attempts(poam_id,attempted_by,outcome,poam_revision,attempted_at) VALUES($1,$2,$3,$4,$5) RETURNING id")
-          .bind(id).bind(actor.user_id).bind(if accepted{"accepted"}else{"rejected"}).bind(revision).bind(now).fetch_one(&mut *tx).await?;
+        let attempt_id:Uuid=sqlx::query_scalar("INSERT INTO poam_verification_attempts(poam_id,attempted_by,outcome,poam_revision,attempted_at,access_token_id) VALUES($1,$2,$3,$4,$5,$6) RETURNING id")
+          .bind(id).bind(actor.user_id).bind(if accepted{"accepted"}else{"rejected"}).bind(revision).bind(now).bind(actor.access_token_id()).fetch_one(&mut *tx).await?;
         insert_verification_items(&mut tx, attempt_id, &items, now).await?;
         insert_cve_verification_items(&mut tx, attempt_id, &cve_items, now).await?;
         sqlx::query("UPDATE poam_verification_attempts SET sealed_at=$2 WHERE id=$1")

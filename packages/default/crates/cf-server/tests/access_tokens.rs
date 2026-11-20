@@ -504,6 +504,7 @@ fn service_request(
         expires_in_days: Some(days),
         environment_ids: Some(environments.iter().map(Uuid::to_string).collect()),
         scopes: Some(scopes.iter().map(|scope| (*scope).to_owned()).collect()),
+        confirm_production_write: None,
     }
 }
 
@@ -881,11 +882,14 @@ async fn invalid_or_unpermitted_operator_requests_are_rejected_not_narrowed(pool
             "environment_ids",
         ),
         ("unknown scope", scopes(json!(["admin"])), "scopes"),
-        ("scans:request", scopes(json!(["scans:request"])), "scopes"),
-        ("poams:write", scopes(json!(["poams:write"])), "scopes"),
         (
-            "readable plus scans:request",
-            scopes(json!(["cves:read", "scans:request"])),
+            "unreleased poams:close",
+            scopes(json!(["poams:close"])),
+            "scopes",
+        ),
+        (
+            "readable plus poams:close",
+            scopes(json!(["cves:read", "poams:close"])),
             "scopes",
         ),
         (
@@ -976,6 +980,146 @@ async fn viewer_cannot_select_operator_scopes_or_unassigned_environments(pool: P
     assert_nothing_issued(&pool).await;
 }
 
+const WRITE_SCOPES: [&str; 3] = ["scans:request", "poams:write", "poams:verify"];
+
+async fn mark_production(pool: &PgPool, environment: Uuid) {
+    sqlx::query("UPDATE environments SET is_production = TRUE WHERE id = $1")
+        .bind(environment)
+        .execute(pool)
+        .await
+        .expect("mark environment production");
+}
+
+async fn created_audit_metadata(pool: &PgPool, id: Uuid) -> Value {
+    sqlx::query_scalar::<_, Value>(
+        "SELECT metadata FROM admin_audit_events
+         WHERE action = 'access_token_created' AND target = $1",
+    )
+    .bind(id.simple().to_string())
+    .fetch_one(pool)
+    .await
+    .expect("read created audit event")
+}
+
+#[sqlx::test]
+async fn operator_creates_each_write_scope_and_viewer_requires_operator(pool: PgPool) {
+    let api = start(&pool).await;
+    let (operator, env) = operator_with_environment(&pool).await;
+    let viewer = member(&pool, AuthRole::Viewer, &[env]).await;
+
+    for scope in WRITE_SCOPES {
+        let denied = api
+            .create(
+                &viewer,
+                &create_body(
+                    &format!("viewer {scope}"),
+                    &[env],
+                    &["cves:read", scope],
+                    30,
+                ),
+            )
+            .await;
+        assert_field_error(&denied, "scopes");
+        let message = denied.body["details"]["fields"]["scopes"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(message.contains("Requires Operator"), "{scope}: {message}");
+    }
+    assert_nothing_issued(&pool).await;
+
+    for scope in WRITE_SCOPES {
+        let reply = api
+            .create(
+                &operator,
+                &create_body(
+                    &format!("operator {scope}"),
+                    &[env],
+                    &["cves:read", scope],
+                    30,
+                ),
+            )
+            .await;
+        let (id, _) = issued(&reply);
+        assert_eq!(reply.body["scopes"], json!(["cves:read", scope]));
+        // A grant without a production environment needs no confirmation.
+        assert_eq!(
+            created_audit_metadata(&pool, id).await["production_write_confirmed"],
+            false
+        );
+    }
+    assert_eq!(token_count(&pool).await, 3);
+}
+
+#[sqlx::test]
+async fn production_write_requires_explicit_confirmation_and_rotation_keeps_it(pool: PgPool) {
+    let api = start(&pool).await;
+    let (operator, prod) = operator_with_environment(&pool).await;
+    mark_production(&pool, prod).await;
+    let staging = environment(&pool, "at-staging").await;
+    assign(&pool, operator.id, staging).await;
+
+    let policy = api.policy(&operator).await;
+    assert_eq!(
+        environment_entry(&policy.body["environments"], prod)["is_production"],
+        true
+    );
+    assert_eq!(
+        environment_entry(&policy.body["environments"], staging)["is_production"],
+        false
+    );
+
+    let body = create_body(
+        "prod writer",
+        &[staging, prod],
+        &["cves:read", "scans:request"],
+        30,
+    );
+    for confirmation in [None, Some(false)] {
+        let request = match confirmation {
+            None => body.clone(),
+            Some(value) => with_field(&body, "confirm_production_write", json!(value)),
+        };
+        let reply = api.create(&operator, &request).await;
+        assert_field_error(&reply, "confirm_production_write");
+        assert_eq!(
+            reply.body["details"]["fields"]["confirm_production_write"],
+            "Confirm the production write access."
+        );
+        assert_nothing_issued(&pool).await;
+    }
+
+    // Read-only access to production needs no confirmation.
+    let read_only = api
+        .create(&operator, &read_body("prod reader", &[prod]))
+        .await;
+    let (read_id, _) = issued(&read_only);
+    assert_eq!(
+        created_audit_metadata(&pool, read_id).await["production_write_confirmed"],
+        false
+    );
+
+    let confirmed = api
+        .create(
+            &operator,
+            &with_field(&body, "confirm_production_write", json!(true)),
+        )
+        .await;
+    let (id, _) = issued(&confirmed);
+    assert_eq!(
+        created_audit_metadata(&pool, id).await["production_write_confirmed"],
+        true
+    );
+
+    // Rotation keeps the confirmed grant and asks for nothing again.
+    let rotated = api.rotate(&operator, id).await;
+    let (replacement, _) = issued(&rotated);
+    assert_ne!(replacement, id);
+    assert_eq!(
+        rotated.body["scopes"],
+        json!(["cves:read", "scans:request"])
+    );
+}
+
 #[sqlx::test]
 async fn admin_must_pass_explicit_active_environment_ids_and_released_scopes(pool: PgPool) {
     let api = start(&pool).await;
@@ -999,10 +1143,6 @@ async fn admin_must_pass_explicit_active_environment_ids_and_released_scopes(poo
         (
             with_field(&base, "environment_ids", json!([Uuid::new_v4()])),
             "environment_ids",
-        ),
-        (
-            with_field(&base, "scopes", json!(["scans:request"])),
-            "scopes",
         ),
         (
             with_field(&base, "scopes", json!(["poams:close"])),
@@ -2553,20 +2693,27 @@ async fn policy_reports_limits_selectable_environments_and_role_scopes(pool: PgP
         assert!(entry["unavailable_reason"].is_string(), "{scope}");
     }
 
-    // Operator: its own environments; operational scopes are not released.
+    // Operator: its own environments; the write scopes are released but not
+    // preselected, and poams:close is not released.
     let operator_policy = api.policy(&operator).await;
     let mut expected = vec![env_a.to_string(), env_b.to_string()];
     expected.sort();
     assert_eq!(policy_environment_ids(&operator_policy), expected);
-    for scope in [
-        "scans:request",
-        "poams:write",
-        "poams:verify",
-        "poams:close",
-    ] {
+    for scope in ["scans:request", "poams:write", "poams:verify"] {
         let entry = policy_scope(&operator_policy, scope);
-        assert_eq!(entry["available"], false, "{scope}");
-        assert_eq!(entry["unavailable_reason"], "Not supported yet", "{scope}");
+        assert_eq!(entry["available"], true, "{scope}");
+        assert_eq!(entry["default_selected"], false, "{scope}");
+        assert!(entry["unavailable_reason"].is_null(), "{scope}");
+    }
+    let close = policy_scope(&operator_policy, "poams:close");
+    assert_eq!(close["available"], false);
+    assert_eq!(close["unavailable_reason"], "Not supported yet");
+    for scope in ["scans:request", "poams:write", "poams:verify"] {
+        assert_eq!(
+            policy_scope(&viewer_policy, scope)["unavailable_reason"],
+            "Requires Operator",
+            "{scope}"
+        );
     }
 
     // Admin: every active environment (including the seeded defaults),

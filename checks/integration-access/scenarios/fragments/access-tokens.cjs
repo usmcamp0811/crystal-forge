@@ -7,7 +7,7 @@
 //
 // Requires facts: operator {username,password,roleWire}, accessTokens {environment,
 // otherEnvironment, operatorToken, browserToken, lifetimeDays, readScopes,
-// unavailableScopes}; receipts: authorization.operator.userId; the create phase
+// writeScopes, unavailableScopes}; receipts: authorization.operator.userId; the create phase
 // needs the API-created Operator token to be the only existing row; rotate needs
 // accessTokens.browser.createdId; revoke needs accessTokens.browser.rotate.newId.
 //
@@ -192,6 +192,12 @@ async function createPhase(ctx) {
     for (const scope of t.readScopes) {
       await expect(dialog.getByRole("checkbox", { name: new RegExp(escapeRegExp(scope)) })).toBeChecked();
     }
+    // Write scopes are selectable for an Operator but never preselected.
+    for (const scope of t.writeScopes) {
+      const box = dialog.getByRole("checkbox", { name: new RegExp(escapeRegExp(scope)) });
+      await expect(box).toBeEnabled();
+      await expect(box).not.toBeChecked();
+    }
     for (const scope of t.unavailableScopes) {
       const box = dialog.getByRole("checkbox", { name: new RegExp(escapeRegExp(scope)) });
       await expect(box).toBeDisabled();
@@ -237,7 +243,7 @@ async function createPhase(ctx) {
       // names a scope only when the role no longer permits it.
       for (const title of ["Granted at creation", "Effective now"]) {
         await expect(section(title).getByText(t.environment, { exact: true })).toBeVisible();
-        for (const scope of t.unavailableScopes) {
+        for (const scope of [...t.writeScopes, ...t.unavailableScopes]) {
           await expect(section(title).getByText(scope, { exact: true })).toHaveCount(0);
         }
       }

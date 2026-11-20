@@ -906,6 +906,11 @@ pub struct VerificationAttemptView {
     pub attempted_by: Uuid,
     /// Records when verification ran.
     pub attempted_at: DateTime<Utc>,
+    /// Identifies the owner access token that requested verification, or
+    /// `None` for a browser session. `attempted_by` stays the human owner.
+    pub access_token_id: Option<Uuid>,
+    /// Gives the current name of `access_token_id`, or `None` without a token.
+    pub access_token_name: Option<String>,
     /// Reports the immutable per-finding observations in the attempt.
     pub items: Vec<VerificationItemView>,
     /// Reports immutable exact-CVE results without changing `items` semantics.
@@ -1040,6 +1045,11 @@ pub struct ActivityView {
     pub payload: serde_json::Value,
     /// Records when the activity occurred.
     pub created_at: DateTime<Utc>,
+    /// Identifies the owner access token that made the change, or `None` for
+    /// a browser session or server action. `actor_user_id` stays the owner.
+    pub access_token_id: Option<Uuid>,
+    /// Gives the current name of `access_token_id`, or `None` without a token.
+    pub access_token_name: Option<String>,
 }
 
 /// Reports a POA&M with bounded evidence and activity histories.

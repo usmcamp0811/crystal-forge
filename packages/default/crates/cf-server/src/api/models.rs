@@ -5266,6 +5266,21 @@ pub enum AuditAction {
     AccessTokenRotated,
     /// An owner revoked an access token. The target is the public token id.
     AccessTokenRevoked,
+    /// Authorization denied an MCP write tool call. The target is the public
+    /// token id; the metadata names the tool and a reason code only.
+    McpWriteDenied,
+    /// A note was added to a POA&M.
+    PoamNote,
+    /// A POA&M status changed.
+    PoamStatusChanged,
+    /// A milestone was added to a POA&M.
+    PoamMilestoneAdded,
+    /// A POA&M milestone changed.
+    PoamMilestoneUpdated,
+    /// A milestone was removed from a POA&M.
+    PoamMilestoneRemoved,
+    /// A POA&M verification attempt was recorded.
+    PoamVerificationAttempted,
 }
 
 /// Admin audit log entry.
@@ -5276,6 +5291,15 @@ pub struct AuditEvent {
     pub action: AuditAction,
     pub target: String,
     pub source: String,
+    /// Access token through which an agent acted, or `None` for a browser or
+    /// system action. The human owner stays in `actor`. The column is set to
+    /// `NULL` when the token row is deleted with its owner.
+    #[serde(default)]
+    pub access_token_id: Option<Uuid>,
+    /// Name of the token at the time of the action (the metadata snapshot),
+    /// else its current name. `None` when neither is known.
+    #[serde(default)]
+    pub access_token_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5538,6 +5562,10 @@ pub struct AccessTokenPolicyEnvironmentDto {
     /// Display color as `#RRGGBB`, or `null` when the stored value is not
     /// exactly that form. Never arbitrary text.
     pub color: Option<String>,
+    /// Mirrors `environments.is_production`. A create request that combines
+    /// a write scope with a production environment must set
+    /// `confirm_production_write`.
+    pub is_production: bool,
 }
 
 /// Describes one scope in the policy catalog.
@@ -5620,6 +5648,11 @@ pub struct CreateAccessTokenRequest {
     /// Explicit scopes; never empty.
     #[serde(default)]
     pub scopes: Option<Vec<String>>,
+    /// Must be `true` when the scopes include a write scope (any scope that
+    /// does not end in `:read`) and an environment has `is_production`.
+    /// Ignored otherwise. Rotation keeps the original confirmation.
+    #[serde(default)]
+    pub confirm_production_write: Option<bool>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

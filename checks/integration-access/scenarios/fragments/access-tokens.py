@@ -211,12 +211,17 @@ with case("access-token-policy-offers-operator-only-the-assigned-active-environm
                  "only the assigned active environment is offered; the unassigned and the "
                  "other active environments are not")
     offered = {s["scope"]: s for s in policy["scopes"]}
-    expect_equal(sorted(offered), sorted(at_facts["readScopes"] + at_facts["unavailableScopes"]),
+    expect_equal(sorted(offered), sorted(at_facts["readScopes"] + at_facts["writeScopes"]
+                                         + at_facts["unavailableScopes"]),
                  "scope catalogue")
     for scope in at_facts["readScopes"]:
         expect_equal({k: offered[scope][k] for k in ("available", "default_selected", "unavailable_reason")},
                      {"available": True, "default_selected": True, "unavailable_reason": None},
                      scope + " is selectable and preselected")
+    for scope in at_facts["writeScopes"]:
+        expect_equal({k: offered[scope][k] for k in ("available", "default_selected", "unavailable_reason")},
+                     {"available": True, "default_selected": False, "unavailable_reason": None},
+                     scope + " is selectable for an Operator but not preselected")
     for scope in at_facts["unavailableScopes"]:
         expect_equal({k: offered[scope][k] for k in ("available", "default_selected", "unavailable_reason")},
                      {"available": False, "default_selected": False, "unavailable_reason": "Not supported yet"},
@@ -299,9 +304,9 @@ with case("access-token-rejects-unassigned-environment-missing-csrf-and-viewer-w
         expect(at_env_id not in message, label + ": the assigned environment is not reported as invalid")
         expect_equal(at_counts(), baseline, label + " rejection created no row or audit event")
     status, body = at_create("operator", at_facts["deniedToken"], [at_env_id],
-                             at_facts["readScopes"] + ["scans:request"])
+                             at_facts["readScopes"] + ["poams:close"])
     expect_equal(status, 400, "Operator create with an unavailable scope")
-    at_assert_fields("operator", body, ("scopes", "scans:request"), "unavailable scope")
+    at_assert_fields("operator", body, ("scopes", "poams:close"), "unavailable scope")
     expect_equal(at_counts(), baseline, "unavailable-scope rejection created nothing")
 
     # A valid request without the CSRF header is refused before any write.
@@ -334,7 +339,7 @@ with case("access-token-rejects-unassigned-environment-missing-csrf-and-viewer-w
     status, policy = http(controller, "GET", "/api/v1/user/access-token-policy", session=at_jar("viewer"))
     expect_equal(status, 200, "Viewer reads the access-token policy")
     expect_equal([e["name"] for e in policy["environments"]], [at_facts["environment"]], "Viewer environments")
-    for scope in at_facts["unavailableScopes"]:
+    for scope in at_facts["writeScopes"] + at_facts["unavailableScopes"]:
         listed = [s for s in policy["scopes"] if s["scope"] == scope]
         expect_equal(len(listed), 1, scope + " is in the Viewer catalogue")
         expect_equal(listed[0]["available"], False, scope + " is unavailable to the Viewer")

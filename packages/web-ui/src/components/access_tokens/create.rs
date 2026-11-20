@@ -17,10 +17,11 @@ use crate::components::icon::{Icon, IconName};
 
 use super::Spinner;
 use super::logic::{
-    AUTH_HEADER_EXAMPLE, CreateErrors, build_create_request, create_failure, create_intro,
+    AUTH_HEADER_EXAMPLE, CreateErrors, PRODUCTION_WRITE_CONFIRM_PREFIX,
+    PRODUCTION_WRITE_CONFIRM_SUFFIX, build_create_request, create_failure, create_intro,
     env_dot_color, environments_help, expiry_date, format_short_date, initial_form, lifetime_label,
-    masked_token, mcp_endpoint_text, review_note, review_summary, scope_unavailable_text,
-    set_selected, validate_create,
+    masked_token, mcp_endpoint_text, production_write_selected, review_note, review_summary,
+    scope_unavailable_text, set_selected, validate_create,
 };
 
 /// DOM id of the create dialog. Focus handling addresses the dialog by id.
@@ -59,6 +60,11 @@ fn Section(
 /// what the user may grant. `existing_names` holds the lowercase names of the
 /// owner's non-revoked tokens that the card has loaded; a repeat gets a
 /// message before the request, and the server still decides.
+///
+/// When the selection combines a write scope with a production environment,
+/// the Review section shows the design's production write confirmation. The
+/// form requires it before the request, and the server requires
+/// `confirm_production_write` too.
 ///
 /// `on_changed` receives a status message whenever the token list changed or
 /// may have changed.
@@ -118,6 +124,7 @@ pub(super) fn CreateTokenDialog(
         values.expires_in_days,
     );
     let expiry = expiry_date(Utc::now(), values.expires_in_days);
+    let production_write = production_write_selected(&values, &policy);
 
     rsx! {
         div { class: "modal-backdrop cfat-backdrop",
@@ -307,13 +314,35 @@ pub(super) fn CreateTokenDialog(
                             }
                         }
 
-                        Section { n: "4", title: "Review",
+                        Section { n: "4", title: "Review", disabled: pending(),
                             div { class: "cfat-review",
                                 div {
                                     strong { "Effective access: " }
                                     "{summary}"
                                 }
                                 div { class: "help", "{review_note(user_role)}" }
+                            }
+                            if production_write {
+                                label { class: "sd-callout sd-callout-warn", style: "cursor: pointer;",
+                                    input {
+                                        r#type: "checkbox",
+                                        style: "margin-top: 2px;",
+                                        checked: values.confirm_production,
+                                        "aria-invalid": current_errors.production.as_ref().map(|_| "true"),
+                                        "aria-describedby": "cfat-prod-err",
+                                        onchange: move |event: FormEvent| form.write().confirm_production = event.checked(),
+                                    }
+                                    div {
+                                        "{PRODUCTION_WRITE_CONFIRM_PREFIX}"
+                                        b { "production" }
+                                        "{PRODUCTION_WRITE_CONFIRM_SUFFIX}"
+                                    }
+                                }
+                            }
+                            div { id: "cfat-prod-err", role: "alert", class: "cfat-error",
+                                if let Some(message) = current_errors.production.clone() {
+                                    "{message}"
+                                }
                             }
                         }
                     }

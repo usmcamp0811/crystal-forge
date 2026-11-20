@@ -111,6 +111,7 @@ async fn issue_token(pool: &PgPool, scopes: &[&str]) -> Token {
         expires_in_days: Some(30),
         environment_ids: Some(vec![env.to_string()]),
         scopes: Some(scopes.iter().map(|scope| (*scope).to_owned()).collect()),
+        confirm_production_write: None,
     };
     let settings = AccessTokenSettings::from_server_config(&enabled_config(), 86_400);
     let issued = service::create(pool, owner, &request, &settings)

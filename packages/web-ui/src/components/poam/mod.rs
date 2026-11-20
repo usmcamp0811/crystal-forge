@@ -2230,12 +2230,26 @@ fn short_display_date(date: NaiveDate) -> String {
 }
 
 fn activity_actor(activity: &ActivityView) -> String {
-    activity.actor_display.clone().unwrap_or_else(|| {
+    let actor = activity.actor_display.clone().unwrap_or_else(|| {
         if activity.actor_user_id.is_some() {
             "Deleted or unavailable user".to_string()
         } else {
             "System".to_string()
         }
+    });
+    match activity_agent_label(activity) {
+        Some(agent) => format!("{actor} {agent}"),
+        None => actor,
+    }
+}
+
+/// Returns "via agent token <name>" when an owner access token made the
+/// change. The owner stays the actor; the token only qualifies it.
+fn activity_agent_label(activity: &ActivityView) -> Option<String> {
+    activity.access_token_id?;
+    Some(match activity.access_token_name.as_deref() {
+        Some(name) => format!("via agent token {name}"),
+        None => "via agent token (deleted)".to_string(),
     })
 }
 
@@ -2727,7 +2741,20 @@ mod tests {
             created_at: chrono::DateTime::parse_from_rfc3339("2026-08-21T14:15:16.123456Z")
                 .unwrap()
                 .with_timezone(&chrono::Utc),
+            access_token_id: None,
+            access_token_name: None,
         }
+    }
+
+    #[test]
+    fn activity_actor_names_the_agent_token() {
+        let mut item = activity("note", serde_json::json!({"text":"Patched"}));
+        assert_eq!(activity_actor(&item), "j.okafor");
+        item.access_token_id = Some(Uuid::from_u128(22));
+        item.access_token_name = Some("OpenCode".into());
+        assert_eq!(activity_actor(&item), "j.okafor via agent token OpenCode");
+        item.access_token_name = None;
+        assert_eq!(activity_actor(&item), "j.okafor via agent token (deleted)");
     }
 
     #[test]

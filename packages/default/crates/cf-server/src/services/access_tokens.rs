@@ -193,6 +193,11 @@ struct ScopeSpec {
 
 /// Scope catalog, specification section 7. `released` is false for scopes that
 /// no consumer supports yet; they stay unselectable until a later milestone.
+///
+/// The write scopes `scans:request`, `poams:write` and `poams:verify` are
+/// released for Operator and Admin owners (TASK-534.5). `poams:close` stays
+/// unreleased. Every scope that does not end in `:read` is a write scope; see
+/// [`is_write_scope`].
 const SCOPES: [ScopeSpec; 7] = [
     ScopeSpec {
         scope: "cves:read",
@@ -220,21 +225,21 @@ const SCOPES: [ScopeSpec; 7] = [
         label: "Request CVE scans",
         default_selected: false,
         requires_operator: true,
-        released: false,
+        released: true,
     },
     ScopeSpec {
         scope: "poams:write",
         label: "Update POA&M progress",
         default_selected: false,
         requires_operator: true,
-        released: false,
+        released: true,
     },
     ScopeSpec {
         scope: "poams:verify",
         label: "Verify POA&M evidence",
         default_selected: false,
         requires_operator: true,
-        released: false,
+        released: true,
     },
     ScopeSpec {
         scope: "poams:close",
@@ -248,6 +253,16 @@ const SCOPES: [ScopeSpec; 7] = [
 fn scope_spec(scope: &str) -> Option<&'static ScopeSpec> {
     SCOPES.iter().find(|spec| spec.scope == scope)
 }
+
+/// Reports whether a scope lets a token request a write. The web UI uses the
+/// same `:read` suffix rule for its "includes write" review line.
+fn is_write_scope(scope: &str) -> bool {
+    !scope.ends_with(":read")
+}
+
+/// Field message when a write scope and a production environment are
+/// combined without `confirm_production_write: true`.
+const PRODUCTION_WRITE_MESSAGE: &str = "Confirm the production write access.";
 
 fn unavailable_reason(spec: &ScopeSpec, can_operate: bool) -> Option<&'static str> {
     if spec.requires_operator && !can_operate {
@@ -370,7 +385,14 @@ pub async fn policy(
     let environments = store::selectable_environments(pool, owner, access.is_admin())
         .await?
         .into_iter()
-        .map(|(id, name, color)| AccessTokenPolicyEnvironmentDto { id, name, color })
+        .map(
+            |(id, name, color, is_production)| AccessTokenPolicyEnvironmentDto {
+                id,
+                name,
+                color,
+                is_production,
+            },
+        )
         .collect();
     let scopes = SCOPES
         .iter()
@@ -436,6 +458,8 @@ struct IssueRequest {
     lifetime_days: u32,
     environment_ids: Vec<Uuid>,
     scopes: Vec<String>,
+    /// `true` only when the request sent `confirm_production_write: true`.
+    confirm_production_write: bool,
 }
 
 /// Validates request shape without touching the database.
@@ -549,6 +573,7 @@ fn validate_shape(
             lifetime_days,
             environment_ids,
             scopes,
+            confirm_production_write: request.confirm_production_write == Some(true),
         })
     } else {
         Err(fields)
@@ -726,7 +751,10 @@ async fn check_rate(
 ///
 /// # Errors
 /// - [`AccessTokenError::Disabled`] when tokens are disabled.
-/// - [`AccessTokenError::Validation`] with field messages for invalid input.
+/// - [`AccessTokenError::Validation`] with field messages for invalid input,
+///   including field `confirm_production_write` when the scopes include a
+///   write scope, an environment has `is_production`, and the request did not
+///   set `confirm_production_write: true`.
 /// - [`AccessTokenError::Conflict`] for an OIDC eligibility block, the live
 ///   token limit or a duplicate non-revoked name (case-insensitive). A unique
 ///   violation on the name index at insert time reports the same name conflict.
@@ -745,12 +773,24 @@ pub async fn create(
     // A return before commit drops the transaction, which rolls it back.
     let (mut tx, access) = begin_owner_tx(pool, owner).await?;
     let environments = store::lock_environments_tx(&mut tx, &issue.environment_ids).await?;
-    let fields = check_grant(
+    let mut fields = check_grant(
         &access,
         &issue.scopes,
         &environments,
         &issue.environment_ids,
     );
+    // SECURITY: A write scope in a production environment needs an explicit
+    // owner confirmation. The production flags are read after the
+    // environment share lock, so they cannot change before commit. Rotation
+    // never repeats this check: it keeps the grant that the owner confirmed.
+    let production_write = issue.scopes.iter().any(|scope| is_write_scope(scope))
+        && store::any_production_environment_tx(&mut tx, &issue.environment_ids).await?;
+    if production_write && !issue.confirm_production_write {
+        fields.insert(
+            "confirm_production_write".to_owned(),
+            PRODUCTION_WRITE_MESSAGE.to_owned(),
+        );
+    }
     if !fields.is_empty() {
         return Err(AccessTokenError::Validation(fields));
     }
@@ -780,14 +820,12 @@ pub async fn create(
     .map_err(insert_error)?;
     store::insert_grants_tx(&mut tx, id, &issue.scopes, &issue.environment_ids).await?;
     let metadata = load_dto_tx(&mut tx, owner, id).await?;
-    store::audit_access_token_tx(
-        &mut tx,
-        owner,
-        "access_token_created",
-        id,
-        audit_metadata(&metadata, &[]),
-    )
-    .await?;
+    // `production_write_confirmed` is `true` only when the grant combines a
+    // write scope with a production environment, which requires the
+    // confirmation. A confirmation sent for any other grant records `false`.
+    let mut event = audit_metadata(&metadata, &[]);
+    event["production_write_confirmed"] = json!(production_write);
+    store::audit_access_token_tx(&mut tx, owner, "access_token_created", id, event).await?;
     tx.commit().await?;
     Ok(IssuedAccessToken {
         metadata,
@@ -810,7 +848,9 @@ fn name_conflict() -> AccessTokenError {
 /// role and memberships, revokes the old token, inserts the replacement and
 /// writes one `access_token_rotated` audit event. The replacement keeps the
 /// name, audience, scopes and environments and expires after the original
-/// lifetime, clamped to the current maximum.
+/// lifetime, clamped to the current maximum. Write scopes are revalidated
+/// against the owner's current role, but the production write confirmation is
+/// not requested again: the replacement keeps the confirmed grant.
 ///
 /// # Errors
 /// - [`AccessTokenError::NotFound`] for a missing token or another user's token.
@@ -1259,6 +1299,7 @@ mod tests {
             expires_in_days: Some(30),
             environment_ids: Some(vec![Uuid::new_v4().to_string()]),
             scopes: Some(vec!["cves:read".into(), "poams:read".into()]),
+            confirm_production_write: None,
         }
     }
 
@@ -1358,11 +1399,28 @@ mod tests {
     fn scope_availability_follows_role_and_release() {
         let read = scope_spec("cves:read").unwrap();
         assert_eq!(unavailable_reason(read, false), None);
-        let scans = scope_spec("scans:request").unwrap();
-        assert_eq!(unavailable_reason(scans, false), Some("Requires Operator"));
-        assert_eq!(unavailable_reason(scans, true), Some("Not supported yet"));
+        for write in ["scans:request", "poams:write", "poams:verify"] {
+            let spec = scope_spec(write).unwrap();
+            assert_eq!(unavailable_reason(spec, false), Some("Requires Operator"));
+            assert_eq!(unavailable_reason(spec, true), None, "{write}");
+            assert!(is_write_scope(write));
+        }
+        let close = scope_spec("poams:close").unwrap();
+        assert_eq!(unavailable_reason(close, false), Some("Requires Operator"));
+        assert_eq!(unavailable_reason(close, true), Some("Not supported yet"));
+        assert!(!is_write_scope("cves:read"));
         assert!(scope_spec("admin").is_none());
         assert_eq!(SCOPES.len(), 7);
+    }
+
+    #[test]
+    fn production_confirmation_is_true_only_for_an_explicit_true() {
+        for (sent, expected) in [(None, false), (Some(false), false), (Some(true), true)] {
+            let mut req = request();
+            req.confirm_production_write = sent;
+            let issue = validate_shape(&req, &settings()).unwrap();
+            assert_eq!(issue.confirm_production_write, expected, "{sent:?}");
+        }
     }
 
     #[test]
@@ -1398,8 +1456,9 @@ mod tests {
         };
         assert!(check_grant(&admin, &scopes, &rows, &[other]).is_empty());
         assert!(check_grant(&admin, &scopes, &rows, &[inactive]).contains_key("environment_ids"));
+        assert!(check_grant(&admin, &["scans:request".to_owned()], &rows, &[other]).is_empty());
         assert!(
-            check_grant(&admin, &["scans:request".to_owned()], &rows, &[other])
+            check_grant(&admin, &["poams:close".to_owned()], &rows, &[other])
                 .contains_key("scopes")
         );
     }

@@ -261,30 +261,47 @@ async fn exact_reuse_scan_coverage_counts_reused_head_by_execution_source(pool: 
         .unwrap();
     assert!(
         matches!(
-            admit_system_cve_scan(&pool, actor, external, Some(origin), false, None, None)
-                .await
-                .unwrap(),
+            admit_system_cve_scan(
+                &pool,
+                actor,
+                external,
+                Some(origin),
+                false,
+                None,
+                None,
+                None
+            )
+            .await
+            .unwrap(),
             SystemScanAdmission::TargetChanged
         ),
         "client intent is the selected carrier B, not execution source A"
     );
-    let identity =
-        match admit_system_cve_scan(&pool, actor, external, Some(binding), false, None, None)
-            .await
-            .unwrap()
-        {
-            SystemScanAdmission::Admitted {
-                target,
-                configuration_derivation_id,
-                ..
-            } => (target.derivation_id, configuration_derivation_id),
-            SystemScanAdmission::Unavailable {
-                derivation_id,
-                configuration_derivation_id,
-                ..
-            } => (derivation_id, configuration_derivation_id),
-            _ => panic!("reused head B must be admissible"),
-        };
+    let identity = match admit_system_cve_scan(
+        &pool,
+        actor,
+        external,
+        Some(binding),
+        false,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap()
+    {
+        SystemScanAdmission::Admitted {
+            target,
+            configuration_derivation_id,
+            ..
+        } => (target.derivation_id, configuration_derivation_id),
+        SystemScanAdmission::Unavailable {
+            derivation_id,
+            configuration_derivation_id,
+            ..
+        } => (derivation_id, configuration_derivation_id),
+        _ => panic!("reused head B must be admissible"),
+    };
     assert_eq!(
         identity,
         (origin, binding),

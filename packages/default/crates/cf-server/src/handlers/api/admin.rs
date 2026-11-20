@@ -199,7 +199,7 @@ pub async fn mcp_status(State(state): State<CFState>, headers: HeaderMap) -> imp
         transport: crate::mcp::TRANSPORT_DESCRIPTION.to_string(),
         authentication: crate::mcp::AUTHENTICATION_DESCRIPTION.to_string(),
         login_source: config.auth_mode.clone(),
-        phase: "read-only".to_string(),
+        phase: "read and write (write tools require a token write scope)".to_string(),
         tools: crate::mcp::MCP_TOOL_NAMES
             .iter()
             .map(|name| (*name).to_string())
@@ -618,6 +618,8 @@ pub async fn list_audit_events(
             source: row
                 .request_origin
                 .unwrap_or_else(|| "admin_audit_events".to_string()),
+            access_token_id: row.access_token_id,
+            access_token_name: row.access_token_name,
         });
     }
 
@@ -633,6 +635,8 @@ pub async fn list_audit_events(
             action: AuditAction::UserRoleAssigned,
             target: format!("{} -> {:?}", row.target_email, row.role),
             source: "user_role_assignments".to_string(),
+            access_token_id: None,
+            access_token_name: None,
         });
     }
 
@@ -648,6 +652,8 @@ pub async fn list_audit_events(
             action: AuditAction::SessionInvalidated,
             target: row.user_email.unwrap_or_else(|| "unknown user".to_string()),
             source: "user_sessions".to_string(),
+            access_token_id: None,
+            access_token_name: None,
         });
     }
 
@@ -787,6 +793,14 @@ fn parse_audit_action(value: &str) -> Option<AuditAction> {
         "access_token_created" => Some(AuditAction::AccessTokenCreated),
         "access_token_rotated" => Some(AuditAction::AccessTokenRotated),
         "access_token_revoked" => Some(AuditAction::AccessTokenRevoked),
+        "mcp_write_denied" => Some(AuditAction::McpWriteDenied),
+        // POA&M writes are stored as `poam_{activity kind}`.
+        "poam_note" => Some(AuditAction::PoamNote),
+        "poam_status_changed" => Some(AuditAction::PoamStatusChanged),
+        "poam_milestone_added" => Some(AuditAction::PoamMilestoneAdded),
+        "poam_milestone_updated" => Some(AuditAction::PoamMilestoneUpdated),
+        "poam_milestone_removed" => Some(AuditAction::PoamMilestoneRemoved),
+        "poam_verification_attempted" => Some(AuditAction::PoamVerificationAttempted),
         _ => None,
     }
 }
@@ -1064,6 +1078,13 @@ fn action_to_str(action: AuditAction) -> &'static str {
         AuditAction::AccessTokenCreated => "access_token_created",
         AuditAction::AccessTokenRotated => "access_token_rotated",
         AuditAction::AccessTokenRevoked => "access_token_revoked",
+        AuditAction::McpWriteDenied => "mcp_write_denied",
+        AuditAction::PoamNote => "poam_note",
+        AuditAction::PoamStatusChanged => "poam_status_changed",
+        AuditAction::PoamMilestoneAdded => "poam_milestone_added",
+        AuditAction::PoamMilestoneUpdated => "poam_milestone_updated",
+        AuditAction::PoamMilestoneRemoved => "poam_milestone_removed",
+        AuditAction::PoamVerificationAttempted => "poam_verification_attempted",
     }
 }
 
@@ -1245,6 +1266,8 @@ mod tests {
             action,
             target: "target".to_string(),
             source: "source".to_string(),
+            access_token_id: None,
+            access_token_name: None,
         }
     }
 
@@ -1428,6 +1451,16 @@ mod tests {
             (AuditAction::AccessTokenCreated, "access_token_created"),
             (AuditAction::AccessTokenRotated, "access_token_rotated"),
             (AuditAction::AccessTokenRevoked, "access_token_revoked"),
+            (AuditAction::McpWriteDenied, "mcp_write_denied"),
+            (AuditAction::PoamNote, "poam_note"),
+            (AuditAction::PoamStatusChanged, "poam_status_changed"),
+            (AuditAction::PoamMilestoneAdded, "poam_milestone_added"),
+            (AuditAction::PoamMilestoneUpdated, "poam_milestone_updated"),
+            (AuditAction::PoamMilestoneRemoved, "poam_milestone_removed"),
+            (
+                AuditAction::PoamVerificationAttempted,
+                "poam_verification_attempted",
+            ),
         ] {
             assert_eq!(action_to_str(action), text);
             assert_eq!(parse_audit_action(text), Some(action));

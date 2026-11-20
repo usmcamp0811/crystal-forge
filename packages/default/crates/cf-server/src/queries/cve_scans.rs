@@ -2566,6 +2566,22 @@ pub(crate) enum SystemScanAdmission {
     },
 }
 
+/// Identifies the owner access token through which an agent requests a scan.
+///
+/// The human owner stays the actor of the admission. The token restricts the
+/// request further and is recorded in the audit event.
+#[derive(Debug, Clone)]
+pub(crate) struct ScanRequestToken {
+    /// Public token id.
+    pub(crate) id: Uuid,
+    /// Environments that the calling tool may act in: the token grant
+    /// intersected with the owner's environments at the start of the call
+    /// (Admin owners: the grant only), restricted to active environments.
+    /// The admission repeats the grant, activity and scope checks under its
+    /// own locks, so this set can only narrow the result.
+    pub(crate) effective_environment_ids: Vec<Uuid>,
+}
+
 /// Authorizes and admits one system scan in a single writer transaction.
 ///
 /// Infrastructure derivation keys precede canonical CVE keys, environment rows,
@@ -2574,9 +2590,18 @@ pub(crate) enum SystemScanAdmission {
 /// reject the request before any scan write. All admission helpers reborrow
 /// this transaction, so no inner pool transaction waits on an outer scope lock.
 ///
+/// `token` is `None` for a browser request. For an agent request it names the
+/// acting token: after the owner check, the transaction share-locks the token
+/// row and requires that the token is owned by `actor`, is neither revoked nor
+/// expired, grants `scans:request`, and grants the system's active environment,
+/// which must also be in `effective_environment_ids`. The audit event then
+/// records `access_token_id` and the metadata
+/// `{"via":"mcp","access_token_id","access_token_name"}`.
+///
 /// # Errors
-/// Returns database, admission, or audit persistence errors. Authorization loss
-/// returns `NotFound` and writes no scan.
+/// Returns database, admission, or audit persistence errors. Authorization loss,
+/// including a token check failure, returns `NotFound` and writes no scan.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn admit_system_cve_scan(
     pool: &PgPool,
     actor: Uuid,
@@ -2585,6 +2610,7 @@ pub(crate) async fn admit_system_cve_scan(
     local_available: bool,
     scanner_version: Option<String>,
     request_origin: Option<String>,
+    token: Option<&ScanRequestToken>,
 ) -> Result<SystemScanAdmission> {
     let static_destination = crate::queries::cache_push::current_static_destination();
     admit_system_cve_scan_with_static(
@@ -2596,8 +2622,46 @@ pub(crate) async fn admit_system_cve_scan(
         scanner_version,
         request_origin,
         static_destination.as_deref(),
+        token,
     )
     .await
+}
+
+/// Locks the acting token row and returns its name when it may request a
+/// scan of a system in `environment`.
+///
+/// CONCURRENCY: The caller already holds the owner row `FOR SHARE` (taken by
+/// `authorize_system_write_tx`). Revoke and rotate lock the owner row before
+/// the token row too, so this order cannot deadlock with them. The share lock
+/// makes a concurrent revocation wait until this admission commits or rolls
+/// back; a revocation that committed first makes this check fail.
+async fn lock_scan_request_token_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor: Uuid,
+    token: &ScanRequestToken,
+    environment: Option<Uuid>,
+) -> Result<Option<String>> {
+    let Some(environment) = environment.filter(|id| token.effective_environment_ids.contains(id))
+    else {
+        return Ok(None);
+    };
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT t.name FROM api_access_tokens t
+         WHERE t.id = $1 AND t.user_id = $2
+           AND t.revoked_at IS NULL AND t.expires_at > clock_timestamp()
+           AND EXISTS (SELECT 1 FROM api_access_token_scopes s
+                       WHERE s.token_id = t.id AND s.scope = 'scans:request')
+           AND EXISTS (SELECT 1 FROM api_access_token_environments te
+                       JOIN environments e ON e.id = te.environment_id
+                       WHERE te.token_id = t.id AND te.environment_id = $3
+                         AND COALESCE(e.is_active, false))
+         FOR SHARE OF t",
+    )
+    .bind(token.id)
+    .bind(actor)
+    .bind(environment)
+    .fetch_optional(&mut **tx)
+    .await?)
 }
 
 /// Like [`admit_system_cve_scan`], with the currently effective static cache
@@ -2618,6 +2682,7 @@ pub(crate) async fn admit_system_cve_scan_with_static(
     scanner_version: Option<String>,
     request_origin: Option<String>,
     static_destination: Option<&str>,
+    token: Option<&ScanRequestToken>,
 ) -> Result<SystemScanAdmission> {
     use crate::services::composite_enforcement::{
         lock_poam_derivations_for_store_path_tx, lock_poam_findings_for_derivation_tx,
@@ -2697,6 +2762,19 @@ pub(crate) async fn admit_system_cve_scan_with_static(
     {
         return Ok(SystemScanAdmission::NotFound);
     }
+    // SECURITY: An agent request must also pass the current token row. The
+    // owner check above already refused a Viewer or a disabled owner and an
+    // Operator without membership. The token check then narrows the request
+    // to the token grant, so an Admin owner never acts outside it.
+    let token_name = match token {
+        None => None,
+        Some(token) => {
+            match lock_scan_request_token_tx(&mut tx, actor, token, environment).await? {
+                Some(name) => Some(name),
+                None => return Ok(SystemScanAdmission::NotFound),
+            }
+        }
+    };
     if environment != preliminary_environment {
         return Ok(SystemScanAdmission::TargetChanged);
     }
@@ -2769,10 +2847,19 @@ pub(crate) async fn admit_system_cve_scan_with_static(
         };
         (outcome.scan_id, None)
     };
-    sqlx::query("INSERT INTO admin_audit_events(actor_user_id,actor_identifier,action,target,metadata,request_origin) VALUES($1,COALESCE((SELECT email FROM users WHERE id=$1),$1::text),'cve_scan_requested',$2,$3,$4)")
+    let mut metadata = serde_json::json!({"operation":"cve_scan","scan_id":scan_id,"derivation_id":target.derivation_id,"configuration_derivation_id":configuration_derivation_id,"config_name":target.config_name});
+    // The token name is a snapshot, so the Audit Log keeps it after the token
+    // is renamed or deleted.
+    if let (Some(token), Some(name)) = (token, token_name.as_deref()) {
+        metadata["via"] = serde_json::json!("mcp");
+        metadata["access_token_id"] = serde_json::json!(token.id);
+        metadata["access_token_name"] = serde_json::json!(name);
+    }
+    sqlx::query("INSERT INTO admin_audit_events(actor_user_id,actor_identifier,action,target,metadata,request_origin,access_token_id) VALUES($1,COALESCE((SELECT email FROM users WHERE id=$1),$1::text),'cve_scan_requested',$2,$3,$4,$5)")
         .bind(actor).bind(format!("{} ({system_id})", target.hostname.as_deref().unwrap_or(&target.config_name)))
-        .bind(serde_json::json!({"operation":"cve_scan","scan_id":scan_id,"derivation_id":target.derivation_id,"configuration_derivation_id":configuration_derivation_id,"config_name":target.config_name}))
+        .bind(metadata)
         .bind(request_origin)
+        .bind(token.map(|token| token.id))
         .execute(&mut *tx).await?;
     let unavailable: bool = sqlx::query_scalar(
         "SELECT COALESCE(status='failed' AND scan_metadata->>'terminal_reason'='executor_unavailable',false) FROM cve_scans WHERE id=$1",
@@ -4290,6 +4377,7 @@ mod tests {
                 true,
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -4333,7 +4421,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            admit_system_cve_scan(&pool, actor, system, None, true, None, None)
+            admit_system_cve_scan(&pool, actor, system, None, true, None, None, None)
                 .await
                 .unwrap(),
             SystemScanAdmission::NotFound

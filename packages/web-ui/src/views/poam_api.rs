@@ -1375,6 +1375,13 @@ pub struct ActivityView {
     pub payload: Value,
     /// Records when the event occurred.
     pub created_at: DateTime<Utc>,
+    /// Identifies the owner access token (agent) that made the change, or
+    /// `None` for a browser session or server action.
+    #[serde(default)]
+    pub access_token_id: Option<Uuid>,
+    /// Contains the current name of `access_token_id`, when known.
+    #[serde(default)]
+    pub access_token_name: Option<String>,
 }
 
 /// Contains one POA&M and independently paginated related history.

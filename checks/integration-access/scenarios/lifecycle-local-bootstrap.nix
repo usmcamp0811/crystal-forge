@@ -224,7 +224,9 @@ in
         browserToken = "cf-it-browser-token";
         lifetimeDays = 30;
         readScopes = ["cves:read" "poams:read" "provenance:read"];
-        unavailableScopes = ["scans:request" "poams:write" "poams:verify" "poams:close"];
+        # TASK-534.5 released the write scopes for Operator and Admin owners.
+        writeScopes = ["scans:request" "poams:write" "poams:verify"];
+        unavailableScopes = ["poams:close"];
       };
 
       # Authored request payloads for the admin-only operations. Each denied

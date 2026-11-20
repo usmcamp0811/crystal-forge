@@ -81,6 +81,12 @@ pub struct AdminAuditEventRow {
     pub action: String,
     pub target: String,
     pub request_origin: Option<String>,
+    /// Access token through which an agent acted; `None` for browser and
+    /// server actions.
+    pub access_token_id: Option<Uuid>,
+    /// Token name snapshot from the event metadata, or the current token name
+    /// when the event has no snapshot.
+    pub access_token_name: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -359,11 +365,22 @@ pub async fn delete_oidc_mapping(
     Ok(row)
 }
 
+/// Returns the newest 300 admin audit events with their agent attribution.
+///
+/// The token name prefers the `access_token_name` snapshot that agent writes
+/// store in the metadata, so a renamed token still shows the name at the time
+/// of the action. Events without a snapshot fall back to the current name.
+///
+/// # Errors
+/// Returns database errors.
 pub async fn list_admin_audit_events(pool: &PgPool) -> Result<Vec<AdminAuditEventRow>> {
     let rows = sqlx::query_as::<_, AdminAuditEventRow>(
-        "SELECT created_at, actor_identifier, action, target, request_origin
-         FROM admin_audit_events
-         ORDER BY created_at DESC
+        "SELECT e.created_at, e.actor_identifier, e.action, e.target, e.request_origin,
+                e.access_token_id,
+                COALESCE(e.metadata ->> 'access_token_name', t.name) AS access_token_name
+         FROM admin_audit_events e
+         LEFT JOIN api_access_tokens t ON t.id = e.access_token_id
+         ORDER BY e.created_at DESC
          LIMIT 300",
     )
     .fetch_all(pool)

@@ -455,6 +455,8 @@ SQL
       management_mode_migration_upgrade \
       mcp_tools \
       mcp_transport \
+      mcp_write_poam \
+      mcp_write_scan \
       oidc_entitlements \
       policy_counts_defect \
       policy_editor_phase2 \

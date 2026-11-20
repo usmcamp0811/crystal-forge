@@ -1711,11 +1711,16 @@ fn AuditTab(
                             {
                                 // Mock action categorization and color
                                 let (action_color, category_class, category_label) = get_audit_action_color(&event.action);
+                                let actor = audit_actor_label(&event);
 
                                 rsx! {
                                     tr {
                                         td { style: "font-size:12px;color:var(--cf-text-muted);white-space:nowrap;", "{format_time(event.timestamp)}" }
-                                        td { class: "mono", style: "font-size:12px;font-weight:600;", "{event.actor.clone().unwrap_or_else(|| \"system\".to_string())}" }
+                                        td { class: "mono", style: "font-size:12px;font-weight:600;",
+                                            // The visible text uses a middle dot; screen readers get a plain sentence.
+                                            span { aria_hidden: "true", "{actor.visible}" }
+                                            span { class: "sr-only", "{actor.spoken}" }
+                                        }
                                         td { class: "mono", style: "font-size:12px;color:{action_color};", "{format_action_label(&event.action)}" }
                                         td { style: "font-size:12px;", "{event.target}" }
                                         td {
@@ -2732,6 +2737,40 @@ fn get_user_initials(identifier: &str) -> String {
     }
 }
 
+/// Visible and spoken text of an Audit Log actor cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuditActorLabel {
+    /// Shown text, for example `ops@example.com · via agent token OpenCode`.
+    visible: String,
+    /// Screen-reader text without the separator glyph.
+    spoken: String,
+}
+
+/// Returns the actor cell text of one audit event.
+///
+/// The human owner stays the actor. An event made through an access token
+/// adds `via agent token <name>`; a token whose name the server no longer
+/// knows reads `(deleted token)`. An event without an actor reads `system`.
+fn audit_actor_label(event: &AuditEvent) -> AuditActorLabel {
+    let actor = event.actor.as_deref().unwrap_or("system");
+    match event.access_token_id {
+        None => AuditActorLabel {
+            visible: actor.to_string(),
+            spoken: actor.to_string(),
+        },
+        Some(_) => {
+            let token = event
+                .access_token_name
+                .as_deref()
+                .unwrap_or("(deleted token)");
+            AuditActorLabel {
+                visible: format!("{actor} · via agent token {token}"),
+                spoken: format!("{actor}, via agent token {token}"),
+            }
+        }
+    }
+}
+
 fn get_audit_action_color(
     action: &crate::api::models::AuditAction,
 ) -> (&'static str, &'static str, &'static str) {
@@ -2749,7 +2788,14 @@ fn get_audit_action_color(
         | AuditAction::AccessTokenCreated
         | AuditAction::AccessTokenRotated
         | AuditAction::AccessTokenRevoked
+        | AuditAction::McpWriteDenied
         | AuditAction::CveAccept => ("#f87171", "chip-critical", "security"),
+        AuditAction::PoamNote
+        | AuditAction::PoamStatusChanged
+        | AuditAction::PoamMilestoneAdded
+        | AuditAction::PoamMilestoneUpdated
+        | AuditAction::PoamMilestoneRemoved
+        | AuditAction::PoamVerificationAttempted => ("#60a5fa", "chip-info", "poam"),
         AuditAction::SystemDeployRequested
         | AuditAction::SystemDeploy
         | AuditAction::SystemRollbackRequested
@@ -2802,6 +2848,13 @@ fn format_action_label(action: &crate::api::models::AuditAction) -> String {
         AuditAction::AccessTokenCreated => "access_token.create".to_string(),
         AuditAction::AccessTokenRotated => "access_token.rotate".to_string(),
         AuditAction::AccessTokenRevoked => "access_token.revoke".to_string(),
+        AuditAction::McpWriteDenied => "mcp.write_denied".to_string(),
+        AuditAction::PoamNote => "poam.note".to_string(),
+        AuditAction::PoamStatusChanged => "poam.status_change".to_string(),
+        AuditAction::PoamMilestoneAdded => "poam.milestone_add".to_string(),
+        AuditAction::PoamMilestoneUpdated => "poam.milestone_update".to_string(),
+        AuditAction::PoamMilestoneRemoved => "poam.milestone_remove".to_string(),
+        AuditAction::PoamVerificationAttempted => "poam.verify".to_string(),
         AuditAction::Unknown => "unknown".to_string(),
     }
 }
@@ -3443,5 +3496,73 @@ mod retry_policy_form_tests {
             state.save_error.as_deref(),
             Some("Backoff must be None, 10s, 30s, 1m, 2m, or 5m.")
         );
+    }
+}
+
+#[cfg(test)]
+mod audit_actor_tests {
+    use super::*;
+    use crate::api::models::{AuditAction, Uuid};
+
+    fn event(actor: Option<&str>, token: Option<(Uuid, Option<&str>)>) -> AuditEvent {
+        AuditEvent {
+            timestamp: chrono::Utc::now(),
+            actor: actor.map(str::to_string),
+            action: AuditAction::CveScanRequested,
+            target: "web-01".to_string(),
+            source: "admin_audit_events".to_string(),
+            access_token_id: token.map(|(id, _)| id),
+            access_token_name: token.and_then(|(_, name)| name.map(str::to_string)),
+        }
+    }
+
+    #[test]
+    fn browser_actions_show_only_the_actor() {
+        let label = audit_actor_label(&event(Some("ops@example.com"), None));
+        assert_eq!(label.visible, "ops@example.com");
+        assert_eq!(label.spoken, "ops@example.com");
+        assert_eq!(audit_actor_label(&event(None, None)).visible, "system");
+    }
+
+    #[test]
+    fn agent_actions_name_the_token_or_a_deleted_token() {
+        let id = Uuid::from_u128(7);
+        let label = audit_actor_label(&event(
+            Some("ops@example.com"),
+            Some((id, Some("OpenCode"))),
+        ));
+        assert_eq!(label.visible, "ops@example.com · via agent token OpenCode");
+        assert_eq!(label.spoken, "ops@example.com, via agent token OpenCode");
+        let deleted = audit_actor_label(&event(Some("ops@example.com"), Some((id, None))));
+        assert_eq!(
+            deleted.visible,
+            "ops@example.com · via agent token (deleted token)"
+        );
+    }
+
+    #[test]
+    fn agent_write_actions_have_labels_and_categories() {
+        for (action, label) in [
+            (AuditAction::McpWriteDenied, "mcp.write_denied"),
+            (AuditAction::PoamNote, "poam.note"),
+            (AuditAction::PoamStatusChanged, "poam.status_change"),
+            (AuditAction::PoamMilestoneAdded, "poam.milestone_add"),
+            (AuditAction::PoamMilestoneUpdated, "poam.milestone_update"),
+            (AuditAction::PoamMilestoneRemoved, "poam.milestone_remove"),
+            (AuditAction::PoamVerificationAttempted, "poam.verify"),
+        ] {
+            assert_eq!(format_action_label(&action), label);
+            assert_ne!(get_audit_action_color(&action).2, "config", "{label}");
+        }
+        let decoded: AuditEvent = serde_json::from_value(serde_json::json!({
+            "timestamp": "2026-11-20T10:00:00Z",
+            "actor": "ops@example.com",
+            "action": "poam_verification_attempted",
+            "target": "poam:1",
+            "source": "admin_audit_events",
+        }))
+        .expect("an event without token fields decodes");
+        assert_eq!(decoded.action, AuditAction::PoamVerificationAttempted);
+        assert_eq!(decoded.access_token_id, None);
     }
 }
