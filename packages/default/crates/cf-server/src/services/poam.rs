@@ -9,6 +9,9 @@
 //! `fleet_cve_batch_detail`, `cve_relationships`, and
 //! `cve_relationships_for_rows` (including its transaction helper). Each returns
 //! both CVE and POA&M metadata and requires `mcp`, `cves:read`, and `poams:read`.
+//! `restricted_detail` accepts only restricted credentials, requires `mcp` and
+//! `poams:read`, and returns a complete POA&M only when every subject is in the
+//! effective environments.
 //! Other public reads require a browser session until safe MCP projections are
 //! implemented. All restricted mutations fail closed pending a released,
 //! capability-specific transactional token-row validator (TASK-534).
@@ -348,6 +351,19 @@ async fn current_reading_actor_tx(
     tx: &mut Transaction<'_, Postgres>,
     request_actor: &PoamActor,
 ) -> Result<PoamActor, PoamError> {
+    // These four readers all return CVE and POA&M relationship metadata, so
+    // both scopes are required, not a union of unrelated read capabilities.
+    current_reading_actor_for_scopes_tx(tx, request_actor, &["cves:read", "poams:read"]).await
+}
+
+// SECURITY: `required_scopes` must list every scope needed by the response
+// that the caller builds with the returned actor. A restricted credential is
+// never refreshed into a browser Admin bypass or a mutating actor.
+async fn current_reading_actor_for_scopes_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    request_actor: &PoamActor,
+    required_scopes: &[&str],
+) -> Result<PoamActor, PoamError> {
     let user = sqlx::query_as::<_, (String, bool)>("SELECT email,is_active FROM users WHERE id=$1")
         .bind(request_actor.user_id)
         .fetch_optional(&mut **tx)
@@ -373,16 +389,9 @@ async fn current_reading_actor_tx(
     .bind(request_actor.user_id)
     .fetch_all(&mut **tx)
     .await?;
-    // These four readers all return CVE and POA&M relationship metadata, so
-    // both scopes are required, not a union of unrelated read capabilities.
     let environment_ids = request_actor
         .credential
-        .reading_environments(
-            is_admin,
-            environment_ids,
-            &["cves:read", "poams:read"],
-            Utc::now(),
-        )
+        .reading_environments(is_admin, environment_ids, required_scopes, Utc::now())
         .ok_or(PoamError::Forbidden)?;
     let browser = request_actor.credential.is_browser_session();
     Ok(PoamActor {
@@ -2180,6 +2189,79 @@ pub async fn detail_with_history(
     clock: &dyn PoamClock,
 ) -> Result<PoamDetail, PoamError> {
     require_visible(pool, actor, id).await?;
+    let mut tx = pool.begin().await?;
+    let detail = detail_with_history_tx(&mut tx, actor, id, query, clock).await?;
+    tx.commit().await?;
+    Ok(detail)
+}
+
+/// Returns a complete POA&M to a restricted MCP credential, or not found.
+///
+/// The read reloads the active owner's roles and memberships, intersects them
+/// with the immutable grant (audience `mcp`, unexpired, scope `poams:read`),
+/// and keeps only active environments. The POA&M is returned only when every
+/// current context and every current or retired policy and CVE finding subject
+/// is inside that set. No partial or scoped projection exists. The detail is
+/// loaded with the same bounded default history pages as [`detail`], without
+/// an Admin bypass, in the same transaction as the visibility decision.
+///
+/// Free text such as titles, plans, notes and activity payloads is returned
+/// as stored. Callers that forward it to an LLM must treat it as untrusted.
+///
+/// # Errors
+///
+/// Returns [`PoamError::Forbidden`] for a browser-session actor and for denied
+/// owner or credential authority. Returns [`PoamError::NotFound`] when the
+/// POA&M is absent or any subject is outside the effective environments; the
+/// two cases are indistinguishable. Returns a database error on load failure.
+pub async fn restricted_detail(
+    pool: &PgPool,
+    actor: &PoamActor,
+    id: Uuid,
+    clock: &dyn PoamClock,
+) -> Result<PoamDetail, PoamError> {
+    if actor.credential.is_browser_session() {
+        return Err(PoamError::Forbidden);
+    }
+    // CONCURRENCY: The current-finding refresh takes `FOR SHARE` row locks, so
+    // this transaction cannot be READ ONLY. It uses the browser detail's
+    // default isolation; visibility and load share one transaction.
+    let mut tx = pool.begin().await?;
+    let mut actor = current_reading_actor_for_scopes_tx(&mut tx, actor, &["poams:read"]).await?;
+    // SECURITY: A deactivated environment grants nothing, even when the token
+    // and the owner still name it. NULL `is_active` is treated as inactive.
+    actor.environment_ids = sqlx::query_scalar(
+        "SELECT id FROM environments WHERE id=ANY($1) AND COALESCE(is_active,false) ORDER BY id",
+    )
+    .bind(&actor.environment_ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    let visible: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM poams WHERE id=$1) AND poam_visible_to_environments($1,$2)",
+    )
+    .bind(id)
+    .bind(&actor.environment_ids)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !visible {
+        return Err(PoamError::NotFound);
+    }
+    require_restricted_poam_visibility_tx(&mut tx, &actor, &[id]).await?;
+    let detail =
+        detail_with_history_tx(&mut tx, &actor, id, &PoamDetailQuery::default(), clock).await?;
+    tx.commit().await?;
+    Ok(detail)
+}
+
+// SECURITY: The caller must authorize `actor` for `id` before this call. The
+// loader applies only the actor's environment filter, not a visibility check.
+async fn detail_with_history_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    id: Uuid,
+    query: &PoamDetailQuery,
+    clock: &dyn PoamClock,
+) -> Result<PoamDetail, PoamError> {
     let (finding_limit, _) = page_bounds(Some(query.finding_limit.unwrap_or(100)), None)?;
     let (activity_limit, _) = page_bounds(Some(query.activity_limit.unwrap_or(100)), None)?;
     let (verification_limit, _) = page_bounds(Some(query.verification_limit.unwrap_or(10)), None)?;
@@ -2201,9 +2283,8 @@ pub async fn detail_with_history(
             "verification_limit must be between 1 and 10".into(),
         ));
     }
-    let mut tx = pool.begin().await?;
     let mut detail = poam::detail(
-        &mut tx,
+        tx,
         id,
         clock.today(),
         actor.is_admin,
@@ -2227,7 +2308,7 @@ pub async fn detail_with_history(
             .filter(|finding| finding.link_active)
             .map(|finding| (finding.id, finding.system_id, finding.policy_lineage_id))
             .collect::<Vec<_>>();
-        let items = current_verification_items_tx(&mut tx, &tuples, clock.now()).await?;
+        let items = current_verification_items_tx(tx, &tuples, clock.now()).await?;
         for finding in &mut detail.findings {
             if !finding.link_active {
                 continue;
@@ -2257,7 +2338,7 @@ pub async fn detail_with_history(
                 canonical_package_name: finding.canonical_package_name.clone(),
             })
             .collect::<Vec<_>>();
-        let cve_items = current_cve_verification_items_tx(&mut tx, &cve_keys, None).await?;
+        let cve_items = current_cve_verification_items_tx(tx, &cve_keys, None).await?;
         for finding in &mut detail.cve_findings {
             let Some(item) = cve_items
                 .iter()
@@ -2276,8 +2357,7 @@ pub async fn detail_with_history(
             finding.resolution_state = item.result.clone();
         }
     }
-    hydrate_requirement_metadata_tx(&mut tx, &mut detail).await?;
-    tx.commit().await?;
+    hydrate_requirement_metadata_tx(tx, &mut detail).await?;
     Ok(detail)
 }
 

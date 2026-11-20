@@ -453,6 +453,8 @@ SQL
       framework_version_id_lifecycle \
       hardening_admission_migration_upgrade \
       management_mode_migration_upgrade \
+      mcp_tools \
+      mcp_transport \
       oidc_entitlements \
       policy_counts_defect \
       policy_editor_phase2 \

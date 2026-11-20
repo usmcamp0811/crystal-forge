@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::api::models::{
     AdminUserGrantSources, AdminUserSummary, ApiError, AuditAction, AuditEvent,
     AutomaticRetryPolicyResponse, ClassificationBannerConfig, DatabaseRuntimeInfo, IdentitySource,
-    OidcGroupMapping, PaginatedResponse, Role, ServerRuntimeInfoResponse,
+    McpServerStatusResponse, OidcGroupMapping, PaginatedResponse, Role, ServerRuntimeInfoResponse,
     UpdateAutomaticRetryPolicyRequest, UpdateClassificationBannerRequest,
 };
 use crate::auth::password::hash_password;
@@ -155,6 +155,59 @@ pub async fn server_runtime_info(
         oidc_issuer_url: std::env::var("CRYSTAL_FORGE_OIDC_ISSUER_URL").ok(),
         tls_status,
         tls_detail,
+    })
+    .into_response()
+}
+
+/// Returns the MCP server status for the Admin Server tab. Admin only.
+///
+/// Read-only: enablement and the public URL are managed in the NixOS
+/// configuration, and no request header changes a reported value.
+pub async fn mcp_status(State(state): State<CFState>, headers: HeaderMap) -> impl IntoResponse {
+    let pool = state.pool().clone();
+    let Some(_admin_user) = require_admin_user(&pool, &headers).await else {
+        return forbidden();
+    };
+    let active_token_count = match crate::queries::access_tokens::count_live_tokens(&pool).await {
+        Ok(count) => count,
+        Err(_) => return internal_error("Failed to load MCP status"),
+    };
+    let config = &state.server_config;
+    let mut warnings = Vec::new();
+    if config.mcp_enable && config.mcp_public_url.is_none() {
+        warnings.push(
+            "MCP is enabled but the public URL is not set: browser clients that send an \
+             Origin header are rejected and the token reveal cannot show the endpoint."
+                .to_string(),
+        );
+    }
+    if config
+        .mcp_public_url
+        .as_deref()
+        .is_some_and(|url| url.starts_with("http://"))
+    {
+        warnings
+            .push("The MCP public URL uses http; use https outside local development.".to_string());
+    }
+    Json(McpServerStatusResponse {
+        enabled: config.mcp_enable,
+        public_url: config.mcp_public_url.clone(),
+        protocol_versions: crate::mcp::SUPPORTED_PROTOCOL_VERSIONS
+            .iter()
+            .map(|version| (*version).to_string())
+            .collect(),
+        transport: crate::mcp::TRANSPORT_DESCRIPTION.to_string(),
+        authentication: crate::mcp::AUTHENTICATION_DESCRIPTION.to_string(),
+        login_source: config.auth_mode.clone(),
+        phase: "read-only".to_string(),
+        tools: crate::mcp::MCP_TOOL_NAMES
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect(),
+        access_tokens_enabled: config.access_tokens_enable,
+        max_token_lifetime_days: config.access_tokens_max_lifetime_days,
+        active_token_count,
+        warnings,
     })
     .into_response()
 }

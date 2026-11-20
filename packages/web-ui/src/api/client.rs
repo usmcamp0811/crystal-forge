@@ -3081,6 +3081,17 @@ pub async fn fetch_admin_server_info() -> Result<ServerRuntimeInfoResponse, ApiC
     fetch_json(&url).await
 }
 
+/// Fetches the MCP server status (admin only). The request is read-only.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails, the server refuses it,
+/// or the response does not decode as [`McpServerStatusResponse`].
+pub async fn fetch_admin_mcp_status() -> Result<McpServerStatusResponse, ApiClientError> {
+    let url = format!("{}/admin/mcp/status", base_url());
+    fetch_json(&url).await
+}
+
 /// Fetch admin audit events.
 pub async fn fetch_admin_audit_events(
     params: &AdminAuditEventsParams,

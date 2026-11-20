@@ -338,6 +338,22 @@ pub struct ServerConfig {
     #[serde(default = "default_access_tokens_max_lifetime_days")]
     pub access_tokens_max_lifetime_days: u32,
 
+    /// Serves the read-only MCP endpoint at `POST /mcp`. Default: false.
+    /// When false, `/mcp` returns 404. Requires `access_tokens_enable`,
+    /// because the endpoint authenticates only with access tokens;
+    /// [`ServerConfig::validate`] rejects the combination.
+    #[serde(default)]
+    pub mcp_enable: bool,
+
+    /// Absolute public URL of the MCP endpoint, for example
+    /// `https://forge.example.com/mcp`. Optional. It must use `https`, or
+    /// `http` only for `localhost`, `127.0.0.1` or `::1`, and must not carry
+    /// a query, fragment or userinfo. The server never infers this URL from
+    /// request headers. Its origin is the only `Origin` header value that
+    /// `/mcp` accepts.
+    #[serde(default)]
+    pub mcp_public_url: Option<String>,
+
     /// CIDR ranges for reverse proxies whose X-Forwarded-For header may be
     /// used to resolve the client IP. Empty by default: record the direct peer.
     #[serde(default)]
@@ -501,6 +517,8 @@ impl Default for ServerConfig {
             access_tokens_enable: default_access_tokens_enable(),
             access_tokens_default_lifetime_days: default_access_tokens_default_lifetime_days(),
             access_tokens_max_lifetime_days: default_access_tokens_max_lifetime_days(),
+            mcp_enable: false,
+            mcp_public_url: None,
             trusted_proxy_cidrs: Vec::new(),
         }
     }
@@ -688,6 +706,22 @@ impl ServerConfig {
             ));
         }
 
+        if let Some(url) = self.mcp_public_url.as_deref() {
+            if mcp_public_url_origin(url).is_none() {
+                return Err(
+                    "mcp_public_url must be an absolute https:// URL (http:// only for localhost, 127.0.0.1 or ::1) without query, fragment, userinfo or surrounding whitespace"
+                        .to_string(),
+                );
+            }
+        }
+
+        if self.mcp_enable && !self.access_tokens_enable {
+            return Err(
+                "mcp_enable requires access_tokens_enable: the MCP endpoint authenticates only with access tokens"
+                    .to_string(),
+            );
+        }
+
         if self.execution_mode.is_mock() && self.auth_mode != "local" {
             return Err(
                 "server.execution_mode=mock requires server.auth_mode=local for safety".to_string(),
@@ -710,6 +744,36 @@ impl ServerConfig {
 
         Ok(())
     }
+}
+
+/// Returns the ASCII origin of an allowed `mcp_public_url`, or `None` when the
+/// URL is not allowed.
+///
+/// An allowed URL parses as an absolute URL with scheme `https`, or scheme
+/// `http` and host `localhost`, `127.0.0.1` or `::1`. It has no query, no
+/// fragment, no userinfo and no leading or trailing whitespace. The origin
+/// omits the default port, as browsers do in the `Origin` header, for example
+/// `https://forge.example.com` or `http://[::1]:3000`.
+pub fn mcp_public_url_origin(value: &str) -> Option<String> {
+    if value.trim() != value {
+        return None;
+    }
+    let url = url::Url::parse(value).ok()?;
+    let scheme_allowed = match url.scheme() {
+        "https" => true,
+        "http" => match url.host()? {
+            url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+            url::Host::Ipv4(addr) => addr == std::net::Ipv4Addr::LOCALHOST,
+            url::Host::Ipv6(addr) => addr == std::net::Ipv6Addr::LOCALHOST,
+        },
+        _ => false,
+    };
+    let clean = url.host().is_some()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none();
+    (scheme_allowed && clean).then(|| url.origin().ascii_serialization())
 }
 
 pub fn notification_provider_endpoint_allowed(value: &str, allow_insecure_loopback: bool) -> bool {
@@ -831,6 +895,89 @@ mod tests {
             let err = with(default, max).validate().unwrap_err();
             assert!(err.contains("access token lifetimes"), "{default}/{max}");
         }
+    }
+
+    #[test]
+    fn mcp_defaults_to_disabled_without_url() {
+        let omitted: ServerConfig =
+            serde_json::from_str(r#"{"host":"localhost","port":3000}"#).unwrap();
+        for cfg in [&omitted, &ServerConfig::default()] {
+            assert!(!cfg.mcp_enable);
+            assert_eq!(cfg.mcp_public_url, None);
+            cfg.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn mcp_public_url_accepts_https_and_loopback_http() {
+        for (url, origin) in [
+            ("https://forge.example.com/mcp", "https://forge.example.com"),
+            (
+                "https://forge.example.com:8443/cf/mcp",
+                "https://forge.example.com:8443",
+            ),
+            (
+                "https://forge.example.com:443/mcp",
+                "https://forge.example.com",
+            ),
+            ("http://localhost:3000/mcp", "http://localhost:3000"),
+            ("http://127.0.0.1:3000/mcp", "http://127.0.0.1:3000"),
+            ("http://[::1]:3000/mcp", "http://[::1]:3000"),
+        ] {
+            assert_eq!(mcp_public_url_origin(url).as_deref(), Some(origin), "{url}");
+            let cfg = ServerConfig {
+                mcp_enable: true,
+                mcp_public_url: Some(url.to_string()),
+                ..ServerConfig::default()
+            };
+            cfg.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn mcp_public_url_rejects_unsafe_forms() {
+        for url in [
+            "",
+            "forge.example.com/mcp",
+            "/mcp",
+            "http://forge.example.com/mcp",
+            "http://10.0.0.1/mcp",
+            "ftp://forge.example.com/mcp",
+            "https://forge.example.com/mcp?token=x",
+            "https://forge.example.com/mcp#frag",
+            "https://user@forge.example.com/mcp",
+            "https://user:pass@forge.example.com/mcp",
+            " https://forge.example.com/mcp",
+            "https://forge.example.com/mcp\n",
+        ] {
+            assert_eq!(mcp_public_url_origin(url), None, "{url:?}");
+            let cfg = ServerConfig {
+                mcp_public_url: Some(url.to_string()),
+                ..ServerConfig::default()
+            };
+            assert!(
+                cfg.validate().unwrap_err().contains("mcp_public_url"),
+                "{url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_enable_requires_access_tokens() {
+        let cfg = ServerConfig {
+            mcp_enable: true,
+            access_tokens_enable: false,
+            ..ServerConfig::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("mcp_enable requires access_tokens_enable"));
+        // A disabled MCP endpoint does not depend on access tokens.
+        ServerConfig {
+            access_tokens_enable: false,
+            ..ServerConfig::default()
+        }
+        .validate()
+        .unwrap();
     }
 
     #[test]

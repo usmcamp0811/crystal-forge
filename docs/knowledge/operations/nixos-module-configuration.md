@@ -103,6 +103,27 @@ asserts `defaultLifetimeDays <= maxLifetimeDays`. They map to the
 `access_tokens_*` keys in `[server]`. See
 [Access token service](../security/access-token-service.md).
 
+## MCP endpoint
+
+`services.crystal-forge.server.mcp.enable` (default `false`) serves the
+read-only MCP endpoint at `POST /mcp`. `services.crystal-forge.server.mcp.publicUrl`
+(default `null`) is the absolute public URL of that endpoint, for example
+`https://forge.example.com/mcp`. The URL must use `https://`; `http://` is
+accepted only for `localhost`, `127.0.0.1` and `::1`. The URL must not contain
+a query, a fragment or userinfo. The module asserts that `mcp.enable` requires
+`accessTokens.enable`. The options map to `mcp_enable` and `mcp_public_url` in
+`[server]`. See [MCP server](../security/mcp-server.md).
+
+```nix
+services.crystal-forge.server = {
+  accessTokens.enable = true;
+  mcp = {
+    enable = true;
+    publicUrl = "https://forge.example.com/mcp";
+  };
+};
+```
+
 ## Private credential permissions and upgrades
 
 The current module manages named state, work and cache directories without

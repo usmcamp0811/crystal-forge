@@ -68,7 +68,7 @@ const ZERO_HASH: [u8; 32] = [0; 32];
 const LIFETIME_CHOICES_DAYS: [u32; 3] = [7, 30, 90];
 
 /// Carries the access-token policy for one request.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct AccessTokenSettings {
     /// Mirrors `access_tokens_enable`.
     pub enabled: bool,
@@ -78,6 +78,12 @@ pub struct AccessTokenSettings {
     pub max_lifetime_days: u32,
     /// Maximum OIDC entitlement age in seconds. Zero denies every OIDC owner.
     pub entitlement_max_age_seconds: u64,
+    /// Mirrors `mcp_enable`. Reported by [`policy`] only; admission does not
+    /// read it.
+    pub mcp_enabled: bool,
+    /// Mirrors `mcp_public_url`. [`policy`] reports it only when
+    /// `mcp_enabled` is `true`.
+    pub mcp_public_url: Option<String>,
 }
 
 impl AccessTokenSettings {
@@ -89,6 +95,8 @@ impl AccessTokenSettings {
             default_lifetime_days: config.access_tokens_default_lifetime_days,
             max_lifetime_days: config.access_tokens_max_lifetime_days,
             entitlement_max_age_seconds,
+            mcp_enabled: config.mcp_enable,
+            mcp_public_url: config.mcp_public_url.clone(),
         }
     }
 }
@@ -398,10 +406,14 @@ pub async fn policy(
     });
     Ok(AccessTokenPolicyDto {
         enabled: settings.enabled,
-        // MCP ships in a later milestone; tokens are inert until then.
+        // The URL is reported only while the endpoint is served, so the token
+        // reveal never shows an endpoint that answers 404.
         mcp: AccessTokenMcpDto {
-            enabled: false,
-            url: None,
+            enabled: settings.mcp_enabled,
+            url: settings
+                .mcp_public_url
+                .clone()
+                .filter(|_| settings.mcp_enabled),
         },
         audience: "mcp".to_owned(),
         default_lifetime_days: settings.default_lifetime_days,
@@ -1235,6 +1247,8 @@ mod tests {
             default_lifetime_days: 30,
             max_lifetime_days: 90,
             entitlement_max_age_seconds: 86_400,
+            mcp_enabled: false,
+            mcp_public_url: None,
         }
     }
 
