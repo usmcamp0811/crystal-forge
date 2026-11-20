@@ -502,6 +502,7 @@ async fn tools_list_shows_only_tools_allowed_by_token_scopes(pool: PgPool) {
     assert_eq!(
         tool_names(&reply),
         BTreeSet::from([
+            "get_scan_result".to_owned(),
             "get_system_security_context".to_owned(),
             "list_remediation_work".to_owned(),
         ])
@@ -524,10 +525,13 @@ async fn tools_list_shows_only_tools_allowed_by_token_scopes(pool: PgPool) {
 
     let all = issue_token(&pool, &["cves:read", "poams:read", "provenance:read"]).await;
     let reply = server.rpc(&all.secret, "tools/list", json!({})).await;
+    // Every read tool, and no write tool: write tools need a write scope.
     let expected: BTreeSet<String> = mcp::MCP_TOOL_NAMES
         .iter()
+        .filter(|name| !mcp::tools::is_write_tool(name))
         .map(|name| (*name).to_owned())
         .collect();
+    assert_eq!(expected.len(), 5);
     assert_eq!(tool_names(&reply), expected);
 }
 
@@ -653,6 +657,7 @@ async fn slow_request_body_is_cut_off_by_the_request_deadline(pool: PgPool) {
     assert_eq!(
         tool_names(&listed),
         BTreeSet::from([
+            "get_scan_result".to_owned(),
             "get_system_security_context".to_owned(),
             "list_remediation_work".to_owned(),
         ])
