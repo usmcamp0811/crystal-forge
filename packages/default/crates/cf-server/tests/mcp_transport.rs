@@ -9,12 +9,14 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Router,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, Request, State},
     routing::{get, post},
 };
+use bytes::Bytes;
 use chrono::Utc;
 use crystal_forge::api::models::CreateAccessTokenRequest;
 use crystal_forge::auth::session::{SESSION_COOKIE_NAME, hash_token};
@@ -29,6 +31,7 @@ use crystal_forge::services::access_tokens::{self as service, AccessTokenSetting
 use crystal_forge::{
     config::ServerConfig, queue::QueueNotifier, server::jobs::BackgroundJobRegistry,
 };
+use futures::StreamExt;
 use reqwest::{Client, RequestBuilder};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -143,13 +146,16 @@ struct Server {
     client: Client,
 }
 
-async fn start(pool: &PgPool, config: ServerConfig) -> Server {
-    let state = CFState::new(
+fn test_state(pool: &PgPool, config: ServerConfig) -> CFState {
+    CFState::new(
         pool.clone(),
         config,
         Arc::new(QueueNotifier::new()),
         BackgroundJobRegistry::new(),
-    );
+    )
+}
+
+async fn start(pool: &PgPool, config: ServerConfig) -> Server {
     let app = Router::new()
         .route(
             "/mcp",
@@ -159,7 +165,26 @@ async fn start(pool: &PgPool, config: ServerConfig) -> Server {
                 .layer(DefaultBodyLimit::max(mcp::MAX_BODY_BYTES)),
         )
         .route("/api/v1/admin/mcp/status", get(admin::mcp_status))
-        .with_state(state);
+        .with_state(test_state(pool, config));
+    serve(app).await
+}
+
+/// Starts an enabled server whose `POST /mcp` route bounds each request by
+/// `limit` instead of [`mcp::REQUEST_TIMEOUT`].
+async fn start_with_limit(pool: &PgPool, limit: Duration) -> Server {
+    let handler = move |State(state): State<CFState>, request: Request| async move {
+        mcp::handle_within(state, request, limit).await
+    };
+    let app = Router::new()
+        .route(
+            "/mcp",
+            post(handler).layer(DefaultBodyLimit::max(mcp::MAX_BODY_BYTES)),
+        )
+        .with_state(test_state(pool, enabled_config()));
+    serve(app).await
+}
+
+async fn serve(app: Router) -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind MCP test server");
@@ -591,4 +616,44 @@ async fn admin_status_reports_configuration_and_requires_admin(pool: PgPool) {
     let warned = no_url.admin_status(&admin_session).await;
     assert_eq!(warned.body["public_url"], Value::Null);
     assert_eq!(warned.body["warnings"].as_array().map(Vec::len), Some(1));
+}
+
+#[sqlx::test]
+async fn slow_request_body_is_cut_off_by_the_request_deadline(pool: PgPool) {
+    let token = issue_token(&pool, &["cves:read"]).await;
+    let server = start_with_limit(&pool, Duration::from_millis(500)).await;
+
+    // The body sends a prefix and then never completes, so only the request
+    // deadline can end the body read.
+    let stalled =
+        futures::stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"{\"jsonrpc\""))])
+            .chain(futures::stream::pending());
+    let request = server
+        .client
+        .post(format!("{}/mcp", server.base))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", token.secret))
+        .body(reqwest::Body::wrap_stream(stalled));
+    let reply = tokio::time::timeout(Duration::from_secs(10), send(request))
+        .await
+        .expect("the request deadline ends a stalled body read");
+    assert_rpc_error(&reply, 503, -32603);
+    assert_eq!(reply.body["error"]["message"], "The request timed out");
+    assert!(reply.body["id"].is_null(), "{}", reply.text);
+    assert!(!reply.text.contains(&token.secret));
+
+    // The same deadline does not affect a complete request.
+    let listed = tokio::time::timeout(
+        Duration::from_secs(10),
+        server.rpc(&token.secret, "tools/list", json!({})),
+    )
+    .await
+    .expect("tools/list completes");
+    assert_eq!(
+        tool_names(&listed),
+        BTreeSet::from([
+            "get_system_security_context".to_owned(),
+            "list_remediation_work".to_owned(),
+        ])
+    );
 }

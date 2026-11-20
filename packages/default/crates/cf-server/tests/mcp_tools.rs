@@ -6,6 +6,7 @@
 //! of each MCP request, so rebuilding it models a new request.
 
 use chrono::{Duration, Utc};
+use crystal_forge::api::models::SystemCveInventoryParams;
 use crystal_forge::auth::authorization::{CredentialIdentity, RestrictedGrant};
 use crystal_forge::mcp::tools::{ToolCaller, ToolError, call_tool, visible_tools};
 use crystal_forge::models::auth_identity::AuthRole;
@@ -14,6 +15,9 @@ use crystal_forge::models::poam::{
 };
 use crystal_forge::queries::auth_identity::{
     clear_user_environment_memberships, insert_user_environment_membership, sync_user_role,
+};
+use crystal_forge::queries::cves::{
+    SystemCveInventoryPageRequest, fetch_system_cve_inventory_page,
 };
 use crystal_forge::queries::users::insert_user;
 use crystal_forge::services::poam::{self as poam_service, PoamActor, SystemClock};
@@ -749,6 +753,103 @@ async fn remediation_context_requires_provenance_and_reports_unknown_attribution
         )
         .await,
         Err(ToolError::InvalidArguments(_))
+    ));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn remediation_context_finds_a_package_beyond_the_first_inventory_page(pool: PgPool) {
+    const CVE_ID: &str = "CVE-2099-0500";
+    const PACKAGES: usize = 520;
+    let env = environment(&pool, "mcp-bulk").await;
+    let scanned = host(&pool, env, true).await;
+
+    // One sealed scan holds more occurrences of one CVE than the largest
+    // inventory page. This mirrors `seal_scan` with one set-based insert.
+    let scan_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO cve_scans(id,derivation_id,scanner_name,status) VALUES($1,$2,'mcp-test','in_progress')",
+    )
+    .bind(scan_id)
+    .bind(scanned.derivation_id)
+    .execute(&pool)
+    .await
+    .expect("insert scan");
+    sqlx::query(
+        "INSERT INTO cves(id,cvss_v3_score,description) VALUES($1,5.0,'Bulk inventory finding') \
+         ON CONFLICT(id) DO NOTHING",
+    )
+    .bind(CVE_ID)
+    .execute(&pool)
+    .await
+    .expect("insert CVE");
+    sqlx::query(
+        "INSERT INTO cve_scan_vulnerability_observations( \
+         scan_id,canonical_cve_id,canonical_package_name,observed_package_name, \
+         observed_package_version,observed_derivation_path,is_whitelisted,detection_method) \
+         SELECT $1,$2,package.name,package.name,'1.0', \
+                '/nix/store/' || md5(package.name) || '-' || package.name || '.drv', \
+                false,'mcp-test' \
+         FROM generate_series(1,$3::int) AS n \
+         CROSS JOIN LATERAL (SELECT 'bulk-pkg-' || lpad(n::text,4,'0') AS name) AS package",
+    )
+    .bind(scan_id)
+    .bind(CVE_ID)
+    .bind(PACKAGES as i32)
+    .execute(&pool)
+    .await
+    .expect("insert observations");
+    sqlx::query(
+        "UPDATE cve_scans SET status='completed',completed_at=now(),evidence_schema_version=1 WHERE id=$1",
+    )
+    .bind(scan_id)
+    .execute(&pool)
+    .await
+    .expect("seal scan");
+
+    let page = SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams {
+        limit: Some(500),
+        q: Some(CVE_ID.to_owned()),
+        ..Default::default()
+    })
+    .expect("first page request");
+    let first = fetch_system_cve_inventory_page(&pool, scanned.system_id, &page)
+        .await
+        .expect("first inventory page");
+    assert!(first.has_more);
+    let on_first_page: std::collections::HashSet<&str> = first
+        .rows
+        .iter()
+        .map(|row| row.canonical_package_name.as_str())
+        .collect();
+    assert_eq!(on_first_page.len(), 500);
+    let beyond = (1..=PACKAGES)
+        .map(|n| format!("bulk-pkg-{n:04}"))
+        .find(|name| !on_first_page.contains(name.as_str()))
+        .expect("a package beyond the first page");
+
+    let owner = user(&pool, AuthRole::Viewer, &[env]).await;
+    let token = caller(&pool, owner, CVES_PROVENANCE, &[env]).await;
+    let result = call(
+        &pool,
+        &token,
+        "get_remediation_context",
+        json!({"system_id": scanned.system_id, "cve_id": CVE_ID, "package_name": &beyond}),
+    )
+    .await
+    .expect("remediation context beyond the first page");
+    assert_eq!(result["evidence_key"]["cve_id"], CVE_ID);
+    assert_eq!(result["evidence_key"]["package_name"], json!(beyond));
+    assert_eq!(result["evidence_key"]["scan_id"], json!(scan_id));
+
+    assert!(matches!(
+        call(
+            &pool,
+            &token,
+            "get_remediation_context",
+            json!({"system_id": scanned.system_id, "cve_id": CVE_ID, "package_name": "bulk-pkg-9999"}),
+        )
+        .await,
+        Err(ToolError::NotFound)
     ));
 }
 
