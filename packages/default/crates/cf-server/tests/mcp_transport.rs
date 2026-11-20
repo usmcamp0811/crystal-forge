@@ -621,7 +621,7 @@ async fn admin_status_reports_configuration_and_requires_admin(pool: PgPool) {
 #[sqlx::test]
 async fn slow_request_body_is_cut_off_by_the_request_deadline(pool: PgPool) {
     let token = issue_token(&pool, &["cves:read"]).await;
-    let server = start_with_limit(&pool, Duration::from_millis(500)).await;
+    let server = start_with_limit(&pool, Duration::from_secs(2)).await;
 
     // The body sends a prefix and then never completes, so only the request
     // deadline can end the body read.
