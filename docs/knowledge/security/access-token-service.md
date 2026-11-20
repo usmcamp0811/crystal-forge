@@ -42,8 +42,12 @@ Not implemented in this slice:
 - The Admin Access Tokens tab, admin revoke and revoke-all endpoints and the
   Access Inspector.
 - The Connect agent shortcut on Fleet CVEs and POA&M views.
-- Write and operational scopes. Only `cves:read`, `poams:read` and
-  `provenance:read` can be selected. The other scopes appear as unavailable.
+- `poams:close`. TASK-534.5 released `scans:request`, `poams:write` and
+  `poams:verify` for Operator and Admin owners; Viewers see "Requires
+  Operator". A write scope together with a production environment needs
+  `confirm_production_write: true` in the create request (400
+  `validation_failed`, field `confirm_production_write`, otherwise). Rotation
+  keeps the original grant. See [MCP server](mcp-server.md#write-tools).
 
 ## Contract
 

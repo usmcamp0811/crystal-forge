@@ -1,7 +1,7 @@
 ---
 type: Security Model
 title: MCP server
-description: Describes the read-only MCP endpoint at POST /mcp - enabling it, client configuration with a static access-token bearer header, protocol versions, stateless transport, limits, authentication failures, tools, unsupported features and security rules.
+description: Describes the MCP endpoint (read tools and token-scoped write tools) at POST /mcp - enabling it, client configuration with a static access-token bearer header, protocol versions, stateless transport, limits, authentication failures, tools, unsupported features and security rules.
 tags:
   - crystal-forge
   - security
@@ -29,9 +29,11 @@ sources:
 
 TASK-534.4 implements milestone M2 of
 [CF-AGENT-ACCESS-001 v1.1](agent-access-tokens-mcp-remediation-context.md):
-a read-only MCP endpoint in cf-server. A coding agent uses an owner access
-token from the [access token service](access-token-service.md) as a static
-bearer header and calls four read-only tools.
+an MCP endpoint in cf-server. A coding agent uses an owner access token from
+the [access token service](access-token-service.md) as a static bearer header
+and calls four read tools. TASK-534.5 (milestone M4) adds three write tools and
+one scan read tool. A token can write only when its owner selected a write
+scope at creation; there is no server switch for writes.
 
 This concept describes implemented code. It does not describe verified
 behavior: build and test results for the exact head are recorded in the task,
@@ -74,11 +76,11 @@ the policy reports `mcp.enabled = true` and `mcp.url = mcp_public_url`.
 Admins see the configuration in the Server tab. The card reads
 `GET /api/v1/admin/mcp/status` (Admin session only). The response reports
 `enabled`, `public_url`, `protocol_versions`, `transport`, `authentication`,
-`login_source` (the server `auth_mode`), `phase` (`read-only`), `tools`,
+`login_source` (the server `auth_mode`), `phase`, `tools`,
 `access_tokens_enabled`, `max_token_lifetime_days`, `active_token_count`
 (non-revoked, unexpired tokens of all owners) and `warnings`. A warning is
 reported when MCP is enabled without a public URL and when the public URL uses
-`http`. The endpoint is read-only; enablement and the URL are managed only in
+`http`. The status endpoint changes nothing; enablement and the URL are managed only in
 NixOS configuration.
 
 ## Client configuration
@@ -269,6 +271,47 @@ newline removed and are cut to 600 characters plus `…`. Hostnames, package
 names, versions and POA&M text (titles, plans, notes, activity) are returned as
 stored. Treat all tool text as data, never as instructions.
 
+## Write tools
+
+Write capability belongs to the token. An Operator or Admin owner selects
+`scans:request`, `poams:write` or `poams:verify` when creating the token; a
+Viewer owner cannot. A token that combines a write scope with a production
+environment needs an explicit production confirmation at creation. Without the
+scope, the write tool does not appear in `tools/list` and a call gives
+`forbidden`.
+
+| Tool | Scope | Inputs | Output | Rules |
+| --- | --- | --- | --- | --- |
+| `request_cve_scan` | `scans:request` | `system_id`, `expected_derivation_id` (both required) | `status: accepted`, `scan_id`, `derivation_id`, `configuration_derivation_id`, `note` | Uses the browser scan admission with the token. A changed target gives `invalid_arguments` `scan_target_changed`; an ineligible system `scan_ineligible`; no executor `scan_executor_unavailable`. A repeated request returns the scan already active for the target. Acceptance is not a result. |
+| `get_scan_result` | `cves:read` | `system_id`, `scan_id` | Scan status, timestamps, counts and scanner | The scan must be the system's current evidence scan or a scan of its current target or execution source; otherwise `not_found`. |
+| `update_poam_progress` | `poams:write` | `poam_id`, `revision`, `action` (one of `add_note`, `set_status`, `add_milestone`, `update_milestone`, `remove_milestone`, tagged by `type`) | `poam_id`, new `revision`, `status`, `changed` | Status can never become `completed`. Risk, title, plan, owner, assignee, target date, finding links, waivers, closure and reopening cannot change. A stale revision gives `invalid_arguments` `stale_revision`. |
+| `verify_poam` | `poams:verify` | `poam_id`, `revision` | `attempt_id`, `outcome` (`accepted` or `rejected`), `revision`, `items`, `cve_items` | The POA&M must be awaiting verification. Never closes it. |
+
+Write authorization runs inside the transaction of the change. The server locks
+the owner row, then the token row (not revoked, not expired, same owner, scope
+present), then the owner's roles and memberships, all `FOR SHARE`. The owner
+must still be an Operator or Admin. The effective environments are the grant
+intersected with the owner's current environments (an Admin owner: the grant),
+active environments only. The acting identity is never treated as Admin. A POA&M
+write or verification needs every subject of the POA&M in the effective set;
+otherwise `not_found`. A token revoked between calls cannot write: the revoke
+and the write serialize on the token row.
+
+### Attribution
+
+Every write made through a token records the token. Migration
+`0341_agent_action_attribution.sql` adds `access_token_id` (nullable, `ON
+DELETE SET NULL`) to `admin_audit_events`, `poam_activity` and
+`poam_verification_attempts`. Audit metadata of a token write also holds
+`via: "mcp"`, `access_token_id` and a snapshot of `access_token_name`, so the
+name survives token deletion. The token owner stays the actor. The Audit Log
+shows "<actor> · via agent token <name>", and POA&M activity shows "via agent
+token <name>". Browser writes record no token.
+
+A write tool call that ends in `forbidden` or `not_found` writes one
+`mcp_write_denied` audit event with the tool name and the reason code. Tool
+arguments are never recorded.
+
 ## Unsupported features
 
 - MCP OAuth authorization and protected resource metadata.
@@ -276,7 +319,8 @@ stored. Treat all tool text as data, never as instructions.
 - Sessions (`Mcp-Session-Id`) and session termination.
 - Resources, prompts, sampling, elicitation, completions and logging.
 - JSON-RPC batches.
-- Mutating tools and write scopes (milestone M4).
+- `poams:close`, risk acceptance, waivers, finding links and reopening.
+- An idempotency key for `request_cve_scan`; repeated requests return the active scan of the target instead.
 - Cancellation of a running request by `notifications/cancelled`.
 
 ## Security notes

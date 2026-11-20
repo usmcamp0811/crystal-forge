@@ -797,6 +797,6 @@ Implementation rule: do not mark any milestone complete until all its requiremen
 | Sections 4.1, 9, 10.6, 11, 15.3, M2 | TASK-534.4 | Independent MCP client, scoped reads, NixOS and protocol checks; transport, four read tools, NixOS options, Admin status endpoint and card implemented in TASK-534.4 ([MCP server](mcp-server.md)); unverified: no build, test or client-interoperability result recorded yet |
 | Section 10.7 (Access Inspector) | TASK-534 / M1 admin | Inspector parity; unimplemented |
 | Sections 10.8, 12–13, M3 | TASK-534 / TASK-271 | Shared authorized provenance, evidence confidence and additive visual parity; unimplemented |
-| Sections 7, 9.4, 14, M4 | TASK-534 / M4 | Explicit policy, all-subject authority, races, revision/idempotency, audits; gated, not released |
+| Sections 7, 9.4, 14, M4 | TASK-534.5 | Token-scoped write tools (`request_cve_scan`, `get_scan_result`, `update_poam_progress`, `verify_poam`), all-subject authority, in-transaction token checks and agent attribution implemented ([MCP server](mcp-server.md#write-tools)); `poams:close` and idempotency keys not implemented; farm evidence recorded in the task |
 | Sections 3.2, 4.1, 7, M5 | TASK-534 / M5 | Independent CLI audience/service principal schema and enforcement tests; future work |
 | Section 15 and release gate | TASK-534, all milestone owners | Real integration owners and documented unverified gaps; no acceptance test claimed passed |
