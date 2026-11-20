@@ -130,3 +130,14 @@ Farm PostgreSQL runs (sandbox clusters, all at the branch heads named):
 - `nix build .#okf-knowledge` passed.
 
 The integration-access scenario was updated for the released write scopes (and for the environment `color`/`is_production` fields added since TASK-534.3) but has not been run. No live write check on the dev server yet.
+
+## Review !349 response (head `ce230da0`)
+
+- P1 CI: the Access scenario now expects `production_write_confirmed: false` in the read-only creation audit metadata; `tests/access_tokens.rs` already asserts `true` for a confirmed production write grant.
+- P1 race: restricted POA&M writes and verification lock every grant environment `FOR SHARE`, then every POA&M subject system `FOR SHARE`, in id order, before the owner/token refresh and the POA&M row; `is_active` and visibility are read after the locks. The order matches system move, scan admission, fleet triage, reopen and CVE linking. Tests prove a committed deactivation or system move during the wait is observed, and a write in progress blocks both until commit.
+- P2 durable attribution: migration `0342_agent_action_attribution_snapshot.sql` adds `via_agent` and an `access_token_name` snapshot to POA&M activity and verification attempts. Audit Log `via_agent` also derives from `metadata.via` and `mcp_write_denied`. A token with POA&M history cannot be hard-deleted (immutability triggers reject the `SET NULL`); a token with only audit rows can, and the Audit Log keeps the marker and name.
+- P2 no-op milestone: an unchanged update writes nothing and keeps the revision (MCP and browser).
+- P2 HTTP: `tests/mcp_write_transport.rs` covers the write tools over `/mcp`, stale revision, scan request then result, demotion and missing scope with transport-written `mcp_write_denied`, revocation between calls, and the audit marker after token deletion.
+- P2 production confirmation now names the selected production environments and write capabilities. Verification attempts and activity show "via agent token <name>" or "(deleted)".
+
+Farm at `65a25838` (output `xc3izr5rf8q2a2ikzmg7jhmp7v6q2y5k-cf-mcp-regressions-0.3.0`): access_tokens 45, mcp_tools 8, mcp_transport 10, mcp_write_poam 12, mcp_write_scan 8, mcp_write_transport 8, poam_workflows 133 passed; 0 failed. Web UI 968 passed. OKF passed. Integration-access scenario not rerun locally (CI). Live dev-server check before the fixes: scan request accepted and deduplicated, note on POAM-0005 attributed to token "Write Test".
