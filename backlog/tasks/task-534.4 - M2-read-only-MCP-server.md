@@ -112,3 +112,11 @@ LOCK: OpenCode on vm-agent in /home/mcamp/code/crystal-forge/TASK-534.4-read-onl
 
 Selected by the owner on 2026-11-20. Branch `TASK-534.4-read-only-mcp-server` starts at `aca87741` (TASK-534.3 head).
 <!-- SECTION:NOTES:END -->
+
+## Review !347 response and verification at `0e0349cf`
+
+Review findings fixed: P2-1 `get_remediation_context` now follows the inventory cursor until the exact CVE and package match or the inventory ends (regression `remediation_context_finds_a_package_beyond_the_first_inventory_page`, 520 packages for one CVE). P2-2 one 30 s deadline now covers token validation, the `last_used_at` write, the body read and the tool call; an expiry before the tool call returns 503 with -32603 (regression `slow_request_body_is_cut_off_by_the_request_deadline`).
+
+Farm PostgreSQL run (output `nkjzw7jp7wf9fjjjailk2z0kg6y6m4ps-cf-mcp-regressions-0.3.0`): `access_tokens` 43 passed, `mcp_tools` 8 passed, `mcp_transport` 10 passed; 0 failed, 0 ignored.
+
+Independent client check on the dev server (2026-11-20, OpenCode MCP client, read-only, owner's token): `initialize`, `tools/list` and `tools/call` succeeded for all four tools. Observed: paged work list with a working cursor; a cursor reused with another filter rejected; an environment outside the token rejected; system context for a managed system with exact current scan, running target and severity filter; remediation context with store path, derivation and commit, lowercase CVE id normalized, attribution unknown; unknown system, unknown package and unknown POA&M all return the same `not_found`. Not exercised on the dev server: a real POA&M (none linked to the visible findings) and live role, membership or revocation changes while a client is connected (covered only by the database tests).
