@@ -30,8 +30,8 @@
 #   credential is refused by the management API. A real Operator browser then
 #   creates, reveals once, rotates and revokes a token from Profile, and SQL
 #   proves the displayed secret is the stored credential by SHA-256 only.
-#   Authority: TASK-534.3 acceptance criteria 1-4, 6 and 7. No approved design
-#   covers this card: the approved design is docs/design/CrystalForge/crystal-forge.html
+#   Authority: TASK-534.3 acceptance criteria 1-4, 6 and 7. The approved design for
+#   this card is docs/design/CrystalForge/crystal-forge.html
 #   (AccessTokensCard and its dialogs). The screenshots are the images for the
 #   maintainer's side-by-side comparison; there is no automated pixel baseline.
 # Appended Admin forms: creation, edit, cancel, disable/login
