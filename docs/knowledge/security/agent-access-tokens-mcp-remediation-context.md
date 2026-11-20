@@ -39,7 +39,8 @@ groundwork is implemented for review. TASK-534.3 adds the owner slice of M1
 (token issue, list, inspect, rotate, revoke and the Profile card) on top of it;
 see [owner access token service](access-token-service.md). TASK-534.4 adds the
 M2 read-only MCP server; see [MCP server](mcp-server.md). It is implemented
-and unverified. The Admin token tab, the Access Inspector and the Connect agent
+and unverified. TASK-534.6 extends the section 7 scope taxonomy beyond this
+specification; see the delivery traceability table. The Admin token tab, the Access Inspector and the Connect agent
 shortcut remain unimplemented. No
 milestone is marked complete by this progress note. See
 [credential grant groundwork](credential-grant-groundwork.md) and
@@ -798,5 +799,6 @@ Implementation rule: do not mark any milestone complete until all its requiremen
 | Section 10.7 (Access Inspector) | TASK-534 / M1 admin | Inspector parity; unimplemented |
 | Sections 10.8, 12–13, M3 | TASK-534 / TASK-271 | Shared authorized provenance, evidence confidence and additive visual parity; unimplemented |
 | Sections 7, 9.4, 14, M4 | TASK-534.5 | Token-scoped write tools (`request_cve_scan`, `get_scan_result`, `update_poam_progress`, `verify_poam`), all-subject authority, in-transaction token checks and agent attribution implemented ([MCP server](mcp-server.md#write-tools)); `poams:close` and idempotency keys not implemented; farm evidence recorded in the task |
+| Section 7 extension (owner decision 2026-11-21, not in v1.1) | TASK-534.6 | Six compliance scopes (migration 0343, `requires_admin` catalog rule) and five catalog read tools (`list_compliance_policies`, `get_compliance_policy`, `list_compliance_bundles`, `get_compliance_bundle`, `list_compliance_requirements`) implemented ([MCP server](mcp-server.md#compliance-read-tools)); draft, import and preview scopes unreleased (TASK-534.7, TASK-534.8); unverified: no build or test result recorded yet |
 | Sections 3.2, 4.1, 7, M5 | TASK-534 / M5 | Independent CLI audience/service principal schema and enforcement tests; future work |
 | Section 15 and release gate | TASK-534, all milestone owners | Real integration owners and documented unverified gaps; no acceptance test claimed passed |

@@ -453,6 +453,7 @@ SQL
       framework_version_id_lifecycle \
       hardening_admission_migration_upgrade \
       management_mode_migration_upgrade \
+      mcp_compliance_read \
       mcp_tools \
       mcp_transport \
       mcp_write_poam \

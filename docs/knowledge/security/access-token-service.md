@@ -14,6 +14,9 @@ sources:
   - id: migration
     resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0336_api_access_tokens.sql at commit 7e6d676d"
     title: Token, scope and environment tables
+  - id: compliance-scopes
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0343_compliance_token_scopes.sql on branch TASK-534.6-mcp-compliance-read"
+    title: Compliance scope allowlist
 ---
 
 # Owner access token service
@@ -48,6 +51,9 @@ Not implemented in this slice:
   `confirm_production_write: true` in the create request (400
   `validation_failed`, field `confirm_production_write`, otherwise). Rotation
   keeps the original grant. See [MCP server](mcp-server.md#write-tools).
+- `policies:draft`, `policies:import`, `bundles:draft` and
+  `compliance:preview`. TASK-534.6 registers them as unreleased; see
+  [Scope catalog](#scope-catalog).
 
 ## Contract
 
@@ -127,6 +133,48 @@ still list concrete environment ids. No wildcard exists.
 
 An expired token that is not revoked keeps its name until the owner revokes it,
 because name uniqueness follows revocation and not expiry.
+
+## Scope catalog
+
+The service catalog (`SCOPES` in the service) decides which scopes an owner can
+select. The `api_access_token_scopes.scope` CHECK constraint repeats the
+thirteen names at the database boundary. Migration
+`0343_compliance_token_scopes.sql` replaced the constraint of migration 0336
+to add the six compliance scopes.
+
+| Scope | Label | Role | Released | Preselected |
+| --- | --- | --- | --- | --- |
+| `cves:read` | Read CVEs and systems | Viewer | Yes | Yes |
+| `poams:read` | Read POA&Ms | Viewer | Yes | Yes |
+| `provenance:read` | Read authorized provenance | Viewer | Yes | Yes |
+| `scans:request` | Request CVE scans | Operator | Yes | No |
+| `poams:write` | Update POA&M progress | Operator | Yes | No |
+| `poams:verify` | Verify POA&M evidence | Operator | Yes | No |
+| `poams:close` | Close POA&Ms | Operator | No | No |
+| `policies:read` | Read security policies | Viewer | Yes | No |
+| `policies:draft` | Draft security policies | Admin | No (TASK-534.7) | No |
+| `policies:import` | Import security policies | Admin | No (TASK-534.7) | No |
+| `bundles:read` | Read compliance bundles | Viewer | Yes | No |
+| `bundles:draft` | Draft compliance bundles | Admin | No (TASK-534.8) | No |
+| `compliance:preview` | Preview compliance impact | Viewer | No (TASK-534.8) | No |
+
+The policy reports one `unavailable_reason` per unavailable scope. The role
+reason comes first: "Requires Admin" for an Admin-only scope when the owner is
+not Admin, then "Requires Operator" for an Operator scope when the owner is a
+Viewer, then "Not supported yet" for an unreleased scope. An Operator therefore
+sees "Requires Admin" for `policies:draft`, and only an Admin sees "Not supported
+yet" for it. Create and rotation apply the same rule to the owner's current
+role. Token detail reports an Admin-only scope as not permitted while the owner
+is not Admin.
+
+An Admin-only scope stops working when its owner loses Admin. The stored grant
+does not change, but every MCP tool call that needs the scope returns
+`forbidden` until the owner is Admin again (`scope_requires_admin`, checked by
+the MCP dispatcher on each call).
+
+Every scope that does not end in `:read` counts as a write scope for the
+production confirmation and the "includes write" review text. This includes
+the unreleased `compliance:preview`.
 
 ## Serialization and ordering
 

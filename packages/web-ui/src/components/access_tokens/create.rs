@@ -313,6 +313,9 @@ pub(super) fn CreateTokenDialog(
                                     "{message}"
                                 }
                             }
+                            div { class: "cfat-fine",
+                                "Read, draft and import are separate capabilities. Draft and import create untrusted drafts only; no capability can trust, publish or assign security content."
+                            }
                         }
 
                         Section { n: "4", title: "Review", disabled: pending(),
