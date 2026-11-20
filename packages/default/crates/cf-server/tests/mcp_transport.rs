@@ -586,8 +586,11 @@ async fn admin_status_reports_configuration_and_requires_admin(pool: PgPool) {
     assert_eq!(body["enabled"], true);
     assert_eq!(body["public_url"], PUBLIC_URL);
     assert_eq!(body["protocol_versions"][0], "2025-11-25");
-    assert_eq!(body["phase"], "read-only");
-    assert_eq!(body["tools"].as_array().map(Vec::len), Some(4));
+    assert_eq!(
+        body["phase"],
+        "read and write (write tools require a token write scope)"
+    );
+    assert_eq!(body["tools"].as_array().map(Vec::len), Some(8));
     assert_eq!(body["access_tokens_enabled"], true);
     assert_eq!(body["max_token_lifetime_days"], 90);
     assert_eq!(body["active_token_count"], 1);
