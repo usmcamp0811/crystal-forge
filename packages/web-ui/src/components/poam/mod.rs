@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use uuid::Uuid;
@@ -17,7 +17,8 @@ use crate::components::icon::{Icon, IconName};
 use crate::state::app_state::AppState;
 use crate::views::poam_api::{
     self, ActivityView, AddFindingRequest, AddMilestoneRequest, AddNoteRequest, AssessmentOutcome,
-    AssignmentReferenceRequest, ClosePreconditionDetails, CreateCvePoamRequest, CveFindingView,
+    AssignmentReferenceRequest, ClosePreconditionDetails, ConfigurationCveFindingView,
+    CreateCvePoamRequest, CveFindingView,
     CveObservationReference, FindingObservationReference, FindingRelationshipEntry,
     FindingRequirementView, FindingView, MilestoneView, PoamApiError, PoamAssigneeCatalog,
     PoamAssigneeRequest, PoamAssigneeView, PoamDetail, PoamDetailQuery, PoamRisk, PoamStatus,
@@ -473,6 +474,54 @@ fn configuration_baseline_label(configuration_planning_only: bool) -> &'static s
     } else {
         "Historical configuration scan · Planning baseline only"
     }
+}
+
+/// Returns why `Link finding` is unavailable, or `None` when only the
+/// readonly rule applies.
+///
+/// The server rejects any policy or runtime finding link while a POA&M is
+/// configuration planning-only. After runtime handoff linking follows the
+/// usual rules.
+fn link_finding_blocked_reason(configuration_planning_only: bool) -> Option<&'static str> {
+    configuration_planning_only.then_some(
+        "Configuration planning POA&Ms cannot link findings until runtime handoff",
+    )
+}
+
+/// Returns the first 12 characters of a commit hash for display. The full
+/// hash stays available as the element title.
+fn short_commit_hash(hash: &str) -> String {
+    hash.chars().take(12).collect()
+}
+
+/// Formats a baseline scan completion time to the minute in UTC.
+fn baseline_completed_label(completed_at: DateTime<Utc>) -> String {
+    completed_at.format("%Y-%m-%d %H:%M UTC").to_string()
+}
+
+/// Returns the labelled secondary provenance of a configuration baseline, in
+/// display order, for the expandable `Baseline provenance` block.
+fn configuration_baseline_provenance(
+    finding: &ConfigurationCveFindingView,
+) -> [(&'static str, String); 4] {
+    [
+        (
+            "Scanned system store path",
+            finding.baseline_scanned_store_path.clone(),
+        ),
+        (
+            "Occurrence derivation path",
+            finding.baseline_occurrence_derivation_path.clone(),
+        ),
+        (
+            "Scan derivation ID",
+            finding.baseline_scan_derivation_id.to_string(),
+        ),
+        (
+            "Configuration derivation ID",
+            finding.baseline_configuration_derivation_id.to_string(),
+        ),
+    ]
 }
 
 /// Returns the semantic CSS class for a server POA&M status.
@@ -1691,6 +1740,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
     let target_timing = target_timing_label(&detail.poam, chrono::Utc::now().date_naive());
     let deficiency_heading = deficiency_title(active_findings.len());
     let configuration_finding = detail.configuration_cve_finding.as_ref();
+    let link_finding_blocked = link_finding_blocked_reason(detail.poam.configuration_planning_only);
     let has_runtime_cve_findings = !detail.cve_findings.is_empty();
     let vulnerability_scope = if has_runtime_cve_findings {
         vulnerability_scope_title(&active_cve_findings, &historical_cve_findings)
@@ -1851,7 +1901,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                 }
                 LifecycleSection { detail: detail.clone(), readonly, close_details: close_details(), verification_loading: history_loading() == Some(HistoryPageKind::Verification), on_load_more_verification: move |_| if let Some(query) = verification_page_query.clone() { load_more(HistoryPageKind::Verification, query); }, on_transition: move |status| { let request = TransitionPoamRequest { revision, status, note: None }; busy.set(Some("Changing status".to_string())); spawn(async move { match poam_api::transition_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("changing status", err) } }); }, on_verify: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Verifying".to_string())); spawn(async move { match poam_api::verify_poam(props.poam_id, &request).await { Ok(_) => { busy.set(None); load(true); }, Err(err) => handle_error("verifying remediation", err) } }); }, on_close: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Closing".to_string())); spawn(async move { match poam_api::close_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("closing", err) } }); }, on_reopen: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Reopening".to_string())); spawn(async move { match poam_api::reopen_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("reopening", err) } }); } }
                 section { class: "poam-tray-section", "data-testid": "poam-deficiency",
-                    header { h3 { "{deficiency_heading}" } button { class: "btn btn-ghost xs focus-ring", disabled: readonly, onclick: move |_| finding_picker.toggle(), Icon { name: IconName::Link, size: 11 } "Link finding" } }
+                    header { h3 { "{deficiency_heading}" } button { class: "btn btn-ghost xs focus-ring", "data-testid": "poam-link-finding", disabled: readonly || link_finding_blocked.is_some(), title: link_finding_blocked.unwrap_or(""), onclick: move |_| finding_picker.toggle(), Icon { name: IconName::Link, size: 11 } "Link finding" } }
                     if active_findings.is_empty() && !has_runtime_cve_findings && configuration_finding.is_none() && !detail.poam.configuration_planning_only { div { role: "status", class: "poam-empty", "No findings are linked." } }
                     if !active_findings.is_empty() {
                     div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-findings-table", thead { tr { th { "Host" } th { "Requirement" } th { "Policy" } th { "Current result" } th { "Actions" } } } tbody {
@@ -1987,16 +2037,38 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                                 }
                             }
                         }
+                        // The configuration baseline is sealed HEAD scan
+                        // evidence, not runtime evidence. It uses the stacked
+                        // audit row style and a neutral chip so it never reads
+                        // as a runtime result.
                         if let Some(finding) = configuration_finding {
-                            div { class: "poam-retired-row", "data-testid": "poam-configuration-cve-finding",
-                                div { class: "poam-retired-identity",
-                                    strong { class: "mono", "{finding.canonical_cve_id}" }
-                                    span { class: "mono poam-muted", "{finding.canonical_package_name}" }
-                                    span { class: "poam-chip", "{configuration_baseline_label(detail.poam.configuration_planning_only)}" }
-                                }
-                                div { class: "poam-retired-evidence",
-                                    small { class: "mono", "System {finding.system_id}" }
-                                    small { class: "mono poam-muted", "Original scan {finding.baseline_scan_id}" }
+                            {
+                                let head_short = short_commit_hash(&finding.baseline_head_commit_hash);
+                                let completed = baseline_completed_label(finding.baseline_scan_completed_at);
+                                let completed_title = finding.baseline_scan_completed_at.to_rfc3339();
+                                let provenance = configuration_baseline_provenance(finding);
+                                rsx! {
+                                    div { class: "poam-retired-row", "data-testid": "poam-configuration-cve-finding",
+                                        div { class: "poam-retired-identity",
+                                            strong { class: "mono", "{finding.canonical_cve_id}" }
+                                            span { class: "mono poam-muted", "{finding.canonical_package_name}" }
+                                            span { class: "poam-chip", "{configuration_baseline_label(detail.poam.configuration_planning_only)}" }
+                                        }
+                                        div { class: "poam-retired-evidence",
+                                            small { class: "mono", title: "{finding.baseline_head_commit_hash}", "HEAD {head_short} · Observed {finding.baseline_observed_package_version}" }
+                                            small { class: "mono poam-muted", title: "{completed_title}", "Scan completed {completed}" }
+                                            small { class: "mono poam-muted", "System {finding.system_id}" }
+                                            small { class: "mono poam-muted", "Original scan {finding.baseline_scan_id}" }
+                                        }
+                                        details { class: "poam-retired-history", "data-testid": "poam-configuration-baseline-provenance",
+                                            summary { class: "focus-ring", "Baseline provenance" }
+                                            div { class: "poam-retired-evidence",
+                                                for (label, value) in provenance {
+                                                    small { key: "{label}", class: "mono poam-muted", "{label}: {value}" }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -3296,6 +3368,71 @@ mod tests {
             configuration_baseline_label(false),
             "Historical configuration scan · Planning baseline only"
         );
+    }
+
+    #[test]
+    fn link_finding_is_blocked_only_while_configuration_planning_only() {
+        let reason = link_finding_blocked_reason(true).expect("planning-only blocks linking");
+        assert!(reason.contains("runtime handoff"), "{reason}");
+        // After runtime handoff only the readonly rule applies.
+        assert_eq!(link_finding_blocked_reason(false), None);
+        let source = include_str!("mod.rs");
+        assert!(source.contains(
+            "disabled: readonly || link_finding_blocked.is_some(), title: link_finding_blocked.unwrap_or(\"\")"
+        ));
+    }
+
+    fn configuration_baseline_fixture() -> ConfigurationCveFindingView {
+        ConfigurationCveFindingView {
+            system_id: Uuid::from_u128(2),
+            canonical_cve_id: "CVE-2026-1234".into(),
+            canonical_package_name: "fixture-package".into(),
+            baseline_scan_id: Uuid::from_u128(3),
+            baseline_head_commit_hash: "0123456789abcdef0123456789abcdef01234567".into(),
+            baseline_configuration_derivation_id: 7,
+            baseline_scan_derivation_id: 8,
+            baseline_scan_completed_at: "2026-11-20T08:30:59Z".parse().unwrap(),
+            baseline_scanned_store_path: "/nix/store/aaaa-nixos-system-host".into(),
+            baseline_occurrence_derivation_path: "/nix/store/bbbb-fixture-package-1.2.3.drv"
+                .into(),
+            baseline_observed_package_version: "1.2.3".into(),
+        }
+    }
+
+    #[test]
+    fn configuration_baseline_shows_head_commit_version_and_completion() {
+        let finding = configuration_baseline_fixture();
+        assert_eq!(
+            short_commit_hash(&finding.baseline_head_commit_hash),
+            "0123456789ab"
+        );
+        assert_eq!(short_commit_hash("abc"), "abc");
+        assert_eq!(
+            baseline_completed_label(finding.baseline_scan_completed_at),
+            "2026-11-20 08:30 UTC"
+        );
+    }
+
+    #[test]
+    fn configuration_baseline_provenance_lists_paths_and_derivations_in_order() {
+        let finding = configuration_baseline_fixture();
+        assert_eq!(
+            configuration_baseline_provenance(&finding),
+            [
+                (
+                    "Scanned system store path",
+                    "/nix/store/aaaa-nixos-system-host".to_string()
+                ),
+                (
+                    "Occurrence derivation path",
+                    "/nix/store/bbbb-fixture-package-1.2.3.drv".to_string()
+                ),
+                ("Scan derivation ID", "8".to_string()),
+                ("Configuration derivation ID", "7".to_string()),
+            ]
+        );
+        let source = include_str!("mod.rs");
+        assert!(source.contains("summary { class: \"focus-ring\", \"Baseline provenance\" }"));
     }
 
     #[test]
