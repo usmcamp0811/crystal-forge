@@ -629,7 +629,31 @@ async fn draft_update_requires_current_revision_and_no_op_writes_nothing(pool: P
     .await;
     let policy_id = uuid(&created["policy_id"]);
     let version_id = uuid(&created["version_id"]);
-    let first = created["draft_revision"].as_i64().expect("revision");
+    let first: i64 = sqlx::query_scalar(
+        "UPDATE deployment_policy_versions SET trust_state = 'trusted', \
+         trusted_by = created_by, trusted_at = NOW(), trust_review_note = 'Reviewed' \
+         WHERE id = $1 RETURNING draft_revision",
+    )
+    .bind(version_id)
+    .fetch_one(&pool)
+    .await
+    .expect("review draft");
+    let no_op = call(
+        &author,
+        &pool,
+        "update_policy_draft",
+        json!({"version_id": version_id, "draft_revision": first}),
+    )
+    .await;
+    assert_eq!(no_op["changed"], false);
+    let trust: String = sqlx::query_scalar(
+        "SELECT trust_state FROM deployment_policy_versions WHERE id = $1",
+    )
+    .bind(version_id)
+    .fetch_one(&pool)
+    .await
+    .expect("draft trust");
+    assert_eq!(trust, "trusted");
 
     let updated = call(
         &author,
@@ -663,6 +687,15 @@ async fn draft_update_requires_current_revision_and_no_op_writes_nothing(pool: P
     .await
     .expect("updated row");
     assert_eq!(description.as_deref(), Some("Refined by the agent"));
+    let trust_cleared: bool = sqlx::query_scalar(
+        "SELECT trust_state = 'untrusted' AND trusted_by IS NULL AND trusted_at IS NULL \
+         AND trust_review_note IS NULL FROM deployment_policy_versions WHERE id = $1",
+    )
+    .bind(version_id)
+    .fetch_one(&pool)
+    .await
+    .expect("updated draft trust");
+    assert!(trust_cleared);
     assert!(!enabled);
     assert!(!lineage_enabled);
     let audits = audit_rows(&pool, version_id).await;

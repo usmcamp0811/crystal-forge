@@ -666,7 +666,32 @@ async fn membership_updates_are_exact_validated_and_revisioned(pool: PgPool) {
     .await;
     let bundle_id = uuid(&created["bundle_id"]);
     let version_id = uuid(&created["version_id"]);
-    let initial = created["draft_revision"].as_i64().expect("revision");
+    let initial: i64 = sqlx::query_scalar(
+        "UPDATE compliance_bundle_versions SET trust_state = 'trusted', \
+         trusted_by = created_by, trusted_at = NOW(), trust_review_note = 'Reviewed' \
+         WHERE id = $1 RETURNING draft_revision",
+    )
+    .bind(version_id)
+    .fetch_one(&pool)
+    .await
+    .expect("review bundle draft");
+    let no_op = call(
+        &author,
+        &pool,
+        "update_bundle_draft",
+        json!({"version_id": version_id, "draft_revision": initial,
+               "policy_version_ids": [first]}),
+    )
+    .await;
+    assert_eq!(no_op["changed"], false);
+    let trust: String = sqlx::query_scalar(
+        "SELECT trust_state FROM compliance_bundle_versions WHERE id = $1",
+    )
+    .bind(version_id)
+    .fetch_one(&pool)
+    .await
+    .expect("bundle draft trust");
+    assert_eq!(trust, "trusted");
 
     // Invalid memberships fail without a write.
     let before = counts(&pool).await;
@@ -724,6 +749,15 @@ async fn membership_updates_are_exact_validated_and_revisioned(pool: PgPool) {
     .await
     .expect("updated row");
     assert_eq!(description.as_deref(), Some("Refined by the agent"));
+    let trust_cleared: bool = sqlx::query_scalar(
+        "SELECT trust_state = 'untrusted' AND trusted_by IS NULL AND trusted_at IS NULL \
+         AND trust_review_note IS NULL FROM compliance_bundle_versions WHERE id = $1",
+    )
+    .bind(version_id)
+    .fetch_one(&pool)
+    .await
+    .expect("updated bundle draft trust");
+    assert!(trust_cleared);
     assert_ne!(digest, "pending");
     let audits = audit_rows(&pool, version_id).await;
     let update_audit = audits.last().expect("update audit");

@@ -922,6 +922,18 @@ pub async fn update_bundle_draft(
             .await
             .map_err(internal(UPDATE_FAILED))?;
     }
+    // SECURITY: The prior review does not cover this metadata or exact
+    // membership. Reset trust before the edit and its audit can commit.
+    sqlx::query(
+        "UPDATE compliance_bundle_versions SET trust_state = 'untrusted', \
+         trusted_by = NULL, trusted_at = NULL, trust_review_note = NULL \
+         WHERE id = $1 AND (trust_state <> 'untrusted' OR trusted_by IS NOT NULL \
+             OR trusted_at IS NOT NULL OR trust_review_note IS NOT NULL)",
+    )
+    .bind(version_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal(UPDATE_FAILED))?;
     refresh_draft_digests_tx(&mut tx, version_id)
         .await
         .map_err(internal(UPDATE_FAILED))?;

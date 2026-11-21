@@ -113,4 +113,16 @@ Implementation (uncompiled, untested; no build, test or preview was run):
 
 Farm PostgreSQL run at `170bfd2f`: `access_tokens` 47, `assignment_semantics` 13, `compliance_assignment_zombie_repair` 1, `composite_policy` 38, `mcp_compliance_read` 7, `mcp_policy_authoring` 17, `mcp_transport` 10, `resolver_enforcement` 0 run (8 ignored by design), `task433_assignment_visibility` 1, `task433_csrf` 4 passed; `mcp_bundle_authoring` 8 passed and 1 failed (`membership_updates_are_exact_validated_and_revisioned`: the fixture deprecated a published policy version whose `mapping_digest` was still `pending`, which the existing immutability trigger only allows as a digest backfill). The fixture now computes the mapping digest before publishing, as the publish path does. At that fix (`mcp_bundle_authoring` only): 9 passed, 0 failed, including `full_agent_workflow_over_http`. Web UI at `170bfd2f`: 970 passed. `nix build .#okf-knowledge` passed.
 
-Not run: integration-access scenario (farm builder aborted NixOS unit builds twice during TASK-534.6); CI pending.
+Farm Access scenario `lifecycle-local-bootstrap` at `45e0f02c`: exit 0,
+55 cases passed. Evidence:
+`/nix/store/vj1i5mmfsmhfrbcv978v3ijfii95b3dx-cf-it-access-lifecycle-local-bootstrap/evidence`.
+This result does not cover Assurance or the separate rendered review of policy
+and bundle attribution.
+
+Independent review found that substantive MCP edits preserved an earlier trust
+decision. The worktree fix clears trust and reviewer metadata in the edit
+transaction, and tests cover trust clearing and preservation on no-ops. The
+fix needs farm verification and has not been pushed. Remaining review blockers
+include publication lock ordering, preview snapshot consistency and override
+diffs, import plan collisions within a single document, Admin Audit Log action
+registration, result bounds, and attribution foreign keys on immutable versions.

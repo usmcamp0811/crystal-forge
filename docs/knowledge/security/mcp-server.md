@@ -439,6 +439,11 @@ arguments are never recorded.
 
 ## Policy authoring tools
 
+A substantive MCP edit to a policy or bundle draft clears the version's trust
+decision and reviewer metadata in the same transaction. A no-op preserves the
+review and the draft revision. Review the changed draft in the browser before
+trusting or publishing it.
+
 TASK-534.7 adds five tools that propose security policy content. They write
 only untrusted drafts of the global policy catalog. They ignore the effective
 environments, like the compliance read tools. No tool trusts, publishes,
