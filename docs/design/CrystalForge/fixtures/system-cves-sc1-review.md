@@ -1,7 +1,8 @@
 # SC1 System Detail CVEs — Claude design review
 
 This is a design reference, not a running Crystal Forge API. It uses deterministic
-design-only data. Internal scan IDs stay in `system-cves-sc1.js` and do not appear
+design-only data. Internal scan IDs stay in the inline `SC1_CVE_DESIGN` fixture
+in `../crystal-forge.html` and do not appear
 as new product fields. The ordinary CVE tab still uses its original design data
 when the `sc1` query parameter is absent.
 
@@ -11,7 +12,7 @@ Serve this directory as static files and open:
 
 The query parameter uses the existing `cf-open-system` preview event to open
 **orion-db-02 → CVEs**. Replace the value with any key in
-`system-cves-sc1.js`. There are no scenario controls in the product UI. For a
+the inline `SC1_CVE_DESIGN.states`. There are no scenario controls in the product UI. For a
 live in-app change without unmounting a draft, run this developer-only console
 command with another listed key:
 
@@ -27,7 +28,7 @@ empty slot now distinguishes missing results from an empty completed scan.
 The bar's metadata slot carries the read restriction and its reason. No new
 dashboard section, server operation, or revision action was introduced.
 
-| SC1 | Design state in `SystemDetail.jsx` | `?sc1=` key | Allowed interaction |
+| SC1 | Design state in `SystemDetail` in `../crystal-forge.html` | `?sc1=` key | Allowed interaction |
 | --- | --- | --- | --- |
 | 01 | `CveScenarioScopeBar` Current, A results | `tracked-a`, `evaluated-b` | Inspect B explicitly; Current stays A. |
 | 02 | Current with full proof or read-only result | `local-proved`, `mapped-read-only` | Normal triage only with full proof. |
@@ -45,9 +46,9 @@ dashboard section, server operation, or revision action was introduced.
 | 14 | Mounted triage draft with changed Current | `draft-refresh`, then developer event `activated-b` | Draft fields persist. Apply is disabled with existing modal-footer conflict; cancel/reopen uses new evidence. |
 | 15 | Designed status in existing bar/card slots | All listed keys | No extra product control or field. |
 
-`CvesView.jsx` changes only the modal's optional, System Detail-owned blocked
+The inline `CvesView` changes only the modal's optional, System Detail-owned blocked
 submission reason. Fleet callers omit that prop and keep the existing behavior.
-`HardeningTab.jsx` still uses the original `RevScopeBar` and `useRevScope`.
+The inline `HardeningTab` still uses the original `RevScopeBar` and `useRevScope`.
 
 For repeatable rendering and interaction evidence, run
 `fixtures/system-cves-sc1-check.js` in a Nix shell containing `playwright-test`,

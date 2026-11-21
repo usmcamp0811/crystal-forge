@@ -115,6 +115,15 @@ in
         };
       };
 
+      # Public, disposable fixture only. The parent may reuse these authored
+      # facts in its isolated task preview after verifying the refreshed binary.
+      adminSourceGrants = {
+        identityId = "52920000-0000-4000-8000-000000000011";
+        environmentId = "52920000-0000-4000-8000-000000000012";
+        environment = "cf-it-source-production";
+        resetPassword = "cf-it-access-operator-reset-1";
+      };
+
       environmentForms = let
         create = {
           name = "cf-it-form-tier";
@@ -206,8 +215,8 @@ in
           environments = [];
         };
         # Role escalation and disablement of an existing account.
-        patchProbe = { role = "Admin"; enabled = false; };
-        patchRestore = { role = "Viewer"; enabled = true; };
+        patchProbe = { role = "Admin"; enabled = false; edit_local_grants = true; };
+        patchRestore = { role = "Viewer"; enabled = true; edit_local_grants = true; };
         # Server configuration values that differ from the installed defaults.
         retryPolicy = {
           max_build_retries = 3;
@@ -228,6 +237,9 @@ in
     # fresh-install assertions and exports authz_state() for form cancel checks.
     # Forms require u3 still absent and authorization's retry/banner controls
     # restored to installed values (banner disabled). Keep direct concatenation.
+    # Source-aware modal cases temporarily link u2 to pure IdP grants, check
+    # unrelated writes and fixture withdrawal, then restore public password,
+    # local Operator/empty scope and remove injected identity/environment.
     # Preserve all 23 existing cases before shell/preferences. Shell leaves u1's
     # sidebar collapsed; preferences then changes u1 and snapshots active u2,
     # not u3 (disabled by Admin forms). Each phase uses independent browser state.
@@ -240,6 +252,8 @@ in
       + builtins.readFile ./fragments/sessions.py
       + "\n"
       + builtins.readFile ./fragments/authorization.py
+      + "\n"
+      + builtins.readFile ./fragments/admin-source-grants.py
       + "\n"
       + builtins.readFile ./fragments/admin-forms.py
       + "\n"
@@ -255,6 +269,8 @@ in
       bootstrap-sign-in = ./lifecycle-local-bootstrap.cjs;
       session-sign-out = ./fragments/sessions.cjs;
       viewer-admin-denied = ./fragments/authorization.cjs;
+      operator-admin-denied = ./fragments/authorization.cjs;
+      admin-source-unrelated-save = ./fragments/admin-source-grants.cjs;
       # Distinct artifacts and contexts, not additional VM scenarios. Each
       # phase returns to Python for authoritative SQL before the next mutation.
       admin-form-create = ./fragments/admin-forms.cjs;

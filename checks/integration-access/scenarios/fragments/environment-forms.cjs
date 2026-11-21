@@ -134,7 +134,14 @@ async function mutate(ctx, phase, method, path, trigger, status) {
   ]);
   ctx.expect(response.status()).toBe(status);
   const body = status === 204 ? null : await response.json();
-  ctx.emit(`environmentForms.response.${phase}`, { status: response.status(), body });
+  let payload;
+  if (phase === "membership" || phase === "membership-restore") {
+    payload = response.request().postDataJSON();
+    ctx.expect(payload).toEqual({ edit_local_grants: true,
+      environments: phase === "membership-restore" ? [] : [ctx.facts.environmentForms.edit.name] });
+  }
+  ctx.emit(`environmentForms.response.${phase}`, { status: response.status(), body,
+    ...(payload ? { payload } : {}) });
   return body;
 }
 
@@ -298,14 +305,16 @@ async function duplicateEnvironment(ctx) {
 
 async function membership(ctx, restore) {
   await signIn(ctx, "/admin");
-  const userRow = () => ctx.page.getByRole("row").filter({ hasText: ctx.facts.operator.email });
+  const userRow = () => ctx.page.getByTestId(`admin-user-${ctx.receipts["authorization.operator.userId"]}`);
   await ctx.expect(userRow()).toHaveCount(1);
-  await userRow().getByRole("button", { name: "Edit", exact: true }).click();
-  // The Admin heading sits one container deeper than environment headings.
-  const modal = ctx.page.getByRole("heading", { name: "Edit user", exact: true }).locator("../../..");
+  await userRow().getByRole("button", { name: `Edit user ${ctx.facts.operator.username} (${ctx.facts.operator.email})`, exact: true }).click();
+  const modal = ctx.page.getByTestId("edit-user-modal");
   await ctx.expect(modal).toBeVisible();
-  await modal.getByRole("button", { name: "all", exact: true }).click();
-  if (!restore) await modal.getByRole("button", { name: ctx.facts.environmentForms.edit.name, exact: true }).click();
+  await ctx.expect(modal.getByTestId("edit-local-role")).not.toBeChecked();
+  await modal.getByTestId("edit-local-environments").check();
+  const picker = modal.getByTestId("local-environments");
+  await picker.getByRole("button", { name: "No local environments", exact: true }).click();
+  if (!restore) await picker.getByRole("button", { name: ctx.facts.environmentForms.edit.name, exact: true }).click();
   const saved = await mutate(ctx, restore ? "membership-restore" : "membership", "PATCH",
     `/api/v1/admin/users/${ctx.receipts["authorization.operator.userId"]}`,
     () => modal.getByRole("button", { name: "Save changes", exact: true }).click(), 200);
@@ -318,8 +327,8 @@ async function membership(ctx, restore) {
   await ctx.expect(userRow()).toHaveCount(1);
   await ctx.expect(userRow().getByText(ctx.facts.operator.roleWire, { exact: true })).toBeVisible();
   await ctx.expect(userRow().getByText("active", { exact: true })).toBeVisible();
-  await ctx.expect(userRow().getByText(restore ? "all" : ctx.facts.environmentForms.edit.name, { exact: true })).toBeVisible();
-  await ctx.expect(userRow().getByText(restore ? ctx.facts.environmentForms.edit.name : "all", { exact: true })).toHaveCount(0);
+  await ctx.expect(userRow().getByText(restore ? "None" : ctx.facts.environmentForms.edit.name, { exact: true })).toBeVisible();
+  await ctx.expect(userRow().getByText(restore ? ctx.facts.environmentForms.edit.name : "None", { exact: true })).toHaveCount(0);
 }
 
 async function assignEnvironmentMembership(ctx) { await membership(ctx, false); }

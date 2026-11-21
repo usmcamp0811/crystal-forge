@@ -39,6 +39,7 @@ pub mod framework_requirements;
 pub mod guest_observations;
 pub mod hardening_scans;
 pub mod navigation;
+pub mod oidc_entitlements;
 pub mod poam;
 pub mod scanning;
 pub mod status;

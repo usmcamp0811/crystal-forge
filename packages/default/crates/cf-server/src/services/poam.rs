@@ -4,6 +4,14 @@
 //! persistence queries. Mutations record activity and audit events in the same
 //! transaction. Verification and closure bind results to exact current policy
 //! evidence so stale observations cannot close a POA&M.
+//!
+//! Restricted credentials are accepted only by `system_cve_triage_detail`,
+//! `fleet_cve_batch_detail`, `cve_relationships`, and
+//! `cve_relationships_for_rows` (including its transaction helper). Each returns
+//! both CVE and POA&M metadata and requires `mcp`, `cves:read`, and `poams:read`.
+//! Other public reads require a browser session until safe MCP projections are
+//! implemented. All restricted mutations fail closed pending a released,
+//! capability-specific transactional token-row validator (TASK-534).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -84,15 +92,19 @@ impl PoamClock for SystemClock {
 /// Describes the authenticated actor and authorization scope for an operation.
 #[derive(Debug, Clone)]
 pub struct PoamActor {
+    /// Preserves the original credential channel and immutable grant on refresh.
+    pub credential: crate::auth::authorization::CredentialIdentity,
     /// Identifies the user recorded on mutations and audit events.
     pub user_id: Uuid,
     /// Contains the stable user identifier recorded in administrative audits.
     pub identifier: String,
-    /// Indicates whether the actor can access every environment and admin API.
+    /// Indicates an effective browser Admin bypass; always false after a
+    /// restricted credential refresh, including for an Admin owner.
     pub is_admin: bool,
     /// Indicates whether the actor may mutate POA&M resources.
     pub can_mutate: bool,
-    /// Lists environments visible to a non-admin actor.
+    /// Lists effective environments, intersected with the original grant on
+    /// restricted credential refresh. Empty never means all environments.
     pub environment_ids: Vec<Uuid>,
     /// Identifies the request origin recorded with audit events, when available.
     pub request_origin: Option<String>,
@@ -289,6 +301,8 @@ async fn current_mutating_actor_tx(
     tx: &mut Transaction<'_, Postgres>,
     request_actor: &PoamActor,
 ) -> Result<PoamActor, PoamError> {
+    // SECURITY: No released transactional token-row validator exists yet.
+    require_browser_session(request_actor)?;
     // SECURITY: Lock the identity rows after domain writer locks. A revocation
     // that won the race becomes visible before authorization; a later
     // revocation waits and linearizes after this mutation.
@@ -320,6 +334,7 @@ async fn current_mutating_actor_tx(
     .fetch_all(&mut **tx)
     .await?;
     Ok(PoamActor {
+        credential: request_actor.credential.clone(),
         user_id: request_actor.user_id,
         identifier: user.0,
         is_admin,
@@ -358,17 +373,31 @@ async fn current_reading_actor_tx(
     .bind(request_actor.user_id)
     .fetch_all(&mut **tx)
     .await?;
+    // These four readers all return CVE and POA&M relationship metadata, so
+    // both scopes are required, not a union of unrelated read capabilities.
+    let environment_ids = request_actor
+        .credential
+        .reading_environments(
+            is_admin,
+            environment_ids,
+            &["cves:read", "poams:read"],
+            Utc::now(),
+        )
+        .ok_or(PoamError::Forbidden)?;
+    let browser = request_actor.credential.is_browser_session();
     Ok(PoamActor {
+        credential: request_actor.credential.clone(),
         user_id: request_actor.user_id,
         identifier: user.0,
-        is_admin,
-        can_mutate,
+        is_admin: is_admin && browser,
+        can_mutate: can_mutate && browser,
         environment_ids,
         request_origin: request_actor.request_origin.clone(),
     })
 }
 
 async fn require_visible(pool: &PgPool, actor: &PoamActor, poam_id: Uuid) -> Result<(), PoamError> {
+    require_browser_session(actor)?;
     if poam::poam_visible(pool, poam_id, actor.is_admin, &actor.environment_ids).await? {
         Ok(())
     } else {
@@ -376,8 +405,74 @@ async fn require_visible(pool: &PgPool, actor: &PoamActor, poam_id: Uuid) -> Res
     }
 }
 
+// SECURITY: Existing browser drawers can load plan text through a scoped
+// disposition. Restricted reads must deny the entire response if that plan has
+// hidden current or recorded subjects; no safe partial projection exists yet.
+async fn require_restricted_poam_visibility_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    ids: &[Uuid],
+) -> Result<(), PoamError> {
+    if actor.credential.is_browser_session() || ids.is_empty() {
+        return Ok(());
+    }
+    let hidden: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS (
+          SELECT 1 FROM unnest($1::uuid[]) requested(id)
+          WHERE NOT poam_visible_to_environments(requested.id,$2)
+          UNION ALL
+          SELECT 1 FROM poam_finding_links link
+          JOIN poam_findings finding ON finding.id=link.finding_id
+          JOIN systems system ON system.id=finding.system_id
+          WHERE link.poam_id=ANY($1)
+            AND NOT COALESCE(system.environment_id=ANY($2),false)
+          UNION ALL
+          SELECT 1 FROM poam_cve_finding_links link
+          JOIN systems system ON system.id=link.system_id
+          WHERE link.poam_id=ANY($1)
+            AND NOT COALESCE(system.environment_id=ANY($2),false)
+        )"#,
+    )
+    .bind(ids)
+    .bind(&actor.environment_ids)
+    .fetch_one(&mut **tx)
+    .await?;
+    if hidden {
+        Err(PoamError::NotFound)
+    } else {
+        Ok(())
+    }
+}
+
+async fn require_restricted_disposition_visibility_tx<'a>(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    dispositions: impl Iterator<Item = &'a CveEnvironmentDisposition>,
+) -> Result<(), PoamError> {
+    let ids = dispositions
+        .filter_map(|disposition| match disposition {
+            CveEnvironmentDisposition::Scheduled { poam_id, .. } => Some(*poam_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    require_restricted_poam_visibility_tx(tx, actor, &ids).await
+}
+
 fn require_mutator(actor: &PoamActor) -> Result<(), PoamError> {
+    require_browser_session(actor)?;
     if actor.can_mutate {
+        Ok(())
+    } else {
+        Err(PoamError::Forbidden)
+    }
+}
+
+/// Rejects restricted credentials on paths without a safe MCP representation.
+///
+/// # Errors
+/// Returns `Forbidden` for every restricted credential, regardless of its role.
+pub(crate) fn require_browser_session(actor: &PoamActor) -> Result<(), PoamError> {
+    if actor.credential.is_browser_session() {
         Ok(())
     } else {
         Err(PoamError::Forbidden)
@@ -1718,6 +1813,7 @@ pub async fn list_tx(
     clock: &dyn PoamClock,
 ) -> Result<Page<PoamSummary>, PoamError> {
     let mut query = query.clone();
+    require_browser_session(actor)?;
     normalized_search(&mut query.owner);
     normalized_search(&mut query.requirement);
     normalized_search(&mut query.q);
@@ -3188,6 +3284,7 @@ pub async fn finding_relationships(
     history_offset: Option<i64>,
     clock: &dyn PoamClock,
 ) -> Result<Vec<FindingPoamRelationship>, PoamError> {
+    require_browser_session(actor)?;
     if assessment_ids.is_empty() || assessment_ids.len() > MAX_POAM_RELATIONSHIPS as usize {
         return Err(PoamError::Validation(
             "invalid_assessment_ids",
@@ -3291,6 +3388,7 @@ pub async fn finding_relationships_by_finding(
     history_offset: Option<i64>,
     clock: &dyn PoamClock,
 ) -> Result<Vec<FindingPoamRelationship>, PoamError> {
+    require_browser_session(actor)?;
     if finding_ids.is_empty() || finding_ids.len() > MAX_POAM_RELATIONSHIPS as usize {
         return Err(PoamError::Validation(
             "invalid_finding_ids",
@@ -3904,6 +4002,7 @@ pub async fn fleet_cve_detail(
     cve_id: &str,
     package_name: &str,
 ) -> Result<FleetCveDetail, PoamError> {
+    require_browser_session(actor)?;
     let cve_id = cve_id.trim().to_ascii_uppercase();
     let package_name = package_name.trim();
     if !is_canonical_cve_id(&cve_id) || package_name.is_empty() {
@@ -3942,6 +4041,7 @@ pub async fn fleet_cve_inventory_detail(
     cve_id: &str,
     package_name: &str,
 ) -> Result<FleetCveDetail, PoamError> {
+    require_browser_session(actor)?;
     let cve_id = cve_id.trim().to_ascii_uppercase();
     let package_name = package_name.trim();
     if !is_canonical_cve_id(&cve_id) || package_name.is_empty() {
@@ -4946,6 +5046,7 @@ async fn system_cve_triage_detail_tx(
     }
     let mut dispositions =
         fleet_cve_dispositions_tx(tx, cve_id, package_name, &[environment_id]).await?;
+    require_restricted_disposition_visibility_tx(tx, actor, dispositions.values()).await?;
     retain_coherent_scheduled_dispositions_tx(
         tx,
         &mut dispositions,
@@ -4956,6 +5057,7 @@ async fn system_cve_triage_detail_tx(
     .await?;
     let host_disposition =
         system_cve_disposition_tx(tx, selected_system_id, cve_id, package_name).await?;
+    require_restricted_disposition_visibility_tx(tx, actor, host_disposition.iter()).await?;
     system_cve_triage_detail_from_subjects(
         selected_system_id,
         cve_id,
@@ -4972,11 +5074,19 @@ async fn system_cve_triage_detail_tx(
 /// every current exact affected host in that environment. Legacy, stale,
 /// whitelisted, and no-scan inventory cannot produce this detail.
 ///
+/// Restricted credentials require audience `mcp`, an unexpired grant, and both
+/// `cves:read` and `poams:read` because the response includes related metadata.
+/// The read reloads the active owner's roles and memberships and intersects
+/// them with the original environment grant; Admin ownership cannot widen it.
+/// Browser-session behavior is unchanged.
+///
 /// # Errors
 ///
 /// Returns not found when the system is hidden or lacks the selected current
-/// exact occurrence. Returns validation or database errors for invalid input or
-/// persistence failures.
+/// exact occurrence. An unsafe shared POA&M, including a hidden recorded subject,
+/// fails the whole response with [`PoamError::NotFound`], not a partial plan.
+/// Returns [`PoamError::Forbidden`] for denied owner or credential authority,
+/// or validation or database errors for invalid input or persistence failures.
 pub async fn system_cve_triage_detail(
     pool: &PgPool,
     actor: &PoamActor,
@@ -7182,12 +7292,20 @@ async fn batch_visible_inventory_only_tx(
 /// snapshot. Unavailable items carry no tokens, advisory metadata, or scope.
 /// A new or replaced decision requires hydration again before mutation.
 ///
+/// Restricted credentials require audience `mcp`, an unexpired grant, and both
+/// `cves:read` and `poams:read` because hydration reads related POA&M metadata.
+/// The read reloads the active owner's roles and memberships and intersects
+/// them with the original environment grant; Admin ownership cannot widen it.
+/// Browser-session behavior is unchanged.
+///
 /// # Errors
 ///
 /// Returns a validation error when the pair list is empty, exceeds the
 /// bounded batch identity limit, or names a malformed identity; a forbidden
-/// error when the actor cannot read POA&M evidence; or a database error when
-/// evidence cannot be loaded.
+/// error when owner or credential authority denies the read; or a database
+/// error when evidence cannot be loaded. An unsafe shared POA&M, including a
+/// hidden recorded subject, fails the whole response with
+/// [`PoamError::NotFound`], not partial batch metadata.
 pub async fn fleet_cve_batch_detail(
     pool: &PgPool,
     actor: &PoamActor,
@@ -7284,6 +7402,8 @@ pub async fn fleet_cve_batch_detail(
         let dispositions =
             fleet_cve_dispositions_tx(&mut tx, &cve_id, &package_name, &affected_environment_ids)
                 .await?;
+        require_restricted_disposition_visibility_tx(&mut tx, &actor, dispositions.values())
+            .await?;
         let mut environments = environment_ids
             .iter()
             .map(|environment_id| {
@@ -8471,10 +8591,20 @@ async fn triage_system_cves_batch_once(
 /// one repeatable-read transaction. Inaccessible systems return
 /// [`PoamError::NotFound`] before evidence details are loaded.
 ///
+/// Restricted credentials require audience `mcp`, an unexpired grant, and both
+/// `cves:read` and `poams:read` because the response includes POA&M relationships.
+/// The read reloads the active owner's roles and memberships and intersects
+/// them with the original environment grant; Admin ownership cannot widen it.
+/// Browser-session behavior is unchanged.
+///
 /// # Errors
 ///
 /// Returns a validation error for invalid history bounds, a not-found error for
 /// inaccessible systems, or a database error when evidence cannot be loaded.
+/// Returns [`PoamError::Forbidden`] for denied owner or credential authority.
+/// If a selected POA&M summary has unsafe shared or hidden recorded subjects,
+/// returns [`PoamError::NotFound`] for the whole response instead of exposing
+/// partial plan metadata. POA&Ms excluded by visibility filtering stay omitted.
 pub async fn cve_relationships(
     pool: &PgPool,
     actor: &PoamActor,
@@ -8537,11 +8667,21 @@ pub async fn cve_relationships(
 /// system, CVE, and canonical-package finding identity. At most 1,000 row keys
 /// are accepted in one request.
 ///
+/// Restricted credentials require audience `mcp`, an unexpired grant, and both
+/// `cves:read` and `poams:read` because the response includes POA&M relationships.
+/// The read reloads the active owner's roles and memberships and intersects
+/// them with the original environment grant; Admin ownership cannot widen it.
+/// Browser-session behavior is unchanged.
+///
 /// # Errors
 ///
 /// Returns a validation error for invalid history bounds or an oversized batch,
 /// a not-found error for an inaccessible system, or a database error when
 /// authoritative evidence or relationship history cannot be loaded.
+/// Returns [`PoamError::Forbidden`] for denied owner or credential authority.
+/// If a selected POA&M summary has unsafe shared or hidden recorded subjects,
+/// returns [`PoamError::NotFound`] for the whole response instead of exposing
+/// partial plan metadata. POA&Ms excluded by visibility filtering stay omitted.
 pub async fn cve_relationships_for_rows(
     pool: &PgPool,
     actor: &PoamActor,
@@ -8700,6 +8840,15 @@ async fn hydrate_cve_relationships_tx(
         history_page,
     )
     .await?;
+    require_restricted_poam_visibility_tx(
+        tx,
+        actor,
+        &summaries
+            .iter()
+            .map(|(_, _, summary)| summary.id)
+            .collect::<Vec<_>>(),
+    )
+    .await?;
     Ok(occurrences
         .into_iter()
         .map(|occurrence| {
@@ -8768,6 +8917,7 @@ pub async fn compatible_for_finding(
     offset: Option<i64>,
     clock: &dyn PoamClock,
 ) -> Result<Page<PoamSummary>, PoamError> {
+    require_browser_session(actor)?;
     let (limit, offset) = page_bounds(limit, offset)?;
     let q = q.map(str::trim).filter(|value| !value.is_empty());
     if let Some(q) = q {
@@ -8831,6 +8981,7 @@ pub async fn compatible_for_assessment(
     offset: Option<i64>,
     clock: &dyn PoamClock,
 ) -> Result<Page<PoamSummary>, PoamError> {
+    require_browser_session(actor)?;
     let (limit, offset) = page_bounds(limit, offset)?;
     let q = q.map(str::trim).filter(|value| !value.is_empty());
     if let Some(q) = q {
@@ -8896,6 +9047,7 @@ pub async fn assignment_relationships(
     history_offset: Option<i64>,
     clock: &dyn PoamClock,
 ) -> Result<Vec<AssignmentPoamRelationship>, PoamError> {
+    require_browser_session(actor)?;
     if assignment_version_ids.is_empty()
         || assignment_version_ids.len() > MAX_POAM_RELATIONSHIPS as usize
     {
@@ -9106,6 +9258,7 @@ pub async fn list_waivers(
     actor: &PoamActor,
     query: &WaiverListQuery,
 ) -> Result<Page<WaiverView>, PoamError> {
+    require_browser_session(actor)?;
     if !actor.is_admin {
         return Err(PoamError::Forbidden);
     }
@@ -9131,6 +9284,7 @@ pub async fn list_waivers(
 /// Returns [`PoamError::Forbidden`] for non-admin actors,
 /// [`PoamError::NotFound`] for an absent waiver, or a database error.
 pub async fn waiver(pool: &PgPool, actor: &PoamActor, id: Uuid) -> Result<WaiverView, PoamError> {
+    require_browser_session(actor)?;
     if !actor.is_admin {
         return Err(PoamError::Forbidden);
     }
@@ -9153,6 +9307,7 @@ pub async fn decide_waiver(
     request: WaiverDecisionRequest,
     clock: &dyn PoamClock,
 ) -> Result<Value, PoamError> {
+    require_browser_session(actor)?;
     if !actor.is_admin {
         return Err(PoamError::Forbidden);
     }
@@ -9317,6 +9472,7 @@ pub async fn convert_waiver_to_poam(
     reuse_poam_id: Option<Uuid>,
     clock: &dyn PoamClock,
 ) -> Result<WaiverConversion, PoamError> {
+    require_browser_session(actor)?;
     if !actor.is_admin || !actor.can_mutate {
         return Err(PoamError::Forbidden);
     }
@@ -9643,6 +9799,7 @@ pub async fn renew_waiver(
     expected_updated_at: DateTime<Utc>,
     clock: &dyn PoamClock,
 ) -> Result<WaiverRenewal, PoamError> {
+    require_browser_session(actor)?;
     if !actor.is_admin {
         return Err(PoamError::Forbidden);
     }
@@ -11751,6 +11908,7 @@ pub async fn dashboard(
     actor: &PoamActor,
     clock: &dyn PoamClock,
 ) -> Result<DashboardSummary, PoamError> {
+    require_browser_session(actor)?;
     Ok(poam::dashboard(pool, clock.today(), actor.is_admin, &actor.environment_ids).await?)
 }
 /// Returns the actor's paginated overdue and awaiting-verification watchlist.
@@ -11766,6 +11924,7 @@ pub async fn watchlist(
     offset: i64,
     clock: &dyn PoamClock,
 ) -> Result<Page<PoamSummary>, PoamError> {
+    require_browser_session(actor)?;
     let (limit, offset) = page_bounds(Some(limit), Some(offset))?;
     Ok(poam::watchlist(
         pool,
@@ -11789,6 +11948,7 @@ pub async fn system_rollups(
     ids: &[Uuid],
     clock: &dyn PoamClock,
 ) -> Result<Vec<Rollup>, PoamError> {
+    require_browser_session(actor)?;
     if ids.is_empty() || ids.len() > 100 {
         return Err(PoamError::Validation(
             "invalid_batch_size",
@@ -11865,6 +12025,7 @@ pub async fn bundle_rollups(
     ids: &[Uuid],
     clock: &dyn PoamClock,
 ) -> Result<Vec<Rollup>, PoamError> {
+    require_browser_session(actor)?;
     if ids.is_empty() || ids.len() > 100 {
         return Err(PoamError::Validation(
             "invalid_batch_size",
@@ -12193,6 +12354,7 @@ mod tests {
             (context.finding_id, system, lineages[1]),
         ];
         let actor = PoamActor {
+            credential: crate::auth::authorization::CredentialIdentity::BrowserSession,
             user_id: Uuid::new_v4(),
             identifier: "fixture".into(),
             is_admin: true,

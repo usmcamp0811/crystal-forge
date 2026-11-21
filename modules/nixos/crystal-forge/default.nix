@@ -1717,6 +1717,17 @@ in {
           '';
         };
 
+        entitlementMaxAgeSeconds = lib.mkOption {
+          type = lib.types.ints.between 1 4294967295;
+          default = 86400;
+          description = lib.mdDoc ''
+            Maximum age in seconds of a successful authoritative OIDC entitlement
+            sync for OIDC-owned PAT eligibility. Stale, missing, invalid or
+            unresolved entitlement evidence denies eligibility. Sign-in refreshes
+            managed entitlements; this setting does not change browser session expiry.
+          '';
+        };
+
         emailClaim = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
@@ -2976,6 +2987,8 @@ in {
             CRYSTAL_FORGE_OIDC_ISSUER_URL = cfg.server.oidc.issuerUrl;
             CRYSTAL_FORGE_OIDC_CLIENT_ID = cfg.server.oidc.clientId;
             CRYSTAL_FORGE_OIDC_REDIRECT_URI = cfg.server.oidc.redirectUri;
+            CRYSTAL_FORGE_OIDC_ENTITLEMENT_MAX_AGE_SECONDS =
+              toString cfg.server.oidc.entitlementMaxAgeSeconds;
             CRYSTAL_FORGE_OIDC_SCOPES =
               lib.concatStringsSep "," cfg.server.oidc.scopes;
           }

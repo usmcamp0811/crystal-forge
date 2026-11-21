@@ -54,6 +54,19 @@ sources:
 4. Later requests carry the cookies. A state-changing request also carries the `x-csrf-token` header.
 5. Each handler validates the session. It rejects an expired or invalidated session, requires the user to be active, and loads the user's role assignments.
 
+OIDC callback reconciliation now replaces only IdP-owned contributions and
+preserves independent local overrides. Unresolved legacy grants preserve browser
+login without establishing fresh entitlements; unsupported multiple linked
+identities deny login. Managed missing/invalid group evidence denies login,
+while valid empty groups produce managed Viewer without managed environments.
+See [OIDC entitlement ownership](oidc-entitlement-ownership.md) for the
+implemented-source contract and pending farm verification.
+
+The configurable entitlement maximum age (default 24 hours) is an eligibility
+input for future OIDC-owned PAT admission. It does not change browser session
+expiry. No PAT/MCP endpoints or token-row validator exist in this groundwork;
+the freshness helper is not wired to bearer admission.
+
 ### Authentication modes
 
 The server reads the mode from the `auth_mode` setting (`AUTH_MODE`, default `oidc`). Only the routes of the active mode are registered.
@@ -110,6 +123,13 @@ The response sets the session cookies and returns `user_id`, `email`, and `displ
 | **Admin** | Everything an Operator can do, plus user management, the audit log, builders, environments, OIDC mappings, and the CVE dashboard. Not limited by environment. |
 
 A user can hold several roles. The checks accept a user when **any** held role qualifies. The per-endpoint gates are in each API document, for example [Builders, queues, environments, dashboard, and admin APIs](../api/builders-queues-environments-dashboard-admin-api.md).
+
+Effective roles and memberships are the union of local, bound IdP and unresolved
+legacy contributions. Admin replacement classifies only each supplied category
+as local and retains IdP contributions; returned effective authority can exceed
+the requested local role. Last-Admin guard decisions serialize with OIDC
+revocation, but must not retain revoked IdP Admin rights. Final IdP Admin removal
+can leave zero Admins; independent recovery is an upgrade prerequisite.
 
 ### How handlers enforce roles
 
@@ -168,4 +188,5 @@ Snapshot APIs preserve non-disclosure. An unknown resource, a resource in a hidd
 - [Systems API](../api/systems-api.md)
 - [Builders, queues, environments, dashboard, and admin APIs](../api/builders-queues-environments-dashboard-admin-api.md)
 - [OIDC role mapping](oidc-role-mapping.md)
+- [OIDC entitlement ownership and freshness](oidc-entitlement-ownership.md)
 - [Session cookies and CSRF](session-cookies-and-csrf.md)

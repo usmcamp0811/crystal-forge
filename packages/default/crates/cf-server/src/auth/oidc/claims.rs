@@ -1,7 +1,7 @@
 //! OIDC claim extraction and mapping.
 
 use crate::config::ClaimMappingConfig;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -147,6 +147,42 @@ impl ClaimExtractor {
         Some(current)
     }
 
+    /// Extracts authoritative group evidence from the configured claim path.
+    ///
+    /// Accepts string arrays, single strings and comma-separated strings. An
+    /// empty array or blank string is valid empty evidence. Every array element
+    /// must be a string; invalid elements are never silently discarded.
+    ///
+    /// # Errors
+    /// Returns an error for missing, null or malformed evidence, including an
+    /// invalid intermediate value in a dotted claim path. Errors omit claim data.
+    pub fn extract_authoritative_groups(
+        &self,
+        claims: &HashMap<String, Value>,
+    ) -> Result<Vec<String>, String> {
+        let value = self
+            .extract_claim_value(claims, &self.config.roles_claim)
+            .ok_or_else(|| "missing OIDC group evidence".to_string())?;
+        let groups = match value {
+            Value::Array(values) => values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(ToString::to_string)
+                        .ok_or_else(|| "invalid OIDC group array element".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Value::String(value) => value.split(',').map(ToString::to_string).collect(),
+            _ => return Err("invalid OIDC group evidence".to_string()),
+        };
+        Ok(groups
+            .into_iter()
+            .map(|group| group.trim().to_ascii_lowercase())
+            .filter(|group| !group.is_empty())
+            .collect())
+    }
+
     /// Extract roles/groups from claims.
     ///
     /// Supports multiple formats:
@@ -197,6 +233,57 @@ mod tests {
 
     fn default_config() -> ClaimMappingConfig {
         ClaimMappingConfig::default()
+    }
+
+    #[test]
+    fn authoritative_groups_distinguish_empty_from_invalid_evidence() {
+        let extractor = ClaimExtractor::new(default_config());
+        assert!(
+            extractor
+                .extract_authoritative_groups(&HashMap::new())
+                .is_err()
+        );
+        for value in [
+            json!(null),
+            json!(true),
+            json!(42),
+            json!({}),
+            json!(["admin", 1]),
+            json!([null]),
+        ] {
+            let claims = HashMap::from([("groups".to_string(), value)]);
+            assert!(extractor.extract_authoritative_groups(&claims).is_err());
+        }
+        for value in [json!([]), json!(""), json!("  ")] {
+            let claims = HashMap::from([("groups".to_string(), value)]);
+            assert_eq!(extractor.extract_authoritative_groups(&claims), Ok(vec![]));
+        }
+    }
+
+    #[test]
+    fn authoritative_groups_validate_nested_paths_and_normalize_supported_formats() {
+        let mut config = default_config();
+        config.roles_claim = "realm_access.roles".to_string();
+        let extractor = ClaimExtractor::new(config);
+        for value in [json!([" Admin ", "Operator"]), json!(" Admin , Operator ")] {
+            let claims = HashMap::from([("realm_access".to_string(), json!({"roles": value}))]);
+            assert_eq!(
+                extractor.extract_authoritative_groups(&claims),
+                Ok(vec!["admin".to_string(), "operator".to_string()])
+            );
+        }
+        for value in [
+            json!(null),
+            json!([]),
+            json!("roles"),
+            json!({}),
+            json!({"roles": ["admin", false]}),
+        ] {
+            let claims = HashMap::from([("realm_access".to_string(), value)]);
+            assert!(extractor.extract_authoritative_groups(&claims).is_err());
+        }
+        let claims = HashMap::from([("realm_access".to_string(), json!({"roles": []}))]);
+        assert_eq!(extractor.extract_authoritative_groups(&claims), Ok(vec![]));
     }
 
     #[test]

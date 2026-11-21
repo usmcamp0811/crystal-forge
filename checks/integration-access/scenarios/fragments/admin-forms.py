@@ -73,6 +73,12 @@ with case("admin-form-edit-role-persists-and-reloads"):
     admin_forms_assert_user(admin_forms["initialRoleDb"], True)
     admin_forms_browser("edit")
     admin_forms_assert_user(admin_forms["editedRoleDb"], True)
+    expect_equal(sql_json(controller,
+        "SELECT role::text, local_grant, oidc_identity_id::text, legacy_ownership_unresolved "
+        "FROM user_role_assignments WHERE user_id = '%s'" % receipts()["adminForms.userId"]),
+        [{"role": admin_forms["editedRoleDb"], "local_grant": True,
+          "oidc_identity_id": None, "legacy_ownership_unresolved": False}],
+        "opt-in UI role edit persists exactly one explicit local source")
     receipt("adminForms.sql.edit", admin_forms_user_state())
 
 with case("admin-form-cancel-create-and-edit-leave-rows-unchanged"):

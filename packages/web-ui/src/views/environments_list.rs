@@ -568,7 +568,7 @@ fn new_environment_form_draft() -> EnvironmentFormDraft {
         // The mandatory CF-agent invariant is enforced globally by the server.
         required_policy_ids: Vec::new(),
         // Matches the design's declared defaults for a freshly created
-        // environment (docs/design/CrystalForge/components/EnvironmentsView.jsx):
+        // environment (EnvironmentsView in docs/design/CrystalForge/crystal-forge.html):
         // manual deploys, auto-sync on, approval required, not production.
         default_policy: Some(EnvironmentDeploymentPolicy::Manual),
         auto_sync: Some(true),

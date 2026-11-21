@@ -15,7 +15,11 @@ sources:
 ---
 # TASK-65.7 Provider Compatibility and Security Validation
 
-> **Status:** implemented. The five `provider_matrix_*` tests exist in `packages/default/crates/cf-server/src/auth/integration_matrix.rs` and the HS256 rejection test is in `auth/security_regression.rs`. The callback still assigns a default Viewer when a user has no roles (`handlers/api/auth_oidc.rs`), as the residual risks state.
+The historical TASK-65.7 provider matrix and HS256 rejection tests exist in
+`auth/integration_matrix.rs` and `auth/security_regression.rs`. Their claim-shape
+coverage does not establish TASK-534.2 authoritative reconciliation or a passing
+current-source farm result. The callback now uses the strict authoritative group
+extractor and source-aware [OIDC entitlement reconciliation](oidc-entitlement-ownership.md).
 
 ## Validation Matrix
 
@@ -34,7 +38,11 @@ to the same internal role extraction path.
 ## Security Regression Coverage
 
 - Token validation rejects non-RSA algorithms (`HS256`) in JWT validation path.
-- Role claim parsing failures (unexpected object shape) degrade to empty roles rather than unsafe escalation.
+- The historical role-extraction path degrades unexpected shapes to empty roles.
+  The managed callback now separately requires authoritative evidence: malformed
+  or missing groups deny login, while valid empty groups produce managed Viewer
+  without managed memberships. Unresolved legacy ownership preserves login
+  without freshness, subject to identity, activity and generation checks.
 - OIDC unverified email denial maps to HTTP 403.
 - Agent key-auth path remains stable:
   - accepts valid signed payloads;
@@ -44,7 +52,9 @@ to the same internal role extraction path.
 
 - Provider matrix is claim-shape coverage, not a full live-provider end-to-end matrix for all providers in CI.
 - OIDC callback/database/session flow still relies on broader integration tests for complete lifecycle validation.
-- Role assignment policy is still evolving (default viewer assignment remains in callback path until role mapping task is fully completed).
+- Current-source farm verification of strict claim evidence, source ownership,
+  failure fencing and callback/database lifecycle remains pending. Historical
+  provider-shape coverage does not prove these contracts or future PAT admission.
 
 ## Related concepts
 

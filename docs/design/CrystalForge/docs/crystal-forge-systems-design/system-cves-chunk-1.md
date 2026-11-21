@@ -36,7 +36,7 @@ Only Section 22's agreed statements and this slice are implementation instructio
 
 ### 2.1 UI authority and the design gate
 
-The owner's Claude design implementation is authoritative for the UI. It is not a style suggestion. Start with `docs/design/CrystalForge/components/SystemDetail.jsx`. Follow the shared triage components it uses, including `CvesView.jsx`, and the applicable styles. Use the current design source at the implementation base; do not assume that the production UI already matches it.
+The owner's Claude design implementation is authoritative for the UI. It is not a style suggestion. Start with `SystemDetail` in `docs/design/CrystalForge/crystal-forge.html`. Follow the shared triage components it uses, including `CvesView`, and the inline styles. Use the current design source at the implementation base; do not assume that the production UI already matches it.
 
 This contract defines backend facts and behavior. It does not approve new UI elements, placement, static copy, or interactions. Do not add a banner, badge, panel, card, field, column, button, tooltip, modal, tab, refresh indicator, or confirmation workflow merely to expose a new state or DTO field. Preserve the existing design's hierarchy, spacing, typography, colors, icons, controls, and interactions. Do not redesign the reference itself.
 
@@ -173,7 +173,7 @@ Read these modules and relevant nearby tests. Use symbol search and small contig
 | `packages/default/crates/cf-server/src/queries/systems.rs`: observational current-revision resolver | Existing scoped mapping concepts. A commit-only result is not sufficient to select an exact scan. |
 | `packages/default/crates/cf-server/src/handlers/api/systems.rs`, CVE inventory handlers near lines 1750–1880 | Read-only results omit remediation hydration; response assembly. |
 | Server and Web UI API model modules; `packages/web-ui/src/api/client.rs` | Compatible target/proof/source DTOs and query serialization. |
-| `docs/design/CrystalForge/components/SystemDetail.jsx`: revision bar and CVE tab, plus referenced shared components/styles | Authoritative UI structure and interactions. Replace mock data with server facts; do not invent additional UI. |
+| `docs/design/CrystalForge/crystal-forge.html`: `SystemDetail` revision bar and CVE tab, plus shared components/styles | Authoritative UI structure and interactions. Replace mock data with server facts; do not invent additional UI. |
 | `checks/web-ui/tests/integration-test.js`: `12ha-system-detail-cve-inventory-fallbacks`, `12h-system-detail-cves-grouped-justification` | Existing browser fixtures and assertion targets. |
 
 Source facts were checked at `327d03b6`. Re-read changed ranges when the branch advances. The full document's S32–S38 entries give pinned references. Existing line numbers are navigation hints, not permission to skip the implementation.

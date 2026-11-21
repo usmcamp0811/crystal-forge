@@ -1289,8 +1289,12 @@ async fn main() -> anyhow::Result<()> {
             Err(err) => {
                 // AUTH_MODE defaults to `oidc` if unset. In environments that do not
                 // configure OIDC (e.g., certain VM tests), keep server startup working
-                // unless oidc mode was explicitly requested.
-                if std::env::var("AUTH_MODE").as_deref() == Ok("oidc") {
+                // unless OIDC mode or its entitlement policy was explicitly
+                // configured. Invalid security policy must not silently disable
+                // the authentication routes.
+                if std::env::var("AUTH_MODE").as_deref() == Ok("oidc")
+                    || std::env::var_os("CRYSTAL_FORGE_OIDC_ENTITLEMENT_MAX_AGE_SECONDS").is_some()
+                {
                     return Err(err).context("Failed to load OIDC configuration from environment");
                 }
 

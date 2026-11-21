@@ -1,5 +1,5 @@
 //! Checkbox multi-select filter from the approved Systems design
-//! (`docs/design/CrystalForge/components/MgmtParts.jsx`, `MultiFilter`).
+//! (`docs/design/CrystalForge/crystal-forge.html`, `MultiFilter`).
 
 use dioxus::prelude::*;
 
