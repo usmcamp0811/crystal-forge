@@ -15,7 +15,7 @@ sources:
     resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0336_api_access_tokens.sql at commit 7e6d676d"
     title: Token, scope and environment tables
   - id: compliance-scopes
-    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0343_compliance_token_scopes.sql on branch TASK-534.6-mcp-compliance-read"
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0343_compliance_token_scopes.sql at commit f4fcba6f"
     title: Compliance scope allowlist
 ---
 

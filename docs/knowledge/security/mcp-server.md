@@ -16,10 +16,10 @@ sources:
     resource: "Crystal Forge repository file packages/default/crates/cf-server/src/mcp/tools.rs at commit 04f4ae9b"
     title: MCP tool definitions and execution
   - id: compliance-read
-    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/mcp/compliance_read.rs on branch TASK-534.6-mcp-compliance-read"
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/mcp/compliance_read.rs at commit f4fcba6f"
     title: MCP compliance read tools
   - id: compliance-catalog
-    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/compliance_catalog.rs on branch TASK-534.6-mcp-compliance-read"
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/compliance_catalog.rs at commit f4fcba6f"
     title: Compliance catalog queries
   - id: config
     resource: "Crystal Forge repository file packages/default/crates/cf-config/src/config/server.rs at commit 04f4ae9b"

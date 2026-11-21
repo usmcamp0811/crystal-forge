@@ -92,3 +92,7 @@ LOCK: OpenCode on vm-agent in /home/mcamp/code/crystal-forge/TASK-534.6-mcp-comp
 
 Branch `TASK-534.6-mcp-compliance-read` starts at `83062654` (TASK-534.5 head, MR !349). Stack: !345, !346, !347, !349 unmerged. Next free migration 0343.
 <!-- SECTION:NOTES:END -->
+
+## Verification at `f4fcba6f`
+
+Farm PostgreSQL run (output `6b8sqb1mzh7g3pi8a68bq1gzwamch1z1-cf-mcp-regressions-0.3.0`): `access_tokens` 46, `mcp_compliance_read` 7, `mcp_tools` 8, `mcp_transport` 10 passed; 0 failed. Web UI derivation: 968 passed, 0 failed. `nix build .#okf-knowledge` passed after the source descriptors were corrected. Integration-access scenario expectations changed (catalog, Requires Admin count, help text); scenario run pending at the time of the MR.
