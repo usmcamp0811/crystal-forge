@@ -930,9 +930,12 @@ pub struct PoamSummary {
     pub overdue: bool,
     /// Counts active findings, or the closure finding set for a completed plan.
     pub finding_count: i64,
-    /// Counts exact-CVE findings without changing policy finding semantics.
+    /// Counts runtime CVE links and one configuration CVE before runtime handoff.
     #[serde(default)]
     pub cve_finding_count: i64,
+    /// Indicates that the configuration plan cannot verify or close before runtime handoff.
+    #[serde(default)]
+    pub configuration_planning_only: bool,
     /// Records when the plan was created.
     pub created_at: DateTime<Utc>,
     /// Records when the plan last changed.
@@ -1396,6 +1399,19 @@ pub struct ActivityView {
     pub access_token_name: Option<String>,
 }
 
+/// Contains the original configuration scan identity, which is not runtime evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigurationCveFindingView {
+    /// Identifies the system whose configuration was scanned.
+    pub system_id: Uuid,
+    /// Contains the canonical CVE ID.
+    pub canonical_cve_id: String,
+    /// Contains the canonical package name.
+    pub canonical_package_name: String,
+    /// Identifies the original configuration scan recorded for planning.
+    pub baseline_scan_id: Uuid,
+}
+
 /// Contains one POA&M and independently paginated related history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PoamDetail {
@@ -1407,6 +1423,9 @@ pub struct PoamDetail {
     /// Contains exact-CVE links without changing policy finding semantics.
     #[serde(default)]
     pub cve_findings: Vec<CveFindingView>,
+    /// Contains the configuration baseline when visible, including after runtime handoff.
+    #[serde(default)]
+    pub configuration_cve_finding: Option<ConfigurationCveFindingView>,
     /// Indicates that an older findings page is available.
     pub findings_has_more: bool,
     /// Selects the next older findings page.
@@ -2965,11 +2984,72 @@ mod tests {
             overdue: false,
             finding_count: 1,
             cve_finding_count: 0,
+            configuration_planning_only: false,
             created_at: DateTime::from_timestamp(1, 0).unwrap(),
             updated_at: DateTime::from_timestamp(id as i64, 0).unwrap(),
             closed_at: None,
             closure_attempt_id: None,
         }
+    }
+
+    #[test]
+    fn detail_accepts_legacy_null_and_populated_configuration_baselines() {
+        let mut payload = serde_json::to_value(summary(1)).unwrap();
+        let fields = payload.as_object_mut().unwrap();
+        fields.remove("configuration_planning_only");
+        for name in [
+            "findings",
+            "milestones",
+            "assignment_references",
+            "verification_attempts",
+            "activity",
+        ] {
+            fields.insert(name.into(), serde_json::json!([]));
+        }
+        for name in [
+            "findings_has_more",
+            "verification_has_more",
+            "activity_has_more",
+        ] {
+            fields.insert(name.into(), serde_json::json!(false));
+        }
+        let legacy: PoamDetail = serde_json::from_value(payload.clone()).unwrap();
+        assert!(legacy.configuration_cve_finding.is_none());
+        assert!(!legacy.poam.configuration_planning_only);
+
+        payload["configuration_cve_finding"] = Value::Null;
+        let nullable: PoamDetail = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(nullable, legacy);
+
+        let system = Uuid::from_u128(2);
+        let scan = Uuid::from_u128(3);
+        payload["configuration_cve_finding"] = serde_json::json!({
+            "system_id": system,
+            "canonical_cve_id": "CVE-2026-1234",
+            "canonical_package_name": "fixture-package",
+            "baseline_scan_id": scan,
+            "baseline_head_commit_id": 42
+        });
+        payload["configuration_planning_only"] = serde_json::json!(true);
+        let planning: PoamDetail = serde_json::from_value(payload.clone()).unwrap();
+        assert!(planning.poam.configuration_planning_only);
+        assert_eq!(
+            planning.configuration_cve_finding,
+            Some(ConfigurationCveFindingView {
+                system_id: system,
+                canonical_cve_id: "CVE-2026-1234".into(),
+                canonical_package_name: "fixture-package".into(),
+                baseline_scan_id: scan,
+            })
+        );
+
+        payload["configuration_planning_only"] = serde_json::json!(false);
+        let handed_off: PoamDetail = serde_json::from_value(payload).unwrap();
+        assert!(!handed_off.poam.configuration_planning_only);
+        assert_eq!(
+            handed_off.configuration_cve_finding,
+            planning.configuration_cve_finding
+        );
     }
 
     #[test]

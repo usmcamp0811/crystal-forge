@@ -7,7 +7,7 @@ use axum::{
     Router,
     body::{Body, to_bytes},
     http::{Request, StatusCode},
-    routing::post,
+    routing::{get, post},
 };
 use chrono::Utc;
 use crystal_forge::{
@@ -457,6 +457,7 @@ async fn rpc(app: &Router, secret: &str, name: &str, args: Value) -> Value {
 fn http_app(pool: &PgPool) -> Router {
     Router::new()
         .route("/mcp", post(mcp::handle))
+        .route("/api/v1/poams", get(poam::list))
         .route("/api/v1/poams/:id/close", post(poam::close))
         .route("/api/v1/poams/cves", post(poam::create_cve))
         .route(
@@ -720,6 +721,9 @@ async fn http_head_plan_keeps_its_baseline_and_requires_mcp_runtime_handoff(pool
     let initial = detail().await;
     let initial = tool_success(&initial);
     assert_eq!(initial["visibility"], "full");
+    assert_eq!(initial["poam"]["finding_count"], 0);
+    assert_eq!(initial["poam"]["cve_finding_count"], 1);
+    assert_eq!(initial["poam"]["configuration_planning_only"], true);
     let baseline = &initial["poam"]["configuration_cve_finding"];
     assert_eq!(baseline["system_id"], json!(system));
     assert_eq!(baseline["canonical_cve_id"], PLAN_CVE);
@@ -811,6 +815,29 @@ async fn http_head_plan_keeps_its_baseline_and_requires_mcp_runtime_handoff(pool
     )
     .await
     .unwrap();
+    let register = || async {
+        let request = Request::get("/api/v1/poams")
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={session}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), mcp::MAX_BODY_BYTES)
+            .await
+            .unwrap();
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == json!(id))
+            .unwrap()
+            .clone()
+    };
+    let registered = register().await;
+    assert_eq!(registered["finding_count"], 0);
+    assert_eq!(registered["cve_finding_count"], 1);
+    assert_eq!(registered["configuration_planning_only"], true);
     let close = Request::post(format!("/api/v1/poams/{id}/close"))
         .header(
             "cookie",
@@ -954,6 +981,13 @@ async fn http_head_plan_keeps_its_baseline_and_requires_mcp_runtime_handoff(pool
     let after = &tool_success(&after)["poam"];
     assert_eq!(after["configuration_cve_finding"], *baseline);
     assert_eq!(after["cve_findings"].as_array().unwrap().len(), 1);
+    assert_eq!(after["finding_count"], 0);
+    assert_eq!(after["cve_finding_count"], 1);
+    assert_eq!(after["configuration_planning_only"], false);
+    let registered = register().await;
+    assert_eq!(registered["finding_count"], 0);
+    assert_eq!(registered["cve_finding_count"], 1);
+    assert_eq!(registered["configuration_planning_only"], false);
     let activity = after["activity"].as_array().unwrap();
     assert_eq!(activity.len(), 3);
     let handoff = activity

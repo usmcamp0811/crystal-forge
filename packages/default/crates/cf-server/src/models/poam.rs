@@ -591,9 +591,12 @@ pub struct PoamSummary {
     pub overdue: bool,
     /// Counts active findings, or the closure finding set for a completed POA&M.
     pub finding_count: i64,
-    /// Counts exact-CVE findings without changing policy finding semantics.
+    /// Counts runtime CVE links and one configuration CVE before runtime handoff.
     #[serde(default)]
     pub cve_finding_count: i64,
+    /// Indicates that the configuration plan cannot verify or close before runtime handoff.
+    #[serde(default)]
+    pub configuration_planning_only: bool,
     /// Records when the POA&M was created.
     pub created_at: DateTime<Utc>,
     /// Records the most recent POA&M mutation.
