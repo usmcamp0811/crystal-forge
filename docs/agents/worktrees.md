@@ -25,7 +25,7 @@ Use a branch containing the task identifier:
 TASK-ID-short-slug
 ```
 
-From an existing repository worktree, update knowledge of the designated base without modifying user work, then create the worktree. Normally the base is `dev`:
+From an existing repository worktree, update knowledge of the designated base without modifying user work, then create the worktree. Normally the base is `dev`. For a slice of a stacked delivery, the base is the predecessor slice's branch (see "Stacked merge requests" in `AGENTS.md`):
 
 ```bash
 git worktree add -b TASK-ID-short-slug /absolute/path/to/TASK-ID-short-slug dev
