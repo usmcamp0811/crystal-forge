@@ -205,7 +205,9 @@ with case("access-token-policy-offers-operator-only-the-assigned-active-environm
     expect_equal(policy["create_blocked"], None, "a local Operator is not blocked from creating")
     expect_equal(policy["default_lifetime_days"], at_facts["lifetimeDays"], "default lifetime")
     expect(at_facts["lifetimeDays"] in policy["lifetime_options_days"], "authored lifetime is selectable")
-    expect_equal(policy["environments"], [{"id": at_env_id, "name": at_facts["environment"]}],
+    # Compare identity fields only; environments also carry display metadata.
+    expect_equal([{"id": e["id"], "name": e["name"]} for e in policy["environments"]],
+                 [{"id": at_env_id, "name": at_facts["environment"]}],
                  "only the assigned active environment is offered; the unassigned and the "
                  "other active environments are not")
     offered = {s["scope"]: s for s in policy["scopes"]}
@@ -242,7 +244,7 @@ with case("access-token-create-returns-secret-once-and-stores-only-its-hash"):
                  {"name": at_facts["operatorToken"], "audience": "mcp", "scopes": at_read_scopes,
                   "status": "active", "revoked_at": None, "last_used_at": None},
                  "create response metadata")
-    expect_equal(created["environments"],
+    expect_equal([{k: e[k] for k in ("id", "name", "is_active")} for e in created["environments"]],
                  [{"id": at_env_id, "name": at_facts["environment"], "is_active": True}],
                  "create response environments")
 
