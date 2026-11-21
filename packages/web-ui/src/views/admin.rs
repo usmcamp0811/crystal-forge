@@ -16,6 +16,7 @@ use crate::api::models::{
     OidcGroupMapping, Role, ServerRuntimeInfoResponse, UpdateAutomaticRetryPolicyRequest,
     UpdateClassificationBannerRequest,
 };
+use crate::components::mcp_server_card::McpServerCard;
 use crate::components::onboarding::CoachController;
 use crate::components::{Icon, IconName};
 use crate::state::app_state::AppState;
@@ -1902,6 +1903,9 @@ fn ServerTab(
                     }
                 }
             }
+
+            // MCP server status card (full width, read-only)
+            McpServerCard {}
 
             // Agent heartbeat config card
             HeartbeatConfigCard {

@@ -14,6 +14,7 @@
 //! - `filters` - Filter dropdowns, view toggles, filter bars
 //! - `forms` - Form components for data entry
 //! - `layout` - Application shell, cards, sidebar, topbar
+//! - `mcp_server_card` - Read-only MCP server status card of Admin → Server
 //! - `modals` - Dialog components
 //! - `notifications` - Toast notifications
 //! - `tables` - Sortable headers, table containers
@@ -39,6 +40,7 @@ pub mod filters;
 pub mod flake;
 pub mod forms;
 pub mod heartbeat_spinner;
+pub mod mcp_server_card;
 pub mod modals;
 pub mod notifications;
 pub mod onboarding;

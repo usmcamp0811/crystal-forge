@@ -30,18 +30,20 @@ the M0 boundary described in
 This concept describes implemented code. It does not describe verified
 behavior: farm results for the exact head are recorded in the task, not here.
 
+TASK-534.4 adds the only consumer: the opt-in [MCP server](mcp-server.md) at
+`POST /mcp`. It admits tokens through `validate_presented_token` and writes
+`last_used_at` at most once per 5 minutes per token. While `mcp_enable` is
+`false`, nothing accepts a `cfat_` credential and the policy endpoint reports
+`mcp.enabled = false`; when it is `true`, the policy reports
+`mcp.enabled = true` and `mcp.url` from `mcp_public_url`.
+
 Not implemented in this slice:
 
-- The MCP transport, the `/mcp` route and every MCP tool. Nothing accepts a
-  `cfat_` credential yet, so an issued token is inert. The policy endpoint reports
-  `mcp.enabled = false` until milestone M2.
-- The Admin Access Tokens tab, admin revoke and revoke-all endpoints, the MCP
-  status card and the Access Inspector.
+- The Admin Access Tokens tab, admin revoke and revoke-all endpoints and the
+  Access Inspector.
 - The Connect agent shortcut on Fleet CVEs and POA&M views.
 - Write and operational scopes. Only `cves:read`, `poams:read` and
   `provenance:read` can be selected. The other scopes appear as unavailable.
-- A throttled `last_used_at` writer in a request path. The query helper exists;
-  no request path calls it before M2.
 
 ## Contract
 
@@ -175,9 +177,10 @@ and `access_token_revoked` to `admin_audit_events` in the same transaction as th
 change. The target is the public token id. Metadata holds the name, scopes,
 environment ids and expiry. The Admin Audit Log lists these events.
 
-## Validation for future bearer admission
+## Validation for bearer admission
 
-`validate_presented_token` is the server function that milestone M2 calls. It
+`validate_presented_token` is the server function that the MCP endpoint calls
+on every request. It
 takes the access-token settings. When `access_tokens_enable` is false it rejects
 every token before any database access. Otherwise it parses the bounded token
 format, finds the row by public id, compares the hash in constant time, and

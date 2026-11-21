@@ -513,6 +513,8 @@ fn settings(max_age: u64) -> AccessTokenSettings {
         default_lifetime_days: 30,
         max_lifetime_days: 90,
         entitlement_max_age_seconds: max_age,
+        mcp_enabled: false,
+        mcp_public_url: None,
     }
 }
 
@@ -2432,7 +2434,7 @@ async fn disabled_server_blocks_issue_rotate_and_admission_but_keeps_read_policy
     let on = settings(MAX_AGE);
     let off = AccessTokenSettings {
         enabled: false,
-        ..on
+        ..on.clone()
     };
     validate_presented_token(&pool, &secret, Utc::now(), &on)
         .await

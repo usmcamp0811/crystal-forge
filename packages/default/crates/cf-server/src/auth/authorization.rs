@@ -59,6 +59,16 @@ impl RestrictedGrant {
     pub fn token_id(&self) -> Uuid {
         self.token_id
     }
+
+    /// Reports whether the grant contains every scope in `required`.
+    ///
+    /// This checks scope names only, for example to filter an MCP tool list.
+    /// It does not check audience, expiry, environments, or owner state, so it
+    /// MUST NOT authorize a read by itself. Use
+    /// [`CredentialIdentity::reading_environments`] for that decision.
+    pub fn has_scopes(&self, required: &[&str]) -> bool {
+        required.iter().all(|scope| self.scopes.contains(*scope))
+    }
 }
 
 impl CredentialIdentity {

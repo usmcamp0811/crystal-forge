@@ -79,6 +79,8 @@
             cfg.server.accessTokens.defaultLifetimeDays;
           access_tokens_max_lifetime_days =
             cfg.server.accessTokens.maxLifetimeDays;
+          mcp_enable = cfg.server.mcp.enable;
+          mcp_public_url = cfg.server.mcp.publicUrl;
           trusted_proxy_cidrs = cfg.server.trustedProxyCidrs;
           remote_build_execution_strategy = cfg.build.remote_execution_strategy;
           source_delivery_mode = cfg.build.source_delivery_mode;
@@ -2149,6 +2151,33 @@ in {
         };
       };
 
+      mcp = {
+        enable = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = lib.mdDoc ''
+            Serve the read-only MCP endpoint at `POST /mcp`. Agents
+            authenticate with a static `Authorization: Bearer cfat_v1_...`
+            access token. Requires `accessTokens.enable`. When false, `/mcp`
+            returns 404 and the access-token policy reports MCP as disabled.
+          '';
+        };
+
+        publicUrl = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "https://crystal-forge.example.com/mcp";
+          description = lib.mdDoc ''
+            Absolute public URL of the MCP endpoint, shown in the token reveal
+            and the Admin Server tab. Must use `https://`, or `http://` only
+            for `localhost`, `127.0.0.1` or `::1`. No query, fragment or
+            userinfo. A request with an `Origin` header is accepted only when
+            the header equals the origin of this URL; when the URL is unset,
+            every request with an `Origin` header is rejected.
+          '';
+        };
+      };
+
       trustedProxyCidrs = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [];
@@ -3239,6 +3268,10 @@ in {
           cfg.server.accessTokens.defaultLifetimeDays
           <= cfg.server.accessTokens.maxLifetimeDays;
         message = "services.crystal-forge.server.accessTokens.defaultLifetimeDays must not exceed maxLifetimeDays";
+      }
+      {
+        assertion = cfg.server.mcp.enable -> cfg.server.accessTokens.enable;
+        message = "services.crystal-forge.server.mcp.enable requires services.crystal-forge.server.accessTokens.enable, because MCP authenticates only with access tokens";
       }
       {
         assertion = cfg.client.enable -> (cfg.client.private_key != null);

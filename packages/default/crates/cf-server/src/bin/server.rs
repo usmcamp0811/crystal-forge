@@ -30,6 +30,7 @@ use crystal_forge::{
         status,
         webhook::webhook_handler,
     },
+    mcp,
     queries::attention::dedupe_open_occurrences,
     queries::cache_destinations::encrypt_plaintext_cache_secrets,
     queries::derivations::reset_non_terminal_derivations,
@@ -443,6 +444,15 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/user/access-tokens/:id/rotate",
             post(access_tokens::rotate_access_token),
+        )
+        // Read-only MCP endpoint (TASK-534.4). Bearer access token only; the
+        // handler answers 404 while `mcp_enable` is false.
+        .route(
+            "/mcp",
+            post(mcp::handle)
+                .get(mcp::method_not_allowed)
+                .delete(mcp::method_not_allowed)
+                .layer(DefaultBodyLimit::max(mcp::MAX_BODY_BYTES)),
         )
         .route("/api/v1/cves", get(cves::list_cves))
         .route("/api/v1/cves/grouped", get(cves::list_cves_grouped))
@@ -1183,6 +1193,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/admin/audit-events", get(admin::list_audit_events))
         .route("/api/v1/admin/server-info", get(admin::server_runtime_info))
+        .route("/api/v1/admin/mcp/status", get(admin::mcp_status))
         .route(
             "/api/v1/admin/classification-config",
             get(admin::get_classification_config).put(admin::update_classification_config),
