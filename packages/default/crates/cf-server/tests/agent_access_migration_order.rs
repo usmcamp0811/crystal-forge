@@ -102,6 +102,75 @@ async fn planning_migration_applied_before_compliance_scopes(pool: PgPool) {
     upgrade_and_assert_final_state(&pool).await;
 }
 
+/// The same predecessor with a `poams:create` grant, as on the development
+/// server. 0343 cannot add its 13-scope CHECK while that row exists, so the
+/// startup migrator stops before 0348. The documented operator step removes
+/// only the grant row; the token, its other grants and its history remain.
+/// The upgrade then completes and the new allowlist accepts the scope again.
+#[sqlx::test(migrations = false)]
+async fn planning_grant_requires_operator_step_before_compliance_scopes(pool: PgPool) {
+    let mut deployed = versions_through(342);
+    deployed.push(346);
+    apply_in_order(&pool, deployed).await;
+    let token: uuid::Uuid = sqlx::query_scalar(
+        "WITH owner AS (
+             INSERT INTO users (username, email, first_name, last_name)
+             VALUES ('order-owner', 'order-owner@example.invalid', 'Order', 'Owner')
+             RETURNING id)
+         INSERT INTO api_access_tokens
+             (user_id, name, audience, secret_hash, display_hint, expires_at)
+         SELECT id, 'planning', 'mcp', sha256('order-token'::bytea), 'cfat_v1_order',
+                now() + interval '30 days'
+         FROM owner RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO api_access_token_scopes (token_id, scope)
+         VALUES ($1, 'cves:read'), ($1, 'poams:create')",
+    )
+    .bind(token)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let blocked = MIGRATOR.run(&pool).await;
+    assert!(
+        blocked.is_err(),
+        "0343 rejects the existing poams:create row"
+    );
+    let applied_0343: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = 343)")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!applied_0343, "the failed 0343 transaction records nothing");
+
+    // Operator step from the TASK-534.9 record.
+    sqlx::query("DELETE FROM api_access_token_scopes WHERE scope = 'poams:create'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    upgrade_and_assert_final_state(&pool).await;
+
+    let scopes: Vec<String> = sqlx::query_scalar(
+        "SELECT scope FROM api_access_token_scopes WHERE token_id = $1 ORDER BY scope",
+    )
+    .bind(token)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(scopes, ["cves:read"]);
+    sqlx::query(
+        "INSERT INTO api_access_token_scopes (token_id, scope) VALUES ($1, 'poams:create')",
+    )
+    .bind(token)
+    .execute(&pool)
+    .await
+    .unwrap();
+}
+
 /// A database that ran TASK-534.9 on the TASK-534.6 base (0343, then 0346).
 #[sqlx::test(migrations = false)]
 async fn planning_migration_applied_before_authoring_migrations(pool: PgPool) {
