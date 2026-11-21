@@ -37,8 +37,10 @@ TASK-534 tracks delivery, TASK-534.1 tracks this knowledge/design handoff, and
 TASK-534.2 tracks the M0 security prerequisites. M0 authorization and OIDC source
 groundwork is implemented for review. TASK-534.3 adds the owner slice of M1
 (token issue, list, inspect, rotate, revoke and the Profile card) on top of it;
-see [owner access token service](access-token-service.md). The MCP transport,
-the Admin token tab and the Connect agent shortcut remain unimplemented. No
+see [owner access token service](access-token-service.md). TASK-534.4 adds the
+M2 read-only MCP server; see [MCP server](mcp-server.md). It is implemented
+and unverified. The Admin token tab, the Access Inspector and the Connect agent
+shortcut remain unimplemented. No
 milestone is marked complete by this progress note. See
 [credential grant groundwork](credential-grant-groundwork.md) and
 [OIDC ownership](oidc-entitlement-ownership.md) for implemented boundaries,
@@ -792,7 +794,8 @@ Implementation rule: do not mark any milestone complete until all its requiremen
 | Sections 4.2–4.4, 5.3, 15.1–15.2, M0 | TASK-534.2 | Real transaction, role/membership, OIDC fixtures and isolation tests; unimplemented |
 | Sections 3, 5–8, 10.1–10.4, 10.9, M1 owner slice | TASK-534.3 | Local/OIDC Operator owner workflow, session+CSRF, lifecycle, redaction, DB and UI tests; implemented, farm evidence pending for the head |
 | Sections 10.1.1, 10.5, M1 admin and shortcut parts | TASK-534 / M1 | Connect agent shortcut and Admin oversight tab; unimplemented |
-| Sections 4.1, 9, 10.6–10.7, 11, 15.3, M2 | TASK-534 / M2 | Independent MCP client, scoped reads, inspector parity, NixOS and protocol checks; unimplemented |
+| Sections 4.1, 9, 10.6, 11, 15.3, M2 | TASK-534.4 | Independent MCP client, scoped reads, NixOS and protocol checks; transport, four read tools, NixOS options, Admin status endpoint and card implemented in TASK-534.4 ([MCP server](mcp-server.md)); unverified: no build, test or client-interoperability result recorded yet |
+| Section 10.7 (Access Inspector) | TASK-534 / M1 admin | Inspector parity; unimplemented |
 | Sections 10.8, 12–13, M3 | TASK-534 / TASK-271 | Shared authorized provenance, evidence confidence and additive visual parity; unimplemented |
 | Sections 7, 9.4, 14, M4 | TASK-534 / M4 | Explicit policy, all-subject authority, races, revision/idempotency, audits; gated, not released |
 | Sections 3.2, 4.1, 7, M5 | TASK-534 / M5 | Independent CLI audience/service principal schema and enforcement tests; future work |

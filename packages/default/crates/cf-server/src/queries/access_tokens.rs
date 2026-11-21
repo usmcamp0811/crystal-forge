@@ -754,3 +754,20 @@ where
     .await?;
     Ok(result.rows_affected() == 1)
 }
+
+/// Counts non-revoked, unexpired tokens across all owners, for the Admin MCP
+/// status card. Owner suspension does not change the count.
+///
+/// # Errors
+/// Returns database errors.
+pub async fn count_live_tokens<'e, E>(executor: E) -> Result<i64>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM api_access_tokens
+         WHERE revoked_at IS NULL AND expires_at > clock_timestamp()",
+    )
+    .fetch_one(executor)
+    .await?)
+}

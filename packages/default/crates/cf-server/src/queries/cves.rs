@@ -1553,6 +1553,172 @@ pub async fn fetch_exact_system_vulnerabilities(
     Ok(rows)
 }
 
+/// Contains one current exact CVE occurrence on one system.
+///
+/// Each row comes from `view_current_exact_cve_occurrences`, which holds one
+/// deterministic occurrence per system, canonical CVE, and canonical package
+/// from the newest completed schema-1 scan of the system's running output.
+#[derive(Debug, sqlx::FromRow)]
+pub struct WorkItemRow {
+    /// Identifies the affected system.
+    pub system_id: Uuid,
+    /// Gives the system hostname.
+    pub hostname: String,
+    /// Identifies the system's current environment.
+    pub environment_id: Uuid,
+    /// Gives the current environment name for display.
+    pub environment_name: String,
+    /// Identifies the scan that supplied the occurrence.
+    pub scan_id: Uuid,
+    /// Gives the scan completion time.
+    pub scan_completed_at: DateTime<Utc>,
+    /// Gives the canonical CVE identifier.
+    pub cve_id: String,
+    /// Gives the canonical package name.
+    pub package_name: String,
+    /// Gives the package version observed by the scan.
+    pub installed_version: String,
+    /// Gives the exact package derivation path observed by the scan.
+    pub observed_derivation_path: String,
+    /// Gives the known fixed version for this package derivation, if any.
+    pub fixed_version: Option<String>,
+    /// Gives `critical`, `high`, `medium`, `low`, or `unknown` from CVSS v3.
+    pub severity: String,
+}
+
+/// Lists one keyset page of current exact CVE occurrences in the listed
+/// environments.
+///
+/// Rows are ordered by canonical CVE, canonical package (both `COLLATE "C"`),
+/// then system ID. `after` is the last key of the previous page in that order.
+/// `severities` holds lowercase severity names; an empty slice applies no
+/// severity filter. Severity uses the same `severity_from_cvss` expression as
+/// the Fleet and System CVE inventories. The query returns at most `limit`
+/// rows; callers request one extra row to detect another page.
+///
+/// SECURITY: An empty `environment_ids` slice returns no rows. It never means
+/// all environments. Callers must pass only environments that the request is
+/// authorized to read.
+///
+/// # Errors
+///
+/// Returns a database error when the page cannot be loaded.
+pub async fn list_current_exact_work_items(
+    pool: &PgPool,
+    environment_ids: &[Uuid],
+    severities: &[String],
+    after: Option<(&str, &str, Uuid)>,
+    limit: i64,
+) -> Result<Vec<WorkItemRow>> {
+    if environment_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // PERFORMANCE: The fixed-version lookup runs only for the page rows.
+    let rows = sqlx::query_as::<_, WorkItemRow>(
+        r#"WITH page AS (
+             SELECT occurrence.system_id,system.hostname,occurrence.environment_id,
+                    environment.name::text AS environment_name,occurrence.scan_id,
+                    occurrence.completed_at AS scan_completed_at,occurrence.cve_id::text AS cve_id,
+                    occurrence.package_name,occurrence.installed_version,
+                    occurrence.observed_derivation_path,
+                    lower(severity_from_cvss(cve.cvss_v3_score)) AS severity
+             FROM view_current_exact_cve_occurrences occurrence
+             JOIN systems system ON system.id=occurrence.system_id
+             JOIN environments environment ON environment.id=occurrence.environment_id
+             JOIN cves cve ON cve.id=occurrence.cve_id
+             WHERE occurrence.environment_id=ANY($1)
+               AND (cardinality($2::text[])=0
+                    OR lower(severity_from_cvss(cve.cvss_v3_score))=ANY($2::text[]))
+               AND ($3::text IS NULL OR
+                    (occurrence.cve_id::text COLLATE "C",occurrence.package_name COLLATE "C",
+                     occurrence.system_id) >
+                    ($3::text COLLATE "C",$4::text COLLATE "C",$5::uuid))
+             ORDER BY occurrence.cve_id::text COLLATE "C",occurrence.package_name COLLATE "C",
+                      occurrence.system_id
+             LIMIT $6
+           )
+           SELECT page.*,package_metadata.fixed_version::text AS fixed_version
+           FROM page
+           LEFT JOIN LATERAL (
+             SELECT vulnerability.fixed_version
+             FROM derivations package_derivation
+             JOIN package_vulnerabilities vulnerability
+               ON vulnerability.derivation_id=package_derivation.id
+              AND vulnerability.cve_id=page.cve_id
+             WHERE package_derivation.derivation_path=page.observed_derivation_path
+             ORDER BY package_derivation.id DESC LIMIT 1
+           ) package_metadata ON true
+           ORDER BY page.cve_id COLLATE "C",page.package_name COLLATE "C",page.system_id"#,
+    )
+    .bind(environment_ids)
+    .bind(severities)
+    .bind(after.map(|key| key.0))
+    .bind(after.map(|key| key.1))
+    .bind(after.map(|key| key.2))
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Describes the current CVE authority target of one system.
+///
+/// The values come from `view_current_cve_authority`: the latest consistent
+/// running report, its unique NixOS derivation, and that derivation's newest
+/// completed schema-1 scan. Flake repository URLs are never selected because
+/// they can embed credentials.
+#[derive(Debug, sqlx::FromRow)]
+pub struct CurrentCveAuthorityTarget {
+    /// Identifies the authoritative scan.
+    pub scan_id: Uuid,
+    /// Gives the scan completion time.
+    pub scan_completed_at: DateTime<Utc>,
+    /// Gives the scanner name recorded at completion.
+    pub scanner_name: String,
+    /// Gives the scanner version when recorded.
+    pub scanner_version: Option<String>,
+    /// Gives the generation from the latest running report.
+    pub generation: Option<i32>,
+    /// Gives the running system store path from the latest report.
+    pub store_path: Option<String>,
+    /// Gives the scanned NixOS derivation path when recorded.
+    pub derivation_path: Option<String>,
+    /// Gives the full commit hash of the scanned derivation's source commit.
+    pub commit_hash: Option<String>,
+}
+
+/// Returns the current CVE authority target of one system, if one exists.
+///
+/// The caller must authorize the system before this call. `None` means the
+/// system has no current exact CVE authority.
+///
+/// # Errors
+///
+/// Returns a database error when the target cannot be loaded.
+pub async fn fetch_current_cve_authority_target(
+    pool: &PgPool,
+    system_id: Uuid,
+) -> Result<Option<CurrentCveAuthorityTarget>> {
+    let row = sqlx::query_as::<_, CurrentCveAuthorityTarget>(
+        r#"SELECT authority.scan_id,authority.scan_completed_at,
+                  authority.scanner_name::text AS scanner_name,
+                  authority.scanner_version::text AS scanner_version,
+                  authority.generation,authority.store_path::text AS store_path,
+                  derivation.derivation_path::text AS derivation_path,
+                  source_commit.git_commit_hash::text AS commit_hash
+           FROM view_current_cve_authority authority
+           LEFT JOIN derivations derivation ON derivation.id=authority.derivation_id
+           LEFT JOIN commits source_commit ON source_commit.id=authority.commit_id
+           WHERE authority.system_id=$1
+           ORDER BY authority.scan_completed_at DESC,authority.scan_id DESC
+           LIMIT 1"#,
+    )
+    .bind(system_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 fn default_cve_fleet_stats() -> CveFleetStats {
     CveFleetStats {
         total_cves: 0,

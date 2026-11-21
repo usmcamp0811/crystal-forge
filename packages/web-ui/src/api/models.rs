@@ -8215,6 +8215,106 @@ pub struct ServerRuntimeInfoResponse {
     pub tls_detail: String,
 }
 
+/// MCP server status displayed in Admin → Server (`GET /admin/mcp/status`).
+///
+/// The server derives every value from its declarative NixOS configuration
+/// and the access-token store. The UI displays the values and never changes
+/// them. Every field except `enabled` uses `#[serde(default)]`, so a server
+/// that omits a field still renders the card; an absent count or lifetime
+/// decodes to `None` and displays as "Not reported", never as zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerStatusResponse {
+    /// `true` when `services.crystal-forge.server.mcp` enables the endpoint.
+    pub enabled: bool,
+    /// Configured external MCP URL. `None` when the deployment does not
+    /// configure one; the UI MUST NOT derive a URL from the browser location.
+    #[serde(default)]
+    pub public_url: Option<String>,
+    /// MCP protocol versions that the server accepts.
+    #[serde(default)]
+    pub protocol_versions: Vec<String>,
+    /// MCP transport, for example `streamable-http`.
+    #[serde(default)]
+    pub transport: String,
+    /// Credential type that the endpoint accepts.
+    #[serde(default)]
+    pub authentication: String,
+    /// User login source of this deployment: `oidc` or `local`.
+    #[serde(default)]
+    pub login_source: String,
+    /// Supported feature phase, for example `read-only`.
+    #[serde(default)]
+    pub phase: String,
+    /// Names of the MCP tools that the server exposes.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// `true` when the server accepts access-token issuance and use.
+    #[serde(default)]
+    pub access_tokens_enabled: bool,
+    /// Longest access-token lifetime the server accepts, in days.
+    #[serde(default)]
+    pub max_token_lifetime_days: Option<u32>,
+    /// Number of active (not revoked, not expired) access tokens.
+    #[serde(default)]
+    pub active_token_count: Option<u64>,
+    /// Security health warnings that apply to the MCP configuration.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[cfg(test)]
+mod mcp_status_dto_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_status_decodes_full_payload() {
+        let status: McpServerStatusResponse = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "public_url": "https://forge.example.com/mcp",
+            "protocol_versions": ["2025-06-18", "2025-03-26"],
+            "transport": "streamable-http",
+            "authentication": "access_token",
+            "login_source": "oidc",
+            "phase": "read-only",
+            "tools": ["list_cves", "get_cve_detail"],
+            "access_tokens_enabled": true,
+            "max_token_lifetime_days": 90,
+            "active_token_count": 3,
+            "warnings": ["public_url uses http"]
+        }))
+        .unwrap();
+        assert!(status.enabled);
+        assert_eq!(
+            status.public_url.as_deref(),
+            Some("https://forge.example.com/mcp")
+        );
+        assert_eq!(status.protocol_versions, ["2025-06-18", "2025-03-26"]);
+        assert_eq!(status.transport, "streamable-http");
+        assert_eq!(status.login_source, "oidc");
+        assert_eq!(status.phase, "read-only");
+        assert_eq!(status.tools, ["list_cves", "get_cve_detail"]);
+        assert!(status.access_tokens_enabled);
+        assert_eq!(status.max_token_lifetime_days, Some(90));
+        assert_eq!(status.active_token_count, Some(3));
+        assert_eq!(status.warnings, ["public_url uses http"]);
+    }
+
+    #[test]
+    fn mcp_status_decodes_minimal_payload_with_defaults() {
+        let status: McpServerStatusResponse =
+            serde_json::from_value(serde_json::json!({"enabled": false, "public_url": null}))
+                .unwrap();
+        assert!(!status.enabled);
+        assert_eq!(status.public_url, None);
+        assert!(status.protocol_versions.is_empty());
+        assert!(status.transport.is_empty() && status.phase.is_empty());
+        assert!(status.tools.is_empty() && status.warnings.is_empty());
+        assert!(!status.access_tokens_enabled);
+        assert_eq!(status.max_token_lifetime_days, None);
+        assert_eq!(status.active_token_count, None);
+    }
+}
+
 /// Persisted classification banner configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClassificationBannerConfig {

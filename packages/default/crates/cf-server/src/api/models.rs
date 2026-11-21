@@ -5518,12 +5518,13 @@ pub struct AccessTokenListDto {
     pub next_offset: Option<i64>,
 }
 
-/// Describes the MCP consumer; always disabled until the MCP milestone.
+/// Describes the MCP consumer of access tokens.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessTokenMcpDto {
-    /// `false` until MCP ships.
+    /// Mirrors `mcp_enable`: `true` when the server serves `POST /mcp`.
     pub enabled: bool,
-    /// Public MCP URL, or `null` when not configured.
+    /// Configured `mcp_public_url`, or `null` when MCP is disabled or the URL
+    /// is not configured.
     pub url: Option<String>,
 }
 
@@ -6288,6 +6289,41 @@ pub struct ServerRuntimeInfoResponse {
     pub oidc_issuer_url: Option<String>,
     pub tls_status: String,
     pub tls_detail: String,
+}
+
+/// MCP server status displayed in Admin → Server
+/// (`GET /api/v1/admin/mcp/status`).
+///
+/// Every value comes from the declarative server configuration, constants of
+/// [`crate::mcp`] and the access-token store. The endpoint never infers a URL
+/// from request headers and reports no secret.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerStatusResponse {
+    /// Mirrors `mcp_enable`.
+    pub enabled: bool,
+    /// Configured `mcp_public_url`, or `null` when not set.
+    pub public_url: Option<String>,
+    /// Accepted MCP protocol versions, preferred first.
+    pub protocol_versions: Vec<String>,
+    /// Transport description.
+    pub transport: String,
+    /// Credential type that `/mcp` accepts.
+    pub authentication: String,
+    /// The server's `auth_mode`: how owners sign in (`oidc` or `local`).
+    pub login_source: String,
+    /// Feature phase; `read-only` in this release.
+    pub phase: String,
+    /// Names of the tools this release implements. A token sees only the
+    /// tools its scopes allow.
+    pub tools: Vec<String>,
+    /// Mirrors `access_tokens_enable`.
+    pub access_tokens_enabled: bool,
+    /// Mirrors `access_tokens_max_lifetime_days`.
+    pub max_token_lifetime_days: u32,
+    /// Non-revoked, unexpired access tokens across all owners.
+    pub active_token_count: i64,
+    /// Configuration warnings for display; empty when none apply.
+    pub warnings: Vec<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

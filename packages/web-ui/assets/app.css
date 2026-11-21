@@ -9488,3 +9488,13 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
   .cfat-backdrop, .cfat-drawer-backdrop { animation: none; }
   .cfat-spinner { animation: none; }
 }
+
+/* MCP server card (Admin -> Server). Reuses .card, .kv-grid, .chip and
+   .sd-callout; only the wrapping values below are specific to this card. */
+.mcp-kv dd { white-space: normal; overflow: visible; }
+.mcp-url-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mcp-url { font-size: 11px; word-break: break-all; }
+.mcp-tools { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.mcp-tools .chip { font-size: 10.5px; }
+.mcp-live { min-height: 14px; margin-top: 8px; font-size: 11px; color: var(--cf-emerald); }
+.mcp-live-error { color: #f87171; }
