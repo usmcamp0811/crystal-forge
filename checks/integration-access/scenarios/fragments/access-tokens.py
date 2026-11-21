@@ -357,6 +357,9 @@ with case("access-token-rejects-unassigned-environment-missing-csrf-and-viewer-w
         expect_equal(listed[0]["available"], False, scope + " is unavailable to the Viewer")
         expect(isinstance(listed[0]["unavailable_reason"], str) and listed[0]["unavailable_reason"],
                scope + " has a stated reason")
+    for scope in at_facts["writeScopes"]:
+        reason = [s["unavailable_reason"] for s in policy["scopes"] if s["scope"] == scope]
+        expect_equal(reason, ["Requires Operator"], scope + " requires Operator for the Viewer")
     status, body = at_create("viewer", at_facts["deniedToken"], [at_env_id],
                              at_facts["readScopes"] + ["scans:request"])
     expect_equal(status, 400, "Viewer create with scans:request")

@@ -227,8 +227,9 @@ in
         browserToken = "cf-it-browser-token";
         lifetimeDays = 30;
         readScopes = ["cves:read" "poams:read" "provenance:read"];
-        # TASK-534.5 released the write scopes for Operator and Admin owners.
-        writeScopes = ["scans:request" "poams:write" "poams:verify"];
+        # TASK-534.5 released the write scopes for Operator and Admin owners;
+        # TASK-534.9 adds poams:create with the same role rule.
+        writeScopes = ["scans:request" "poams:create" "poams:write" "poams:verify"];
         # TASK-534.6 compliance scopes.
         optionalReadScopes = ["policies:read" "bundles:read"];
         adminOnlyScopes = ["policies:draft" "policies:import" "bundles:draft"];
