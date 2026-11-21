@@ -953,7 +953,10 @@ mod tests {
         assert_eq!(scope_summary(&read), "Read · 2");
         let mixed = vec!["cves:read".to_string(), "poams:write".to_string()];
         assert_eq!(scope_summary(&mixed), "Read + write · 2");
-        let preview = vec!["policies:read".to_string(), "compliance:preview".to_string()];
+        let preview = vec![
+            "policies:read".to_string(),
+            "compliance:preview".to_string(),
+        ];
         assert_eq!(scope_summary(&preview), "Read · 2");
         assert_eq!(scope_summary(&[]), "None");
     }
