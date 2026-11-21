@@ -1399,7 +1399,11 @@ pub struct ActivityView {
     pub access_token_name: Option<String>,
 }
 
-/// Contains the original configuration scan identity, which is not runtime evidence.
+/// Contains the immutable configuration scan baseline of a planning POA&M.
+///
+/// The baseline is sealed flake HEAD scan evidence. It is not runtime evidence
+/// and never proves what a system runs. The server sends every field; the
+/// field names match `ConfigurationCveFindingView` in cf-server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigurationCveFindingView {
     /// Identifies the system whose configuration was scanned.
@@ -1410,6 +1414,21 @@ pub struct ConfigurationCveFindingView {
     pub canonical_package_name: String,
     /// Identifies the original configuration scan recorded for planning.
     pub baseline_scan_id: Uuid,
+    /// Gives the flake HEAD commit hash at creation.
+    pub baseline_head_commit_hash: String,
+    /// Identifies the configuration derivation at HEAD.
+    pub baseline_configuration_derivation_id: i32,
+    /// Identifies the scan execution derivation, which can differ from the
+    /// HEAD configuration derivation when execution is reused.
+    pub baseline_scan_derivation_id: i32,
+    /// Gives the scan completion time.
+    pub baseline_scan_completed_at: DateTime<Utc>,
+    /// Gives the scanned system output path.
+    pub baseline_scanned_store_path: String,
+    /// Gives the observed package derivation path.
+    pub baseline_occurrence_derivation_path: String,
+    /// Gives the observed package version.
+    pub baseline_observed_package_version: String,
 }
 
 /// Contains one POA&M and independently paginated related history.
@@ -3023,12 +3042,23 @@ mod tests {
 
         let system = Uuid::from_u128(2);
         let scan = Uuid::from_u128(3);
+        // The full server shape, including fields that the UI ignores.
         payload["configuration_cve_finding"] = serde_json::json!({
+            "cve_finding_id": Uuid::from_u128(4),
             "system_id": system,
             "canonical_cve_id": "CVE-2026-1234",
             "canonical_package_name": "fixture-package",
+            "baseline_head_commit_id": 42,
+            "baseline_head_commit_hash": "0123456789abcdef0123456789abcdef01234567",
+            "baseline_configuration_derivation_id": 7,
             "baseline_scan_id": scan,
-            "baseline_head_commit_id": 42
+            "baseline_scan_derivation_id": 8,
+            "baseline_scan_commit_id": 41,
+            "baseline_scan_commit_hash": "fedcba9876543210fedcba9876543210fedcba98",
+            "baseline_scan_completed_at": "2026-11-20T08:30:00Z",
+            "baseline_scanned_store_path": "/nix/store/aaaa-nixos-system-host",
+            "baseline_occurrence_derivation_path": "/nix/store/bbbb-fixture-package-1.2.3.drv",
+            "baseline_observed_package_version": "1.2.3"
         });
         payload["configuration_planning_only"] = serde_json::json!(true);
         let planning: PoamDetail = serde_json::from_value(payload.clone()).unwrap();
@@ -3040,6 +3070,14 @@ mod tests {
                 canonical_cve_id: "CVE-2026-1234".into(),
                 canonical_package_name: "fixture-package".into(),
                 baseline_scan_id: scan,
+                baseline_head_commit_hash: "0123456789abcdef0123456789abcdef01234567".into(),
+                baseline_configuration_derivation_id: 7,
+                baseline_scan_derivation_id: 8,
+                baseline_scan_completed_at: "2026-11-20T08:30:00Z".parse().unwrap(),
+                baseline_scanned_store_path: "/nix/store/aaaa-nixos-system-host".into(),
+                baseline_occurrence_derivation_path: "/nix/store/bbbb-fixture-package-1.2.3.drv"
+                    .into(),
+                baseline_observed_package_version: "1.2.3".into(),
             })
         );
 
