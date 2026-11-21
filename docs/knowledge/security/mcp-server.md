@@ -384,9 +384,13 @@ The configuration baseline remains in `configuration_cve_finding` in the
 detail response. Detail and register summaries expose `configuration_planning_only`
 and count the planning relationship in `cve_finding_count` only until handoff.
 The POA&M UI labels the configuration scan as runtime unverified before handoff
-and as historical afterward. It keeps notes and milestones available under the
-usual permissions but hides entry to verification, verify, and close while the
-plan is configuration-only. Existing runtime verification and closure rules
+and as historical afterward. The baseline row shows the HEAD commit, the
+observed package version and the scan completion time. A `Baseline provenance`
+disclosure lists the scanned system store path, the occurrence derivation path,
+the scan derivation ID and the configuration derivation ID. The UI keeps notes
+and milestones available under the usual permissions but hides entry to
+verification, verify, and close, and disables `Link finding`, while the plan is
+configuration-only. Existing runtime verification, linking and closure rules
 still apply after handoff.
 
 Full-or-not-found POA&M rule: `get_poam_detail` returns a POA&M only when every
@@ -468,7 +472,8 @@ loses Admin. See [owner access token service](access-token-service.md#scope-cata
 ## Write tools
 
 Write capability belongs to the token. An Operator or Admin owner selects
-`scans:request`, `poams:write` or `poams:verify` when creating the token; a
+`scans:request`, `poams:create`, `poams:write` or `poams:verify` when creating
+the token; a
 Viewer owner cannot. A token that combines a write scope with a production
 environment needs an explicit production confirmation at creation. The Web UI
 confirmation names the selected write capabilities and production
@@ -482,6 +487,7 @@ scope, the write tool does not appear in `tools/list` and a call gives
 | --- | --- | --- | --- | --- |
 | `request_cve_scan` | `scans:request` | `system_id`, `expected_derivation_id` (both required) | `status: accepted`, `scan_id`, `derivation_id`, `configuration_derivation_id`, `note` | Uses the browser scan admission with the token. A changed target gives `invalid_arguments` `scan_target_changed`; an ineligible system `scan_ineligible`; no executor `scan_executor_unavailable`. A repeated request returns the scan already active for the target. Acceptance is not a result. |
 | `get_scan_result` | `cves:read` | `system_id`, `scan_id` | Scan status, timestamps, counts and scanner | The scan must be the system's current evidence scan or a scan of its current target or execution source; otherwise `not_found`. |
+| `create_cve_poam` | `poams:create` | `system_id`, `cve_id`, `canonical_package_name`, `expected_scan_id`, `title`; optional `plan` | `poam_id`, `created`, `revision`, `status`, `evidence_kind`, `baseline_scan_id` | See [Configuration-based CVE planning](#configuration-based-cve-planning). |
 | `update_poam_progress` | `poams:write` | `poam_id`, `revision`, `action` (one of `add_note`, `set_status`, `add_milestone`, `update_milestone`, `remove_milestone`, tagged by `type`) | `poam_id`, new `revision`, `status`, `changed` | Status can never become `completed`. Risk, title, plan, owner, assignee, target date, finding links, waivers, closure and reopening cannot change. A stale revision gives `invalid_arguments` `stale_revision`. |
 | `verify_poam` | `poams:verify` | `poam_id`, `revision` | `attempt_id`, `outcome` (`accepted` or `rejected`), `revision`, `items`, `cve_items` | The POA&M must be awaiting verification. Never closes it. |
 
