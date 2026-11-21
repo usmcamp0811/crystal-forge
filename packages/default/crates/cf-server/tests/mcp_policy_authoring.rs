@@ -1557,6 +1557,7 @@ async fn http_offers_no_trust_publish_or_assign_tool_and_audits_denials(pool: Pg
         "policies:draft",
         "policies:import",
         "bundles:read",
+        "bundles:draft",
         "compliance:preview",
     ];
     let token = issue(&pool, owner, &every_scope).await;

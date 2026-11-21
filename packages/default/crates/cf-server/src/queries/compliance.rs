@@ -20,6 +20,7 @@ use crate::compliance::resolver::{
 };
 use crate::models::poam::{FindingObservationReference, FindingObservationSource};
 use crate::queries::deletion::{blocker, eligibility};
+use crate::services::policy_authoring::{AuthoringActor, insert_policy_audit_event};
 
 pub async fn list_grouping_schemes(pool: &PgPool) -> Result<Vec<ComplianceGroupingScheme>> {
     let rows: Vec<(Uuid, String, Option<String>, Value, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
@@ -1373,6 +1374,8 @@ pub async fn list_bundles_in_tx(
             i64,
             i64,
             i64,
+            bool,
+            Option<String>,
         ),
     >(
         r#"
@@ -1380,7 +1383,8 @@ pub async fn list_bundles_in_tx(
                v.semantic_digest, v.created_at, v.published_at, v.derived_from_version_id,
                 COUNT(DISTINCT cbvp.policy_version_id)::bigint AS policy_count,
                 COUNT(DISTINCT bvr.requirement_version_id)::bigint AS requirement_count,
-                COUNT(DISTINCT cbvp.policy_version_id)::bigint AS control_count
+                COUNT(DISTINCT cbvp.policy_version_id)::bigint AS control_count,
+                v.created_via_agent, v.created_access_token_name
         FROM compliance_bundle_versions v
         LEFT JOIN compliance_bundle_version_policies cbvp ON cbvp.bundle_version_id = v.id
         LEFT JOIN compliance_bundle_version_requirements bvr ON bvr.bundle_version_id = v.id
@@ -1412,6 +1416,8 @@ pub async fn list_bundles_in_tx(
                 control_count: row.11,
                 is_current_published: bundle.current_published_version_id == Some(row.0),
                 is_current_draft: bundle.current_draft_version_id == Some(row.0),
+                created_via_agent: row.12,
+                created_access_token_name: row.13.clone(),
             })
             .collect();
     }
@@ -1427,10 +1433,77 @@ pub async fn list_bundles_in_tx(
     Ok(bundles)
 }
 
+/// Creates a bundle lineage with its initial draft version for the browser
+/// route `POST /api/v1/compliance/bundles`.
+///
+/// Validates the request (name, framework, a non-empty baseline, unique
+/// requirement versions), creates the lineage through
+/// [`create_bundle_in_tx`] and, when `actor_id` is given, records the actor
+/// as `created_by` of the draft and writes the `bundle_draft_created` audit
+/// event in the same transaction (TASK-534.8). Policy lineages in
+/// `request.policy_ids` join through the lineage membership trigger, which
+/// selects each lineage's current draft or published version.
+///
+/// # Errors
+///
+/// Returns a [`BundleValidationError`] for invalid input and a database error
+/// when a write fails; nothing is written in either case.
 pub async fn create_bundle(
     pool: &PgPool,
     request: CreateComplianceBundleRequest,
+    actor_id: Option<Uuid>,
 ) -> Result<ComplianceBundleSummary> {
+    validate_bundle_request(
+        request.name.trim(),
+        request.framework.trim(),
+        &request.policy_ids,
+        &request.requirement_version_ids,
+    )?;
+
+    let mut tx = pool.begin().await?;
+    let (bundle_id, draft_version_id) = create_bundle_in_tx(&mut tx, &request, actor_id).await?;
+    if let Some(user_id) = actor_id {
+        insert_policy_audit_event(
+            &mut tx,
+            &AuthoringActor::browser(user_id),
+            "bundle_draft_created",
+            &draft_version_id.to_string(),
+            &serde_json::json!({
+                "operation": "new_lineage",
+                "bundle_id": bundle_id,
+                "version_id": draft_version_id,
+            }),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+
+    find_bundle(pool, bundle_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Created bundle was not found"))
+}
+
+/// Creates a bundle lineage and its initial draft version inside the
+/// caller's transaction and returns `(bundle_id, draft_version_id)`.
+///
+/// The lineage insert creates the draft through `sync_bundle_draft_version`.
+/// `created_by`, when given, becomes the draft's `created_by`. Lineage policy
+/// membership, environment links and requirement membership follow the
+/// request, and the bundle, requirement and assignment digests are written
+/// before return. The function validates that requirement versions exist but
+/// not the request shape; [`create_bundle`] does that for the browser, and
+/// the MCP service validates its own input. The caller commits.
+///
+/// # Errors
+///
+/// Returns [`BundleValidationError::RequirementNotFound`] for an unknown
+/// requirement version, and a database error when a write fails, for
+/// example a used lineage name.
+pub async fn create_bundle_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    request: &CreateComplianceBundleRequest,
+    created_by: Option<Uuid>,
+) -> Result<(Uuid, Uuid)> {
     let name = request.name.trim();
     let framework = request.framework.trim();
     let version = request.version.as_deref().unwrap_or("").trim();
@@ -1441,15 +1514,7 @@ pub async fn create_bundle(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    validate_bundle_request(
-        name,
-        framework,
-        &request.policy_ids,
-        &request.requirement_version_ids,
-    )?;
-
-    let mut tx = pool.begin().await?;
-    validate_requirement_versions(&mut tx, &request.requirement_version_ids).await?;
+    validate_requirement_versions(tx, &request.requirement_version_ids).await?;
 
     // 1. Insert the lineage row. The sync trigger fires AFTER INSERT and creates
     //    the initial draft version row + sets current_draft_version_id.
@@ -1465,13 +1530,28 @@ pub async fn create_bundle(
     .bind(version)
     .bind(description)
     .bind(if layer.is_empty() { "fleet" } else { layer })
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
+
+    // The draft is the creator's own draft: MCP draft tools edit only drafts
+    // whose `created_by` is the token owner.
+    if let Some(user_id) = created_by {
+        sqlx::query(
+            r#"
+            UPDATE compliance_bundle_versions SET created_by = $2
+            WHERE id = (SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1)
+            "#,
+        )
+        .bind(bundle_id)
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await?;
+    }
 
     // 2. Insert policy and environment membership. The membership trigger
     //    (trigger_sync_bundle_version_membership) maintains bundle_version_policies
     //    automatically.
-    for policy_id in request.policy_ids {
+    for policy_id in &request.policy_ids {
         sqlx::query(
             r#"
             INSERT INTO compliance_bundle_policies (bundle_id, policy_id)
@@ -1481,11 +1561,11 @@ pub async fn create_bundle(
         )
         .bind(bundle_id)
         .bind(policy_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
 
-    for environment_id in request.required_envs {
+    for environment_id in &request.required_envs {
         sqlx::query(
             r#"
             INSERT INTO compliance_bundle_environments (bundle_id, environment_id)
@@ -1495,7 +1575,7 @@ pub async fn create_bundle(
         )
         .bind(bundle_id)
         .bind(environment_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
 
@@ -1509,10 +1589,10 @@ pub async fn create_bundle(
             "#,
     )
     .bind(bundle_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
 
-    let members = load_bundle_membership(&mut tx, draft_version_id).await?;
+    let members = load_bundle_membership(tx, draft_version_id).await?;
 
     for (requirement_order, requirement_version_id) in
         request.requirement_version_ids.iter().enumerate()
@@ -1527,7 +1607,7 @@ pub async fn create_bundle(
         .bind(draft_version_id)
         .bind(requirement_version_id)
         .bind(requirement_order as i32)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
 
@@ -1549,8 +1629,8 @@ pub async fn create_bundle(
         owner: stored_owner,
         members,
     };
-    write_bundle_version_digest(&mut tx, bundle_id, &canonical).await?;
-    refresh_bundle_requirement_digest(&mut tx, draft_version_id).await?;
+    write_bundle_version_digest(tx, bundle_id, &canonical).await?;
+    refresh_bundle_requirement_digest(tx, draft_version_id).await?;
 
     // Refresh any explicit assignment overlays that already target this draft.
     // Environment membership does not create authoritative assignments.
@@ -1563,18 +1643,14 @@ pub async fn create_bundle(
         "#,
     )
     .bind(draft_version_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
 
     for assignment_id in assignment_ids {
-        write_assignment_effective_set_digest(&mut tx, assignment_id).await?;
+        write_assignment_effective_set_digest(tx, assignment_id).await?;
     }
 
-    tx.commit().await?;
-
-    find_bundle(pool, bundle_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Created bundle was not found"))
+    Ok((bundle_id, draft_version_id))
 }
 
 /// Returns catalog metadata for one bundle, or `None` if it does not exist.
@@ -1964,6 +2040,22 @@ pub async fn update_bundle(
 
     for assignment_id in assignment_ids {
         write_assignment_effective_set_digest(&mut tx, assignment_id).await?;
+    }
+
+    // TASK-534.8: browser bundle edits are audited with the editing user.
+    if let Some(user_id) = actor_id {
+        insert_policy_audit_event(
+            &mut tx,
+            &AuthoringActor::browser(user_id),
+            "bundle_draft_updated",
+            &draft_version_id.to_string(),
+            &serde_json::json!({
+                "operation": "browser_update",
+                "bundle_id": bundle_id,
+                "version_id": draft_version_id,
+            }),
+        )
+        .await?;
     }
 
     tx.commit().await?;
@@ -5737,6 +5829,7 @@ mod tests {
                 policy_ids: vec![],
                 requirement_version_ids: requirement_ids.clone(),
             },
+            None,
         )
         .await
         .unwrap();
@@ -5973,6 +6066,7 @@ mod tests {
                 policy_ids: vec![],
                 requirement_version_ids: vec![requirement_ids[0], requirement_ids[0]],
             },
+            None,
         )
         .await;
         assert!(duplicate.is_err());
@@ -5988,6 +6082,7 @@ mod tests {
                 policy_ids: vec![],
                 requirement_version_ids: vec![Uuid::new_v4()],
             },
+            None,
         )
         .await;
         assert!(missing.is_err());

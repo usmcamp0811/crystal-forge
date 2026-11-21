@@ -222,6 +222,11 @@ pub struct BundleHeaderProps {
     /// bundle lineage's current published or draft version.
     #[props(default)]
     pub selected_version: Option<String>,
+    /// Shows "via agent token <name>" when an owner access token created the
+    /// displayed version through MCP (TASK-534.8); `None` for browser-created
+    /// versions.
+    #[props(default)]
+    pub agent_attribution: Option<String>,
     /// When false the Edit button is hidden — non-admin users get a read-only view.
     #[props(default = false)]
     pub is_admin: bool,
@@ -258,6 +263,13 @@ pub fn BundleHeader(props: BundleHeaderProps) -> Element {
                         span { class: "chip chip-info", "{framework}" }
                         span { class: "chip chip-unknown", "{version}" }
                         span { class: "chip chip-unknown", "{layer}" }
+                        if let Some(agent) = props.agent_attribution.as_deref() {
+                            span {
+                                "data-testid": "compliance-bundle-agent-attribution",
+                                style: "font-size:11px;color:var(--cf-text-muted);",
+                                "{agent}"
+                            }
+                        }
                         if !owner.trim().is_empty() {
                             span { style: "font-size:11px;color:var(--cf-text-muted);",
                                 "Owned by " span { class: "mono", "{owner}" }

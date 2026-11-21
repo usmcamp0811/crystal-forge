@@ -238,8 +238,9 @@ pub fn source_sha256(bytes: &[u8]) -> String {
 ///
 /// A browser actor passes without a query. For a token actor the owner must
 /// be active and hold Admin, and the token row must be live, owned by the
-/// owner, of audience `mcp`, and hold `scope`.
-async fn authorize_token_tx(
+/// owner, of audience `mcp`, and hold `scope`. The bundle authoring service
+/// (`services::bundle_authoring`) uses the same check with `bundles:draft`.
+pub(crate) async fn authorize_token_tx(
     tx: &mut Transaction<'_, Postgres>,
     actor: &AuthoringActor,
     scope: &'static str,

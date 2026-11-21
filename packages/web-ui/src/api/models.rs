@@ -3234,6 +3234,14 @@ pub struct ComplianceBundleVersionSummary {
     pub is_current_published: bool,
     #[serde(default)]
     pub is_current_draft: bool,
+    /// Reports that an owner access token created this version through MCP.
+    /// Absent in responses from servers before migration 0345.
+    #[serde(default)]
+    pub created_via_agent: bool,
+    /// Token name recorded when the version was created through MCP; `None`
+    /// when the server recorded no name.
+    #[serde(default)]
+    pub created_access_token_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -556,12 +556,22 @@ pub async fn resolve_effective_policy_set(
     tx: &mut Transaction<'_, Postgres>,
     input: &EffectivePolicyResolutionInput,
 ) -> Result<ResolutionOutcome> {
-    resolve_effective_policy_set_with_options(tx, input).await
+    resolve_effective_policy_set_with_options(tx, input, false).await
 }
 
+/// Resolves one assignment set. `candidate_preview` selects the candidate
+/// mode of [`resolve_system_effective_policies_with_candidate_in_tx`].
+///
+/// SECURITY: Candidate mode skips only the admission checks of the bundle
+/// version (`accepted`, computed digest, `trusted`) and of its baseline
+/// members (`accepted` or `deprecated`, trusted when executable). Every other
+/// rule (exclusions, additions, lineage uniqueness, enforce-mode
+/// enforceability, overrides) still applies. Only the read-only impact
+/// preview passes `true`; no assignment, evaluation or deployment path does.
 async fn resolve_effective_policy_set_with_options(
     tx: &mut Transaction<'_, Postgres>,
     input: &EffectivePolicyResolutionInput,
+    candidate_preview: bool,
 ) -> Result<ResolutionOutcome> {
     // ── Step 1: Load bundle version and ordered membership ────────────────────
     let bundle_row = sqlx::query_as::<_, (String, String, String)>(
@@ -584,7 +594,7 @@ async fn resolve_effective_policy_set_with_options(
         }
     };
 
-    if bundle_state != "accepted" {
+    if !candidate_preview && bundle_state != "accepted" {
         return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
             code: "ASSIGNMENT_BUNDLE_NOT_ACCEPTED".to_string(),
             message: format!(
@@ -594,7 +604,7 @@ async fn resolve_effective_policy_set_with_options(
         }]));
     }
 
-    if bundle_digest == "pending" {
+    if !candidate_preview && bundle_digest == "pending" {
         return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
             code: "ASSIGNMENT_BUNDLE_DIGEST_PENDING".to_string(),
             message: format!(
@@ -604,7 +614,7 @@ async fn resolve_effective_policy_set_with_options(
         }]));
     }
 
-    if bundle_trust_state != "trusted" {
+    if !candidate_preview && bundle_trust_state != "trusted" {
         return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
             code: "ASSIGNMENT_BUNDLE_UNTRUSTED".to_string(),
             message: format!("Bundle version {} is not trusted", input.bundle_version_id),
@@ -644,8 +654,12 @@ async fn resolve_effective_policy_set_with_options(
     .await
     .context("load baseline membership")?;
 
-    // Validate every baseline policy is accepted
+    // Validate every baseline policy is accepted. Candidate mode skips this
+    // check; the preview reports draft and untrusted members instead.
     for (pv_id, _, _, pv_state, _, _, implementation_state, trust_state) in &baseline_rows {
+        if candidate_preview {
+            break;
+        }
         if pv_state != "accepted" && pv_state != "deprecated" {
             return Ok(ResolutionOutcome::Conflict(vec![ResolutionConflict {
                 code: "ASSIGNMENT_POLICY_NOT_ACCEPTED".to_string(),
@@ -1181,7 +1195,56 @@ pub async fn resolve_system_effective_policies_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
 ) -> Result<ResolutionOutcome> {
-    resolve_system_effective_policies_with_options_in_tx(tx, system_id, false).await
+    resolve_system_effective_policies_with_options_in_tx(tx, system_id, false, None).await
+}
+
+/// Describes a hypothetical assignment of one bundle version for an impact
+/// preview. It is never persisted.
+#[derive(Debug, Clone)]
+pub struct CandidateAssignment {
+    /// Bundle lineage of `bundle_version_id`.
+    pub bundle_id: Uuid,
+    /// Exact bundle version to assign hypothetically. It may be a draft or
+    /// untrusted version.
+    pub bundle_version_id: Uuid,
+    /// Hypothetical assignment target.
+    pub target: AssignmentTarget,
+    /// Hypothetical enforcement mode.
+    pub assignment_mode: AssignmentMode,
+}
+
+/// Resolves the effective policy set of one system as it would be with an
+/// additional hypothetical assignment (candidate mode).
+///
+/// The function runs the same combined resolution as
+/// [`resolve_system_effective_policies_in_tx`], with one change to its
+/// inputs: `candidate` joins the system's active assignments when its target
+/// is the system or the system's environment. An active assignment of the
+/// same bundle lineage at the same target is left out, because assigning the
+/// candidate there would replace it. A candidate whose target does not apply
+/// to the system changes nothing.
+///
+/// Only the candidate is resolved in candidate mode: its bundle version may
+/// be a draft, have a pending digest or be untrusted, and its members may be
+/// drafts or untrusted. Committed assignments keep every admission check.
+///
+/// # Concurrency
+///
+/// Reads only, through the caller's transaction. The caller owns isolation
+/// and MUST roll the transaction back or commit no writes; this function
+/// never writes.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load policy inputs through the
+/// transaction or persisted policy configuration cannot be decoded.
+pub async fn resolve_system_effective_policies_with_candidate_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+    candidate: &CandidateAssignment,
+) -> Result<ResolutionOutcome> {
+    resolve_system_effective_policies_with_options_in_tx(tx, system_id, false, Some(candidate))
+        .await
 }
 
 /// Resolves complete policy semantics for a deterministic system batch through
@@ -2599,16 +2662,39 @@ async fn resolve_system_effective_policies_with_options(
         &mut tx,
         system_id,
         ignore_non_evaluation_conflicts,
+        None,
     )
     .await?;
     tx.commit().await.context("commit resolution transaction")?;
     Ok(outcome)
 }
 
+/// One assignment that takes part in the combined system resolution.
+/// `assignment_version_id` is `None` only for the preview candidate, which
+/// has no exclusions, additions or overrides.
+struct AssignmentSource {
+    assignment_id: Option<Uuid>,
+    assignment_version_id: Option<Uuid>,
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+    scope_type: String,
+    enforcement_mode: String,
+    candidate: bool,
+}
+
+fn scope_rank(scope_type: &str) -> u8 {
+    match scope_type {
+        "environment" => 1,
+        "system" => 2,
+        _ => 3,
+    }
+}
+
 async fn resolve_system_effective_policies_with_options_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
     ignore_non_evaluation_conflicts: bool,
+    candidate: Option<&CandidateAssignment>,
 ) -> Result<ResolutionOutcome> {
     // Load the system's environment inside the snapshot.
     let env_id: Option<Option<Uuid>> =
@@ -2647,6 +2733,60 @@ async fn resolve_system_effective_policies_with_options_in_tx(
         .fetch_all(&mut **tx)
         .await
         .context("load bundle assignments for system")?;
+
+    // A preview candidate applies when it targets this system or its
+    // environment. It replaces an active assignment of the same bundle
+    // lineage at the same target, because a real assignment there would
+    // replace that lineage's assignment version.
+    let candidate = candidate.filter(|candidate| match candidate.target {
+        AssignmentTarget::System { system_id: target } => target == system_id,
+        AssignmentTarget::Environment { environment_id } => env_id == Some(environment_id),
+    });
+    let mut assignments: Vec<AssignmentSource> = assignments
+        .into_iter()
+        .filter(|(_, _, bundle_id, _, scope_type, _, _)| {
+            candidate.is_none_or(|candidate| {
+                *bundle_id != candidate.bundle_id || scope_type != candidate.target.scope_type()
+            })
+        })
+        .map(
+            |(
+                assignment_id,
+                assignment_version_id,
+                bundle_id,
+                bundle_version_id,
+                scope_type,
+                enforcement_mode,
+                _,
+            )| AssignmentSource {
+                assignment_id: Some(assignment_id),
+                assignment_version_id: Some(assignment_version_id),
+                bundle_id,
+                bundle_version_id,
+                scope_type,
+                enforcement_mode,
+                candidate: false,
+            },
+        )
+        .collect();
+    if let Some(candidate) = candidate {
+        assignments.push(AssignmentSource {
+            assignment_id: None,
+            assignment_version_id: None,
+            bundle_id: candidate.bundle_id,
+            bundle_version_id: candidate.bundle_version_id,
+            scope_type: candidate.target.scope_type().to_string(),
+            enforcement_mode: candidate.assignment_mode.as_str().to_string(),
+            candidate: true,
+        });
+        // INVARIANT: The stable sort keeps the query order (scope, bundle,
+        // assignment ID) of the committed assignments and places the
+        // candidate by scope and bundle lineage, the order of the query.
+        assignments.sort_by(|left, right| {
+            (scope_rank(&left.scope_type), left.bundle_id)
+                .cmp(&(scope_rank(&right.scope_type), right.bundle_id))
+        });
+    }
 
     // Load direct environment policies (in-tx).
     let mut direct_candidates: Vec<(EffectivePolicy, PolicySpecificity)> = Vec::new();
@@ -2760,16 +2900,18 @@ async fn resolve_system_effective_policies_with_options_in_tx(
     let mut bundle_version_ids_ordered: Vec<Uuid> = Vec::new();
 
     // Process bundle assignments first (in scope-order).
-    for (
-        assignment_id,
-        assignment_version_id,
-        bundle_id,
-        bundle_version_id,
-        scope_type,
-        enforcement_mode,
-        _,
-    ) in &assignments
-    {
+    for assignment in &assignments {
+        let AssignmentSource {
+            assignment_id,
+            assignment_version_id,
+            bundle_id,
+            bundle_version_id,
+            scope_type,
+            enforcement_mode,
+            candidate: _,
+        } = assignment;
+        // The candidate has no assignment version: the NULL bind below
+        // matches no exclusion, addition or override row.
         let specificity = if scope_type == "environment" {
             PolicySpecificity::Environment
         } else {
@@ -2831,7 +2973,8 @@ async fn resolve_system_effective_policies_with_options_in_tx(
             specificity,
         };
 
-        let outcome = resolve_effective_policy_set_with_options(tx, &input).await?;
+        let outcome =
+            resolve_effective_policy_set_with_options(tx, &input, assignment.candidate).await?;
 
         match outcome {
             ResolutionOutcome::Resolved(set) => {
@@ -2846,7 +2989,7 @@ async fn resolve_system_effective_policies_with_options_in_tx(
                     let prov = ProvenanceEntry {
                         source: pol.source.clone(),
                         specificity,
-                        assignment_id: Some(*assignment_id),
+                        assignment_id: *assignment_id,
                         bundle_id: Some(*bundle_id),
                         bundle_version_id: Some(*bundle_version_id),
                         scope_type: Some(scope_type.to_string()),

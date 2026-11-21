@@ -99,4 +99,12 @@ Trust, publish, assign, enforcement changes, XCCDF through MCP.
 LOCK: OpenCode on vm-agent in /home/mcamp/code/crystal-forge/TASK-534.8-mcp-bundle-drafts
 
 Branch `TASK-534.8-mcp-bundle-drafts` starts at `3a676f20` (TASK-534.7, MR !351). Next free migration 0345.
+
+Implementation (uncompiled, untested; no build, test or preview was run):
+
+- Service `services/bundle_authoring.rs`; tools `mcp/bundle_authoring.rs`; migration `0345_bundle_draft_revision_and_agent_attribution.sql`; tests `tests/mcp_bundle_authoring.rs`.
+- Exact membership: lineage rows in `compliance_bundle_policies` are written first (the `sync_bundle_version_membership` trigger runs), then the draft's `compliance_bundle_version_policies` rows are replaced with the requested versions in order; digest recomputed from the stored rows.
+- Revision: BEFORE UPDATE trigger on `compliance_bundle_versions` plus an AFTER row trigger on `compliance_bundle_version_policies` and `compliance_bundle_version_requirements` that increments the parent draft's counter.
+- Resolver: private `candidate_preview` flag on the single-assignment resolver and public `resolve_system_effective_policies_with_candidate_in_tx` with `CandidateAssignment`; the candidate replaces an active assignment of the same bundle lineage at the same target. Preview runs in a `REPEATABLE READ, READ ONLY` transaction that is rolled back; environments use the batch resolver for the current set and at most 100 systems.
+- Browser `create_bundle` now takes an actor, sets `created_by` on the initial draft and writes `bundle_draft_created`; `update_bundle` writes `bundle_draft_updated`.
 <!-- SECTION:NOTES:END -->

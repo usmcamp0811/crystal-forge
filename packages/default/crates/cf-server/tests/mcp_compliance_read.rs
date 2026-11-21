@@ -684,10 +684,10 @@ async fn bundle_reads_return_exact_ordered_membership(pool: PgPool) {
         policy_ids: vec![second_policy, first_policy],
         requirement_version_ids: vec![requirements[1], requirements[0]],
     };
-    let bundle = create_bundle(&pool, request(format!("{prefix}-a")))
+    let bundle = create_bundle(&pool, request(format!("{prefix}-a")), None)
         .await
         .expect("create bundle");
-    let other = create_bundle(&pool, request(format!("{prefix}-b")))
+    let other = create_bundle(&pool, request(format!("{prefix}-b")), None)
         .await
         .expect("create second bundle");
 
