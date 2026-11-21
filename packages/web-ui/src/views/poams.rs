@@ -836,7 +836,11 @@ fn eligible(row: &PoamRegisterSummary, action: &BulkAction) -> bool {
     row.summary.status.is_active()
         && match action {
             BulkAction::Assign(_) => true,
-            BulkAction::Status(to) => legal_transition(row.summary.status, *to),
+            BulkAction::Status(to) => {
+                (!row.summary.configuration_planning_only
+                    || *to != PoamStatus::AwaitingVerification)
+                    && legal_transition(row.summary.status, *to)
+            }
             BulkAction::Extend => extended_date(row.summary.target_date).is_some(),
         }
 }
@@ -2952,6 +2956,20 @@ mod tests {
             "environment_ids":[Uuid::from_u128(2)],"system_ids":[Uuid::from_u128(3)],"bundle_ids":[Uuid::from_u128(4)],"bundle_version_ids":[],"assignment_version_ids":[],"first_requirement":null,"first_cve":null,"milestone_count":0,"completed_milestone_count":0,"last_activity_at":null
         });
         serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn bulk_awaiting_verification_excludes_planning_only_selections() {
+        let mut rows = [register_row(1), register_row(2)];
+        let selected = rows.iter().map(|row| row.summary.id).collect();
+        let awaiting = BulkAction::Status(PoamStatus::AwaitingVerification);
+        rows[0].summary.configuration_planning_only = true;
+        assert!(batch_targets(&rows, &selected, &awaiting).is_none());
+        let in_progress = BulkAction::Status(PoamStatus::InProgress);
+        assert!(batch_targets(&rows, &selected, &in_progress).is_some());
+
+        rows[0].summary.configuration_planning_only = false;
+        assert_eq!(batch_targets(&rows, &selected, &awaiting).unwrap().len(), 2);
     }
 
     #[test]

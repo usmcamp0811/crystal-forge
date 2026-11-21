@@ -351,7 +351,13 @@ but cannot enter verification or close. When eligible current-runtime evidence
 becomes available, a subsequent `create_cve_poam` call attaches a separate
 runtime baseline to the same POA&M through the existing runtime link checks.
 The configuration baseline remains in `configuration_cve_finding` in the
-detail response. Existing runtime verification and closure rules still apply.
+detail response. Detail and register summaries expose `configuration_planning_only`
+and count the planning relationship in `cve_finding_count` only until handoff.
+The POA&M UI labels the configuration scan as runtime unverified before handoff
+and as historical afterward. It keeps notes and milestones available under the
+usual permissions but hides entry to verification, verify, and close while the
+plan is configuration-only. Existing runtime verification and closure rules
+still apply after handoff.
 
 Full-or-not-found POA&M rule: `get_poam_detail` returns a POA&M only when every
 current context and every current or retired policy and CVE finding subject is

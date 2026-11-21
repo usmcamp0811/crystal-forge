@@ -430,8 +430,11 @@ pub const fn status_label(status: PoamStatus) -> &'static str {
     status.label()
 }
 
-fn available_status_transitions(status: PoamStatus) -> &'static [PoamStatus] {
-    match status {
+fn available_status_transitions(
+    status: PoamStatus,
+    configuration_planning_only: bool,
+) -> impl Iterator<Item = PoamStatus> {
+    let choices: &[PoamStatus] = match status {
         PoamStatus::Open => &[
             PoamStatus::InProgress,
             PoamStatus::Blocked,
@@ -449,19 +452,27 @@ fn available_status_transitions(status: PoamStatus) -> &'static [PoamStatus] {
         ],
         PoamStatus::AwaitingVerification => &[PoamStatus::InProgress, PoamStatus::Blocked],
         PoamStatus::Completed => &[],
-    }
+    };
+    choices.iter().copied().filter(move |choice| {
+        !configuration_planning_only || *choice != PoamStatus::AwaitingVerification
+    })
 }
 
 /// Returns whether the detail view may offer `Verify now` and
 /// `Authoritative close`.
 ///
-/// The server records a verification attempt only for a POA&M that is
-/// awaiting verification. It answers every other state, including `Open`,
-/// `InProgress`, `Blocked`, and `Completed`, with `409 invalid_transition`.
-/// The view therefore never offers these actions elsewhere. This function
-/// mirrors that rule for presentation only; the server still decides.
-fn verification_actions_available(status: PoamStatus) -> bool {
-    status == PoamStatus::AwaitingVerification
+/// The server requires awaiting verification and rejects configuration-only
+/// plans until runtime handoff. The server still decides whether to close.
+fn verification_actions_available(status: PoamStatus, configuration_planning_only: bool) -> bool {
+    status == PoamStatus::AwaitingVerification && !configuration_planning_only
+}
+
+fn configuration_baseline_label(configuration_planning_only: bool) -> &'static str {
+    if configuration_planning_only {
+        "Configuration scan · Runtime unverified"
+    } else {
+        "Historical configuration scan · Planning baseline only"
+    }
 }
 
 /// Returns the semantic CSS class for a server POA&M status.
@@ -1679,8 +1690,13 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
     };
     let target_timing = target_timing_label(&detail.poam, chrono::Utc::now().date_naive());
     let deficiency_heading = deficiency_title(active_findings.len());
-    let vulnerability_scope =
-        vulnerability_scope_title(&active_cve_findings, &historical_cve_findings);
+    let configuration_finding = detail.configuration_cve_finding.as_ref();
+    let has_runtime_cve_findings = !detail.cve_findings.is_empty();
+    let vulnerability_scope = if has_runtime_cve_findings {
+        vulnerability_scope_title(&active_cve_findings, &historical_cve_findings)
+    } else {
+        "Vulnerability scope".to_owned()
+    };
     let active_cve_groups = group_cve_scope(&active_cve_findings);
     // Viewers never see metadata controls, so they never see the save action.
     // The save handler clones the loaded summary because it must outlive this
@@ -1836,7 +1852,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                 LifecycleSection { detail: detail.clone(), readonly, close_details: close_details(), verification_loading: history_loading() == Some(HistoryPageKind::Verification), on_load_more_verification: move |_| if let Some(query) = verification_page_query.clone() { load_more(HistoryPageKind::Verification, query); }, on_transition: move |status| { let request = TransitionPoamRequest { revision, status, note: None }; busy.set(Some("Changing status".to_string())); spawn(async move { match poam_api::transition_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("changing status", err) } }); }, on_verify: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Verifying".to_string())); spawn(async move { match poam_api::verify_poam(props.poam_id, &request).await { Ok(_) => { busy.set(None); load(true); }, Err(err) => handle_error("verifying remediation", err) } }); }, on_close: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Closing".to_string())); spawn(async move { match poam_api::close_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("closing", err) } }); }, on_reopen: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Reopening".to_string())); spawn(async move { match poam_api::reopen_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("reopening", err) } }); } }
                 section { class: "poam-tray-section", "data-testid": "poam-deficiency",
                     header { h3 { "{deficiency_heading}" } button { class: "btn btn-ghost xs focus-ring", disabled: readonly, onclick: move |_| finding_picker.toggle(), Icon { name: IconName::Link, size: 11 } "Link finding" } }
-                    if active_findings.is_empty() && detail.cve_findings.is_empty() { div { role: "status", class: "poam-empty", "No findings are linked." } }
+                    if active_findings.is_empty() && !has_runtime_cve_findings && configuration_finding.is_none() && !detail.poam.configuration_planning_only { div { role: "status", class: "poam-empty", "No findings are linked." } }
                     if !active_findings.is_empty() {
                     div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-findings-table", thead { tr { th { "Host" } th { "Requirement" } th { "Policy" } th { "Current result" } th { "Actions" } } } tbody {
                         for finding in active_findings.clone() { { let finding_for_navigation = finding.clone(); let finding_id = finding.id; let requirements = requirement_presentations(&finding.requirements, &finding.requirement_version_ids); rsx! { tr { key: "{finding.link_id}", "data-testid": "poam-linked-finding", "data-finding-id": "{finding.id}", td { class: "mono", "{finding.hostname}" } td { class: "poam-requirement", if requirements.is_empty() { span { class: "poam-muted", "Not provided by this finding" } } else { for requirement in requirements { div { class: "poam-requirement-context", if let Some(framework) = requirement.framework { span { class: "poam-requirement-framework", "{framework}" } } else { span { class: "poam-requirement-framework", "Unresolved requirement version" } } strong { class: "mono", "{requirement.control}" } if let Some(title) = requirement.title { span { class: "poam-requirement-title", "{title}" } } } } } } td { "{finding.policy_name}" } td { span { class: "poam-chip {result_class(finding.resolution_state)}", "{result_label(finding.resolution_state)}" } } td { class: "poam-row-actions", button { class: "btn btn-ghost xs focus-ring", onclick: move |_| props.on_open_finding.call(finding_for_navigation.clone()), "Evidence" } button { class: "btn-icon focus-ring", title: "Unlink finding", disabled: readonly, onclick: move |_| { busy.set(Some("Unlinking finding".to_string())); spawn(async move { match poam_api::unlink_poam_finding(props.poam_id, finding_id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("unlinking finding", err) } }); }, Icon { name: IconName::X, size: 12 } } } } } } }
@@ -1893,10 +1909,12 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                         }
                     }
                 }
-                if !active_cve_findings.is_empty() || !historical_cve_findings.is_empty() {
+                if has_runtime_cve_findings || configuration_finding.is_some() {
                     section { class: "poam-tray-section", "data-testid": "poam-linked-vulnerabilities",
                         header { h3 { "{vulnerability_scope}" } }
-                        p { class: "poam-section-help", "Scope is fixed at creation; a re-scan does not change the recorded links. Justification or whitelisting is not remediation. Closure still requires authoritative exact evidence to clear the finding." }
+                        if has_runtime_cve_findings {
+                            p { class: "poam-section-help", "Scope is fixed at creation; a re-scan does not change the recorded links. Justification or whitelisting is not remediation. Closure still requires authoritative exact evidence to clear the finding." }
+                        }
                         for group in active_cve_groups.clone() {
                             div { key: "{group.cve_id}-{group.package}", class: "poam-cve-group", "data-testid": "poam-cve-group", "data-cve-id": "{group.cve_id}", "data-cve-package": "{group.package}",
                                 div { class: "poam-cve-group-head",
@@ -1969,6 +1987,19 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                                 }
                             }
                         }
+                        if let Some(finding) = configuration_finding {
+                            div { class: "poam-retired-row", "data-testid": "poam-configuration-cve-finding",
+                                div { class: "poam-retired-identity",
+                                    strong { class: "mono", "{finding.canonical_cve_id}" }
+                                    span { class: "mono poam-muted", "{finding.canonical_package_name}" }
+                                    span { class: "poam-chip", "{configuration_baseline_label(detail.poam.configuration_planning_only)}" }
+                                }
+                                div { class: "poam-retired-evidence",
+                                    small { class: "mono", "System {finding.system_id}" }
+                                    small { class: "mono poam-muted", "Original scan {finding.baseline_scan_id}" }
+                                }
+                            }
+                        }
                     }
                 }
                 section { class: "poam-tray-section",
@@ -2017,6 +2048,8 @@ struct LifecycleSectionProps {
 #[component]
 fn LifecycleSection(props: LifecycleSectionProps) -> Element {
     let status = props.detail.poam.status;
+    let planning_only = props.detail.poam.configuration_planning_only;
+    let transitions = available_status_transitions(status, planning_only);
     rsx! {
         section { class: "poam-tray-section",
             header { h3 { "Remediation status" } if status == PoamStatus::Completed { div { class: "poam-lifecycle-actions", button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_reopen.call(()), Icon { name: IconName::Rollback, size: 11 } "Reopen" } } } }
@@ -2032,18 +2065,14 @@ fn LifecycleSection(props: LifecycleSectionProps) -> Element {
                         disabled: true,
                         "{status_label(status)}"
                     }
-                    for choice in available_status_transitions(status).iter().copied() {
+                    for choice in transitions {
                         button { class: "focus-ring", title: choice.description(), disabled: props.readonly, onclick: move |_| props.on_transition.call(choice), "{status_label(choice)}" }
                     }
                 }
             }
-            // COMPATIBILITY: The server accepts verification only while a POA&M
-            // is awaiting verification and answers `409 invalid_transition` in
-            // every other state. `Verify now` and `Authoritative close`
-            // therefore exist only in that state. `Authoritative close` stays
-            // enabled after a failed check: the server, not the browser,
-            // decides closure and returns the structured rejection.
-            if verification_actions_available(status) {
+            // Authoritative close stays available after a failed check: the
+            // server decides closure and returns the structured rejection.
+            if verification_actions_available(status, planning_only) {
                 div { class: "poam-verify-box", "data-coach-target": "poam-verify",
                     div { role: "status", class: "sd-callout sd-callout-warn", Icon { name: IconName::Warn, size: 13 } div { strong { "Awaiting verification." } " Remediation is reported complete, but the finding result remains independent. Verify against current assessments, then use authoritative close." } }
                     div { class: "poam-verify-actions",
@@ -2547,6 +2576,7 @@ mod tests {
             overdue,
             finding_count: 1,
             cve_finding_count: 0,
+            configuration_planning_only: false,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             closed_at: None,
@@ -2574,10 +2604,15 @@ mod tests {
         );
         assert!(PoamStatus::Blocked.description().contains("dependency"));
         assert_eq!(
-            available_status_transitions(PoamStatus::AwaitingVerification),
-            &[PoamStatus::InProgress, PoamStatus::Blocked]
+            available_status_transitions(PoamStatus::AwaitingVerification, false)
+                .collect::<Vec<_>>(),
+            [PoamStatus::InProgress, PoamStatus::Blocked]
         );
-        assert!(available_status_transitions(PoamStatus::Completed).is_empty());
+        assert!(
+            available_status_transitions(PoamStatus::Completed, false)
+                .next()
+                .is_none()
+        );
     }
 
     #[test]
@@ -3237,13 +3272,42 @@ mod tests {
             PoamStatus::Completed,
         ] {
             assert!(
-                !verification_actions_available(status),
+                !verification_actions_available(status, false),
                 "{status:?} must not offer verification"
             );
         }
         assert!(verification_actions_available(
-            PoamStatus::AwaitingVerification
+            PoamStatus::AwaitingVerification,
+            false
         ));
+        assert!(!verification_actions_available(
+            PoamStatus::AwaitingVerification,
+            true
+        ));
+    }
+
+    #[test]
+    fn configuration_baseline_is_unverified_or_historical() {
+        assert_eq!(
+            configuration_baseline_label(true),
+            "Configuration scan · Runtime unverified"
+        );
+        assert_eq!(
+            configuration_baseline_label(false),
+            "Historical configuration scan · Planning baseline only"
+        );
+    }
+
+    #[test]
+    fn planning_only_tray_keeps_progress_transitions_but_omits_entry_to_verification() {
+        assert_eq!(
+            available_status_transitions(PoamStatus::Open, true).collect::<Vec<_>>(),
+            [PoamStatus::InProgress, PoamStatus::Blocked]
+        );
+        assert!(
+            available_status_transitions(PoamStatus::Open, false)
+                .any(|choice| choice == PoamStatus::AwaitingVerification)
+        );
     }
 
     #[test]
