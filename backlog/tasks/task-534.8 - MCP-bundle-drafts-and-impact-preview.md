@@ -130,3 +130,7 @@ fix needs farm verification and has not been pushed. Remaining review blockers
 include publication lock ordering, preview snapshot consistency and override
 diffs, import plan collisions within a single document, Admin Audit Log action
 registration, result bounds, and attribution foreign keys on immutable versions.
+
+## Stack review fixes (2026-11-21)
+
+Preview coverage now runs in the same REPEATABLE READ snapshot as the effective-policy resolution and reports `candidate.draft_revision`. Migration `0347_bundle_revision_statement_trigger.sql` replaces the row-level membership revision triggers with statement-level triggers that bump each mutable draft at most once per transaction. Substantive MCP edits clear prior trust and reviewer metadata. Farm results (content identical to the pushed head after a no-conflict rebase): `mcp_bundle_authoring` 11 (including `large_membership_replacement_increments_the_revision_a_bounded_number_of_times` and `coverage_reads_the_requirement_membership_of_the_caller_snapshot`), `mcp_policy_authoring` 17, `assignment_semantics` 13 passed; a first attempt failed 3 tests only on the known Nix syntax-validator 2-second deadline under farm load. The trust fix run: access_tokens 47, assignment_semantics 13, compliance_assignment_zombie_repair 1, composite_policy 38, mcp_bundle_authoring 9, mcp_compliance_read 7, mcp_policy_authoring 17, mcp_transport 10 passed.
