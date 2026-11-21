@@ -631,9 +631,8 @@ pub async fn reset_flake_source(
 
     // RETENTION: Source replacement must remain operational when old commits
     // back retained generations or deployment-bound derivations or artifacts.
-    // Delete only derivations that none of these durable identities or sealed
-    // exact-CVE POA&M verification items requires. Unreferenced schema-1 scans
-    // follow their parent derivation lifecycle.
+    // Delete only derivations that none of these durable identities, sealed
+    // exact-CVE verification items, or planning baselines requires.
     sqlx::query(
         r#"
         DELETE FROM derivations d
@@ -668,9 +667,13 @@ pub async fn reset_flake_source(
                JOIN poam_verification_attempts attempt ON attempt.id = item.attempt_id
                WHERE scan.derivation_id = d.id
                  AND scan.evidence_schema_version = 1
-                 AND attempt.sealed_at IS NOT NULL
+                AND attempt.sealed_at IS NOT NULL
+          )
+           AND NOT EXISTS (
+               SELECT 1 FROM poam_configuration_cve_findings baseline
+               WHERE baseline.baseline_scan_derivation_id = d.id
            )
-        "#,
+         "#,
     )
     .bind(flake_id)
     .execute(&mut **tx)
@@ -720,8 +723,13 @@ pub async fn reset_flake_source(
                    WHERE derivation.commit_id = c.id
                      AND scan.evidence_schema_version = 1
                      AND attempt.sealed_at IS NOT NULL
-               )
-         )",
+                ) OR EXISTS (
+                    SELECT 1 FROM derivations derivation
+                    JOIN poam_configuration_cve_findings baseline
+                      ON baseline.baseline_scan_derivation_id = derivation.id
+                    WHERE derivation.commit_id = c.id
+                )
+          )",
     )
     .bind(flake_id)
     .execute(&mut **tx)
@@ -1182,8 +1190,8 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
     // RETENTION: A retained generation or deployment request owns its exact
     // derivation. Preserve that row during rewrite acceptance so restrictive
     // foreign keys do not abort recovery and each request remains attributable.
-    // A sealed exact-CVE POA&M verification item retains its cited system
-    // derivation. Unreferenced schema-1 scans follow the parent lifecycle.
+    // A sealed exact-CVE verification item or a planning baseline retains
+    // its cited scan derivation.
     sqlx::query(
         r#"
         DELETE FROM derivations d
@@ -1212,8 +1220,12 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
               JOIN poam_verification_attempts attempt ON attempt.id = item.attempt_id
               WHERE scan.derivation_id = d.id
                 AND scan.evidence_schema_version = 1
-                AND attempt.sealed_at IS NOT NULL
-          )
+                 AND attempt.sealed_at IS NOT NULL
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM poam_configuration_cve_findings baseline
+               WHERE baseline.baseline_scan_derivation_id = d.id
+           )
         "#,
     )
     .bind(flake_id)

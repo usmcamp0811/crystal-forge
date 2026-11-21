@@ -333,6 +333,26 @@ identifies the same system and scan in the same read snapshot. Neither this flag
 nor the configuration inventory grants mutation authority. Use
 `get_system_security_context` for running evidence.
 
+### Configuration-based CVE planning
+
+`create_cve_poam` requires `poams:create`, an active Operator or Admin owner,
+and a grant for the system's current environment. The closed argument object
+requires `system_id` (UUID), `cve_id` (CVE identifier),
+`canonical_package_name` (exact canonical name), `expected_scan_id` (UUID),
+and `title` (nonempty string). `plan` is optional. The result returns
+`poam_id`, `created`, `revision`, `status`, `evidence_kind` and
+`baseline_scan_id`. `created: false` means the existing plan was reused.
+
+If no eligible current-runtime occurrence exists, a new plan requires the
+expected sealed scan for the registered configuration at flake HEAD. Its
+baseline is immutable. Later scans reuse the existing finding identity and
+do not replace that baseline. A planning-only POA&M accepts progress updates
+but cannot enter verification or close. When eligible current-runtime evidence
+becomes available, a subsequent `create_cve_poam` call attaches a separate
+runtime baseline to the same POA&M through the existing runtime link checks.
+The configuration baseline remains in `configuration_cve_finding` in the
+detail response. Existing runtime verification and closure rules still apply.
+
 Full-or-not-found POA&M rule: `get_poam_detail` returns a POA&M only when every
 current context and every current or retired policy and CVE finding subject is
 in an effective environment. Otherwise the result is `not_found`. No scoped

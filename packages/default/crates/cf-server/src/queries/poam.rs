@@ -574,7 +574,7 @@ pub async fn list_tx(
             // SECURITY: Historical links cannot search a moved host's current
             // B hostname (or other hidden current-system facts) for an A-only
             // actor, even when A's scheduled POA&M remains visible.
-            .push(" OR EXISTS (SELECT 1 FROM poam_cve_finding_links cve_link JOIN poam_cve_findings cve_finding ON cve_finding.id=cve_link.cve_finding_id JOIN systems cve_system ON cve_system.id=cve_finding.system_id WHERE cve_link.poam_id=p.id AND (")
+             .push(" OR EXISTS (SELECT 1 FROM LATERAL (SELECT cve_finding_id FROM poam_cve_finding_links WHERE poam_id=p.id UNION ALL SELECT cve_finding_id FROM poam_configuration_cve_findings WHERE poam_id=p.id) cve_link JOIN poam_cve_findings cve_finding ON cve_finding.id=cve_link.cve_finding_id JOIN systems cve_system ON cve_system.id=cve_finding.system_id WHERE (")
             .push_bind(is_admin)
             .push(" OR cve_system.environment_id=ANY(")
             .push_bind(environment_ids)
@@ -1187,7 +1187,17 @@ pub async fn detail(
     else {
         return Ok(None);
     };
-    // PAGINATION: Select one keyset page across both finding families before
+    let configuration_cve_finding = sqlx::query_as(
+        r#"SELECT link.* FROM poam_configuration_cve_findings link
+           JOIN systems system ON system.id=link.system_id
+           WHERE link.poam_id=$1 AND ($2 OR system.environment_id=ANY($3))"#,
+    )
+    .bind(poam_id)
+    .bind(is_admin)
+    .bind(environment_ids)
+    .fetch_optional(&mut **tx)
+    .await?;
+    // PAGINATION: Select one keyset page across policy and runtime CVE links before
     // hydrating either response array. Otherwise each family can consume the
     // full limit and the shared cursor can skip or repeat the other family.
     let finding_page = sqlx::query_as::<_, (String, Uuid, chrono::DateTime<chrono::Utc>)>(
@@ -1505,6 +1515,7 @@ pub async fn detail(
         poam,
         findings,
         cve_findings,
+        configuration_cve_finding,
         findings_has_more,
         findings_next_cursor,
         milestones,
