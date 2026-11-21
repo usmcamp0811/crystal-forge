@@ -460,6 +460,7 @@ SQL
       mcp_transport \
       mcp_write_poam \
       mcp_write_scan \
+      mcp_scan_findings \
       mcp_write_transport \
       oidc_entitlements \
       policy_counts_defect \

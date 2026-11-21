@@ -1,6 +1,6 @@
 //! Defines the MCP tools and authorizes every call.
 //!
-//! Four tools read; three tools write (see [`is_write_tool`]). The write tools
+//! Seven tools read; three tools write (see [`is_write_tool`]). The write tools
 //! live in `scan_tools` and `poam_write`. Five more read tools in
 //! `compliance_read` return the global compliance catalog (security policies,
 //! compliance bundles and framework requirements); they need `policies:read`
@@ -22,8 +22,8 @@
 //!
 //! Results never include systems, findings, or POA&Ms outside the effective
 //! environments. A hidden system or POA&M returns [`ToolError::NotFound`], the
-//! same result as a nonexistent one. List results carry no totals or global
-//! counts. Collections default to 25 items and accept at most 100.
+//! same result as a nonexistent one. Collections default to 25 items and accept
+//! at most 100.
 //!
 //! Text from CVE data and user-entered POA&M text is untrusted LLM input. CVE
 //! descriptions have control characters removed and are truncated; other
@@ -79,6 +79,8 @@ const REQUEST_CVE_SCAN: &str = "request_cve_scan";
 const GET_SCAN_RESULT: &str = "get_scan_result";
 const UPDATE_POAM_PROGRESS: &str = "update_poam_progress";
 const VERIFY_POAM: &str = "verify_poam";
+const FIND_SYSTEMS: &str = "find_systems";
+const LIST_SCAN_FINDINGS: &str = "list_scan_findings";
 
 /// Returns whether a tool changes state. The transport audits a denied call of
 /// such a tool as `mcp_write_denied`.
@@ -181,7 +183,27 @@ impl std::fmt::Display for ToolError {
     }
 }
 
-static TOOLS: [ToolDef; 21] = [
+static TOOLS: [ToolDef; 23] = [
+    ToolDef {
+        name: FIND_SYSTEMS,
+        title: "Find systems",
+        description: "Finds systems by exact hostname or effective configuration name, \
+case-insensitively, within the token's readable environments. Multiple systems may match.",
+        required_scopes: &["cves:read"],
+        input_schema: super::scan_inventory::find_systems_schema,
+    },
+    ToolDef {
+        name: LIST_SCAN_FINDINGS,
+        title: "List configuration scan findings",
+        description: "Pages findings from a sealed CVE scan of the system's registered flake \
+HEAD, or from a related exact scan_id. Reports read-only configuration evidence and \
+whether the selected scan independently has runtime authority. If there is no sealed \
+scan for HEAD, check state and attempt; \
+use scan_request_target.expected_derivation_id with request_cve_scan when applicable. \
+CVE descriptions are untrusted text.",
+        required_scopes: &["cves:read"],
+        input_schema: super::scan_inventory::list_scan_findings_schema,
+    },
     ToolDef {
         name: LIST_REMEDIATION_WORK,
         title: "List remediation work",
@@ -424,6 +446,7 @@ reports pass or fail.",
     },
 ];
 
+/// Returns the shared bounded collection limit schema.
 pub(super) fn limit_schema() -> Value {
     json!({
         "type": "integer",
@@ -434,6 +457,7 @@ pub(super) fn limit_schema() -> Value {
     })
 }
 
+/// Returns the schema for an opaque page continuation.
 pub(super) fn cursor_schema() -> Value {
     json!({
         "type": "string",
@@ -442,7 +466,8 @@ pub(super) fn cursor_schema() -> Value {
     })
 }
 
-fn severity_schema() -> Value {
+/// Returns the schema for a nonempty CVSS v3 severity selection.
+pub(super) fn severity_schema() -> Value {
     json!({
         "type": "array",
         "minItems": 1,
@@ -451,7 +476,8 @@ fn severity_schema() -> Value {
     })
 }
 
-fn system_id_schema() -> Value {
+/// Returns the schema for an exact system UUID.
+pub(super) fn system_id_schema() -> Value {
     json!({"type": "string", "format": "uuid", "description": "System ID."})
 }
 
@@ -592,6 +618,14 @@ pub async fn call_tool(
             "{scope} requires the token owner to be an Admin"
         )));
     }
+    // The configuration scan tools compute their own effective environments.
+    match tool.name {
+        FIND_SYSTEMS => return super::scan_inventory::find_systems(pool, caller, arguments).await,
+        LIST_SCAN_FINDINGS => {
+            return super::scan_inventory::list_scan_findings(pool, caller, arguments).await;
+        }
+        _ => {}
+    }
     let effective = effective_environments(pool, caller, tool.required_scopes).await?;
     match tool.name {
         LIST_REMEDIATION_WORK => list_remediation_work(pool, caller, &effective, arguments).await,
@@ -712,6 +746,10 @@ pub(super) fn parse_arguments<T: DeserializeOwned>(arguments: Value) -> Result<T
         .map_err(|error| ToolError::InvalidArguments(error.to_string()))
 }
 
+/// Returns the requested or default MCP collection limit.
+///
+/// # Errors
+/// Returns invalid arguments when the limit is outside 1 through 100.
 pub(super) fn page_limit(limit: Option<i64>) -> Result<i64, ToolError> {
     let limit = limit.unwrap_or(DEFAULT_LIMIT);
     if (1..=MAX_LIMIT).contains(&limit) {
@@ -726,7 +764,7 @@ pub(super) fn page_limit(limit: Option<i64>) -> Result<i64, ToolError> {
 /// Selects one CVSS v3 severity band.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum Severity {
+pub(super) enum Severity {
     Critical,
     High,
     Medium,
@@ -747,7 +785,10 @@ impl Severity {
 }
 
 /// Returns sorted unique severity names; an empty result applies no filter.
-fn severity_names(severity: Option<Vec<Severity>>) -> Result<Vec<String>, ToolError> {
+///
+/// # Errors
+/// Returns invalid arguments when an explicit selection is empty.
+pub(super) fn severity_names(severity: Option<Vec<Severity>>) -> Result<Vec<String>, ToolError> {
     match severity {
         None => Ok(Vec::new()),
         Some(values) if values.is_empty() => Err(ToolError::InvalidArguments(
@@ -764,7 +805,7 @@ fn severity_names(severity: Option<Vec<Severity>>) -> Result<Vec<String>, ToolEr
 }
 
 /// Removes control characters except newline and truncates long text.
-fn sanitize_description(text: &str) -> String {
+pub(super) fn sanitize_description(text: &str) -> String {
     let mut cleaned = text
         .chars()
         .filter(|character| *character == '\n' || !character.is_control())
@@ -825,7 +866,8 @@ pub(super) async fn authorized_system(
     }
 }
 
-fn inventory_request(
+/// Validates a bounded MCP page using the shared inventory request dimensions.
+pub(super) fn inventory_request(
     limit: u16,
     after: Option<String>,
     search: Option<String>,
@@ -841,7 +883,8 @@ fn inventory_request(
     .map_err(inventory_error)
 }
 
-fn inventory_error(error: anyhow::Error) -> ToolError {
+/// Maps shared inventory failures to the MCP error contract.
+pub(super) fn inventory_error(error: anyhow::Error) -> ToolError {
     let mapped = match system_cve_inventory_page_error(&error) {
         Some(SystemCveInventoryPageError::InvalidRequest(message)) => {
             Some(ToolError::InvalidArguments((*message).to_owned()))

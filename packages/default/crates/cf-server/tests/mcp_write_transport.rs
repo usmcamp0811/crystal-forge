@@ -583,10 +583,12 @@ async fn tools_list_shows_write_tools_only_with_write_scopes(pool: PgPool) {
     let (owner, _) = user(&pool, AuthRole::Operator, &[env]).await;
     let server = start(&pool).await;
     let read_tools = BTreeSet::from([
+        "find_systems".to_owned(),
         "get_poam_detail".to_owned(),
         "get_scan_result".to_owned(),
         "get_system_security_context".to_owned(),
         "list_remediation_work".to_owned(),
+        "list_scan_findings".to_owned(),
     ]);
 
     let read_only = issue(&pool, owner, READ, &[env]).await;

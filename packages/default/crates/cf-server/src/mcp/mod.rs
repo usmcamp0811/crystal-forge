@@ -38,6 +38,7 @@ pub mod bundle_authoring;
 pub mod compliance_read;
 pub mod poam_write;
 pub mod policy_authoring;
+mod scan_inventory;
 pub mod scan_tools;
 pub mod tools;
 
@@ -75,7 +76,9 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", 
 ///
 /// The authoritative definitions live in [`tools`]; `tools/list` uses
 /// [`tools::visible_tools`], not this list.
-pub const MCP_TOOL_NAMES: [&str; 21] = [
+pub const MCP_TOOL_NAMES: [&str; 23] = [
+    "find_systems",
+    "list_scan_findings",
     "list_remediation_work",
     "get_system_security_context",
     "get_remediation_context",
