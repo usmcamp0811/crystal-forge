@@ -253,6 +253,8 @@ pub struct SystemCveInventoryQuery {
     pub rows: Vec<ExactSystemVulnerabilityRow>,
     /// Gives complete totals over the active filter scope.
     pub metadata: SystemCveInventoryMetadata,
+    /// Counts projected findings before applying request filters.
+    pub(crate) unfiltered_findings: i64,
     /// Identifies the source plus dimensions that affect page membership,
     /// order, filters, or totals.
     pub inventory_revision: String,
@@ -271,6 +273,13 @@ pub struct SystemCveInventoryPageRequest {
     severities: Vec<String>,
     statuses: Vec<String>,
     selection: SystemCveInventorySelection,
+    configuration_scan: Option<ConfigurationScanFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfigurationScanFilter {
+    explicit: bool,
+    canonical_package: Option<String>,
 }
 
 impl Default for SystemCveInventoryPageRequest {
@@ -282,6 +291,7 @@ impl Default for SystemCveInventoryPageRequest {
             severities: Vec::new(),
             statuses: Vec::new(),
             selection: SystemCveInventorySelection::Current,
+            configuration_scan: None,
         }
     }
 }
@@ -352,6 +362,7 @@ impl SystemCveInventoryPageRequest {
             severities,
             statuses,
             selection,
+            configuration_scan: None,
         })
     }
 
@@ -368,7 +379,45 @@ impl SystemCveInventoryPageRequest {
         digest.update(self.severities.join(","));
         digest.update([0]);
         digest.update(self.statuses.join(","));
+        // Preserve browser cursor fingerprints and isolate the MCP scan mode.
+        if let Some(filter) = &self.configuration_scan {
+            digest.update(b"\0configuration_scan\0");
+            digest.update([u8::from(filter.explicit)]);
+            digest.update(filter.canonical_package.as_deref().unwrap_or_default());
+        }
         hex::encode(digest.finalize())
+    }
+
+    fn canonical_package(&self) -> Option<&str> {
+        self.configuration_scan
+            .as_ref()?
+            .canonical_package
+            .as_deref()
+    }
+
+    /// Binds the inventory cursor to an MCP scan selection and exact package.
+    pub(crate) fn for_configuration_scan(
+        mut self,
+        explicit: bool,
+        canonical_package: Option<String>,
+    ) -> Self {
+        self.configuration_scan = Some(ConfigurationScanFilter {
+            explicit,
+            canonical_package,
+        });
+        self
+    }
+
+    /// Rejects continuation when the authorized selection no longer has evidence.
+    ///
+    /// # Errors
+    /// Returns an invalid or changed cursor error if a continuation was supplied.
+    pub(crate) fn require_first_page_without_source(&self) -> Result<()> {
+        if let Some(cursor) = self.after.as_deref() {
+            decode_system_cve_inventory_cursor(cursor)?;
+            return Err(SystemCveInventoryPageError::InventoryChanged.into());
+        }
+        Ok(())
     }
 
     fn search_pattern(&self) -> Option<String> {
@@ -455,6 +504,7 @@ struct SystemCveInventoryCursor {
 #[derive(Debug, sqlx::FromRow)]
 struct SystemCveInventoryMetadataRow {
     total_findings: i64,
+    unfiltered_findings: i64,
     total_cves: i64,
     total_packages: i64,
     cve_critical: i64,
@@ -879,7 +929,11 @@ pub async fn fetch_authorized_system_cve_inventory_candidates(
 // INVARIANT: The caller first validates derivation_id against the selected
 // system, flake, and configuration. This separate lifecycle query must never
 // select the completed source or infer mutation authority from an attempt.
-async fn newest_system_cve_attempt_tx(
+/// Returns the latest lifecycle attempt for a previously authorized derivation.
+///
+/// # Errors
+/// Returns database errors.
+pub(crate) async fn newest_system_cve_attempt_tx(
     transaction: &mut Transaction<'_, Postgres>,
     derivation_id: i32,
 ) -> Result<Option<SystemCveInventoryAttempt>> {
@@ -984,6 +1038,7 @@ async fn fetch_historical_system_cve_inventory_tx(
             read_only: true,
             rows: Vec::new(),
             metadata: SystemCveInventoryMetadata::default(),
+            unfiltered_findings: 0,
             inventory_revision: inventory_revision(&format!(
                 "{system_id}|{:?}|no_scan",
                 page.selection
@@ -1128,6 +1183,7 @@ fn empty_current_inventory(
         read_only: true,
         rows: Vec::new(),
         metadata: SystemCveInventoryMetadata::default(),
+        unfiltered_findings: 0,
         inventory_revision: inventory_revision(&format!(
             "{system_id}|current|{current_state:?}|{failure:?}|{running_target:?}"
         )),
@@ -1171,15 +1227,7 @@ const EXACT_INVENTORY_CTE: &str = r#"WITH selected_observations AS (
            FROM selected_observations observation
            JOIN cve_scans scan ON scan.id=$1
            JOIN cves cve ON cve.id=observation.canonical_cve_id
-            ), filtered AS (
-              SELECT * FROM inventory
-              WHERE ($3::text IS NULL OR cve_id ILIKE $3 ESCAPE '\'
-                     OR canonical_package_name ILIKE $3 ESCAPE '\'
-                     OR package_name ILIKE $3 ESCAPE '\'
-                     OR installed_version ILIKE $3 ESCAPE '\')
-                AND (cardinality($4::text[])=0 OR severity=ANY($4::text[]))
-                AND (cardinality($5::text[])=0 OR status=ANY($5::text[]))
-            )"#;
+             )"#;
 
 const LEGACY_INVENTORY_CTE: &str = r#"WITH selected_findings AS (
               SELECT DISTINCT ON (
@@ -1212,7 +1260,9 @@ const LEGACY_INVENTORY_CTE: &str = r#"WITH selected_findings AS (
                       package_derivation.derivation_path COLLATE "C"
             ), inventory AS (
               SELECT * FROM selected_findings
-            ), filtered AS (
+             )"#;
+
+const INVENTORY_FILTER_CTE: &str = r#", filtered AS (
               SELECT * FROM inventory
               WHERE ($3::text IS NULL OR cve_id ILIKE $3 ESCAPE '\'
                      OR canonical_package_name ILIKE $3 ESCAPE '\'
@@ -1220,7 +1270,39 @@ const LEGACY_INVENTORY_CTE: &str = r#"WITH selected_findings AS (
                      OR installed_version ILIKE $3 ESCAPE '\')
                 AND (cardinality($4::text[])=0 OR severity=ANY($4::text[]))
                 AND (cardinality($5::text[])=0 OR status=ANY($5::text[]))
+                AND ($6::text IS NULL OR canonical_package_name COLLATE "C"=$6)
             )"#;
+
+/// Projects a previously authorized, sealed configuration scan with the shared
+/// inventory and cursor. The result carries no running-system authority.
+///
+/// # Errors
+/// Returns database, invalid cursor, or changed inventory errors.
+pub(crate) async fn fetch_configuration_scan_page_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+    configuration_derivation_id: i32,
+    source: SystemCveInventorySource,
+    page: &SystemCveInventoryPageRequest,
+) -> Result<SystemCveInventoryQuery> {
+    fetch_inventory_page_for_source(
+        transaction,
+        system_id,
+        SystemCveInventoryAuthority::Legacy,
+        None,
+        source,
+        None,
+        None,
+        SystemCveInventorySelection::ExactDerivation {
+            derivation_id: configuration_derivation_id,
+        },
+        SystemCveEvidenceRepresentation::Schema1Observations,
+        true,
+        None,
+        page,
+    )
+    .await
+}
 
 async fn fetch_inventory_page_for_source(
     transaction: &mut Transaction<'_, Postgres>,
@@ -1270,6 +1352,7 @@ async fn fetch_inventory_page_for_source(
         .bind(search_pattern.as_deref())
         .bind(&page.severities)
         .bind(&page.statuses)
+        .bind(page.canonical_package())
         .bind(match authority {
             SystemCveInventoryAuthority::Exact => "exact",
             SystemCveInventoryAuthority::MappedRunning => "mapped_running",
@@ -1292,6 +1375,7 @@ async fn fetch_inventory_page_for_source(
         .bind(search_pattern.as_deref())
         .bind(&page.severities)
         .bind(&page.statuses)
+        .bind(page.canonical_package())
         .bind(after_cve)
         .bind(after_package)
         .bind(i64::from(page.limit) + 1)
@@ -1346,6 +1430,7 @@ async fn fetch_inventory_page_for_source(
                 unknown: metadata.unknown,
             },
         },
+        unfiltered_findings: metadata.unfiltered_findings,
         inventory_revision,
         has_more,
         next_cursor,
@@ -1354,8 +1439,16 @@ async fn fetch_inventory_page_for_source(
 
 fn inventory_metadata_sql(cte: &str) -> String {
     format!(
-        r#"{cte}
+        r#"{cte}{INVENTORY_FILTER_CTE}
+           , inventory_identity AS (
+             SELECT COUNT(*) AS finding_count,
+                    COALESCE(SUM(hashtextextended(jsonb_build_array(
+                      cve_id,canonical_package_name,package_name,
+                      installed_version,severity,status)::text,440))::text,'0') AS signature
+             FROM inventory
+           )
            SELECT COUNT(*)::bigint AS total_findings,
+                  (SELECT finding_count FROM inventory_identity) AS unfiltered_findings,
                   COUNT(DISTINCT cve_id)::bigint AS total_cves,
                    COUNT(DISTINCT canonical_package_name)::bigint AS total_packages,
                    COUNT(DISTINCT cve_id) FILTER (WHERE severity='critical')::bigint AS cve_critical,
@@ -1365,28 +1458,22 @@ fn inventory_metadata_sql(cte: &str) -> String {
                   COUNT(*) FILTER (WHERE severity='medium')::bigint AS medium,
                   COUNT(*) FILTER (WHERE severity='low')::bigint AS low,
                   COUNT(*) FILTER (WHERE severity='unknown')::bigint AS unknown,
-                  concat_ws('|',$1::text,$2::text,$6::text,
-                    (SELECT COUNT(*)::text FROM inventory),
-                    (SELECT COALESCE(SUM(hashtextextended(
-                       jsonb_build_array(
-                         cve_id,canonical_package_name,package_name,
-                         installed_version,severity,status)::text,440))::text,'0')
-                     FROM inventory)
-                  ) AS revision_seed
+                  (SELECT concat_ws('|',$1::text,$2::text,$7::text,finding_count,signature)
+                   FROM inventory_identity) AS revision_seed
            FROM filtered"#
     )
 }
 
 fn inventory_page_sql(cte: &str) -> String {
     format!(
-        r#"{cte}
+        r#"{cte}{INVENTORY_FILTER_CTE}
            , selected_page AS (
              SELECT * FROM filtered
-             WHERE ($6::text IS NULL OR
+              WHERE ($7::text IS NULL OR
                     (cve_id COLLATE "C",canonical_package_name COLLATE "C") >
-                    ($6::text COLLATE "C",$7::text COLLATE "C"))
+                     ($7::text COLLATE "C",$8::text COLLATE "C"))
              ORDER BY cve_id COLLATE "C",canonical_package_name COLLATE "C"
-             LIMIT $8
+              LIMIT $9
            )
            SELECT filtered.scan_id,filtered.occurrence_derivation_path,
                   filtered.cve_id,filtered.canonical_package_name,
@@ -1421,7 +1508,7 @@ fn inventory_page_sql(cte: &str) -> String {
            ) justification ON true
            ORDER BY filtered.cve_id COLLATE "C",
                     filtered.canonical_package_name COLLATE "C"
-           LIMIT $8"#
+            LIMIT $9"#
     )
 }
 
@@ -3328,10 +3415,7 @@ mod tests {
                    ('CVE-2099-1','b','b','1','critical','open'),
                    ('CVE-2099-2','c','c','1','high','open'),
                    ('CVE-2099-3','d','d','1','unknown','open')
-        ), filtered AS (SELECT * FROM inventory
-            WHERE ($3::text IS NULL OR package_name ILIKE $3)
-              AND (cardinality($4::text[])=0 OR severity=ANY($4))
-              AND (cardinality($5::text[])=0 OR status=ANY($5)))"#;
+         )"#;
         let sql = inventory_metadata_sql(cte);
         for (filter, expected) in [
             (vec![], (4, 3, 1, 1, 2, 1)),
@@ -3343,6 +3427,7 @@ mod tests {
                 .bind(None::<String>)
                 .bind(filter)
                 .bind(Vec::<String>::new())
+                .bind(None::<String>)
                 .bind("exact")
                 .fetch_one(&pool)
                 .await
@@ -5387,6 +5472,7 @@ mod tests {
         .bind(Option::<String>::None)
         .bind(&empty_filters)
         .bind(&empty_filters)
+        .bind(None::<String>)
         .bind("legacy")
         .fetch_all(&pool)
         .await
@@ -5403,6 +5489,7 @@ mod tests {
         .bind(Option::<String>::None)
         .bind(&empty_filters)
         .bind(&empty_filters)
+        .bind(None::<String>)
         .bind(Some("CVE-2098-0500"))
         .bind(Some("overflow-package-500"))
         .bind(501_i64)

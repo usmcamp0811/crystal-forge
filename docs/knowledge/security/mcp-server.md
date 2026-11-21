@@ -41,7 +41,8 @@ and calls four read tools. TASK-534.5 (milestone M4) adds three write tools and
 one scan read tool. A token can write only when its owner selected a write
 scope at creation; there is no server switch for writes. TASK-534.6 adds five
 read tools for the global compliance catalog; see
-[Compliance read tools](#compliance-read-tools).
+[Compliance read tools](#compliance-read-tools). TASK-534.9 adds two
+configuration scan read tools.
 
 This concept describes implemented code. It does not describe verified
 behavior: build and test results for the exact head are recorded in the task,
@@ -251,6 +252,8 @@ effective set gives empty lists and `not_found` for single resources.
 
 | Tool | Scopes | Inputs | Output | Limits and rules |
 | --- | --- | --- | --- | --- |
+| `find_systems` | `cves:read` | `query` (required, 1 to 200 characters), `limit` | `systems`, `has_more` | Matches the whole hostname or effective configuration name without regard to case. Orders matches by case-folded hostname, then system ID. `has_more` indicates truncation; there is no discovery cursor. |
+| `list_scan_findings` | `cves:read` | `system_id` (required), `scan_id`, `severity`, `package` (exact, case-sensitive canonical package name, 1 to 200 characters), `limit`, `cursor` | `system`, `selection`, `evidence_kind`, `evidence_representation`, `is_runtime_authoritative`, `read_only`, `state`, `head`, `scan_request_target`, `attempt`, `provenance`, `counts`, `findings`, `has_more`, `next_cursor` | Defaults to the registered configuration at flake HEAD. An explicit `scan_id` selects only that sealed scan if it belongs to the registered flake and configuration. |
 | `list_remediation_work` | `cves:read`; `include_poams=true` also needs `poams:read` | `environment_ids` (optional UUID array), `severity` (optional array of `critical`, `high`, `medium`, `low`, `unknown`), `limit`, `cursor`, `include_poams` (default `false`) | `items`: `system_id`, `hostname`, `environment_id`, `environment_name`, `cve_id`, `package_name`, `installed_version`, `fixed_version`, `severity`, `evidence_authority` (`exact_current_scan`), `scan_id`, `scan_completed_at`, and `poam` (`id`, `human_id`, `title`, `status`, or null) only with `include_poams`; `next_cursor` | One item per system, CVE and package from `view_current_exact_cve_occurrences`, filtered by the effective environments in SQL. Ordered by CVE, package, system ID. An `environment_ids` entry outside the effective set gives `invalid_arguments`; the selector never widens the set. No totals. |
 | `get_system_security_context` | `cves:read` | `system_id` (required), `severity`, `limit`, `cursor` | `system` (`id`, `hostname`, `management_mode`, `environment`, `is_active`), `evidence` (`authority`, `current_state`, `exact_authority_failure`, `source`, `running_target`, `read_only`, `note`), `vulnerabilities` (`cve_id`, `package_name`, `canonical_package_name`, `installed_version`, `fixed_version`, `severity`, `cvss_score`, `status`, `description`, `first_seen`, `published_at`), `has_more`, `next_cursor` | Reads the System Detail Current CVE inventory. `no_scan` is not clean. External and Reference systems have no managed running report and no current findings. |
 | `get_remediation_context` | `cves:read`, `provenance:read` | `system_id`, `cve_id` (`CVE-YYYY-NNNN`, any letter case), `package_name` (1 to 200 characters); all required | `evidence_key` (`system_id`, `scan_id`, `cve_id`, `package_name`, `occurrence_derivation_path`), `package` (`installed_version`, `fixed_version`), `target` (`generation`, `store_path`, `derivation_path`, `commit_hash`, or null), `scan`, `attribution` (`status: unknown`), `hints`, `hints_are_authoritative: false` | `not_found` when the current scan of the system has no such CVE and package. `target` comes from `view_current_cve_authority` and is null when it names another scan. No flake repository URL is returned. Source and module attribution is unknown until TASK-271. Hints appear only when a fixed version is known. |
@@ -268,6 +271,67 @@ effective environments of its own call. Unknown argument fields give
 A hidden system or POA&M gives `not_found`, the same result as a nonexistent
 one. The system check runs before the cursor is read, so a cursor cannot tell
 the two cases apart.
+
+### Configuration scan inventory
+
+`find_systems` and `list_scan_findings` use one read-only database snapshot per
+call. They recheck the active token, owner, memberships and environments in
+that snapshot. The recheck can narrow the admitted scope but cannot widen it.
+The system objects contain `system_id`, `hostname`, `configuration_name`,
+`flake_id`, `environment` (`id` as UUID, `name`), `management_mode`, and
+`is_active`. `flake_id` is the database's `flakes.id`, a PostgreSQL `integer`
+(32-bit, serialized as a JSON number), or null when no flake is registered.
+The effective configuration name is the registered configuration name, or the
+hostname when the registered name is empty.
+
+For `list_scan_findings`, omit `scan_id` to select `flake_head`. HEAD requires
+`flakes.snapshot_ready_at` and position zero in the branch snapshot. The tool
+looks up the exact NixOS configuration on that commit. It uses
+`view_derivation_execution_evidence` to check for a completed build with a
+derivation path and a recorded output path, then selects the newest completed
+schema-1 scan of that execution. A physical alias alone does not prove
+execution reuse. The tool never falls back to an older HEAD. An explicit
+`scan_id` selects `exact_scan` and
+may identify historical or archived evidence. An absent, unrelated or
+unsealed explicit scan gives `not_found`, before cursor validation.
+
+`state` is `head_not_ready` when there is no ready position-zero commit,
+and `target_not_ready` when HEAD is ready but has no usable evaluation or built
+output for the registered configuration. For a usable target, the state is
+`no_scan_for_head` when there is no qualifying scan or active attempt, and
+`scan_pending_for_head` when a scan is active but no sealed evidence is
+available. `attempt` gives the exact lifecycle status, such as `pending` or
+`in_progress`. If completed evidence exists, `state` is `completed` even when
+a newer attempt is active. A source-less response has no counts; it does not
+indicate a clean scan.
+
+With completed evidence, `evidence_representation` is `schema1_observations`.
+`head.configuration_derivation_id` identifies the current HEAD configuration,
+if evaluated. `provenance.scan_derivation_id`, `commit_id`, and `commit_hash`
+identify the selected scan's actual derivation and source commit. These can
+differ from HEAD with proven execution reuse or an explicit historical scan.
+`provenance.scanned_system_store_path` reports the actual output path recorded
+on the scan's derivation, or null when that path is unavailable. An expected
+output path alone is not evidence of the scanned path.
+
+`counts` separates `projected_unfiltered` (all
+projected CVE/package pairs), `projected_filtered` (matching pairs across all
+pages), `page` (rows returned), and `raw_scanner` (persisted scanner counts).
+The inventory excludes whitelisted occurrences and picks one representative
+per CVE and canonical package. Pass `next_cursor` as `cursor` with the same
+system, selection and filters. The cursor is at most 8,192 bytes and is bound
+to the selected scan and inventory revision. A changed selection or inventory
+requires a new first page.
+
+`scan_request_target` reports the separate system scan admission target. Use
+its `expected_derivation_id` with `request_cve_scan` when requesting that
+target. If `matches_head` is false, requesting that target does not request a
+scan of the HEAD configuration. A null target has no ID to submit. The
+findings always carry `evidence_kind: configuration_scan` and `read_only: true`.
+`is_runtime_authoritative` is true only when `view_current_cve_authority`
+identifies the same system and scan in the same read snapshot. Neither this flag
+nor the configuration inventory grants mutation authority. Use
+`get_system_security_context` for running evidence.
 
 Full-or-not-found POA&M rule: `get_poam_detail` returns a POA&M only when every
 current context and every current or retired policy and CVE finding subject is
