@@ -513,13 +513,13 @@ sequenceDiagram
     MCP-->>Agent: invalid_arguments, nothing written
   else digest matches
     MCP->>Service: parse and validate again
-    Service->>DB: BEGIN; lock owner, token, roles; advisory locks
+    Service->>DB: BEGIN and lock owner, token, roles and advisory locks
     Service->>DB: plan again under the locks
     alt conflict or name collision
       Service->>DB: ROLLBACK
       MCP-->>Agent: invalid_arguments import_conflicts
     else no conflict
-      Service->>DB: insert untrusted drafts, audit events; COMMIT
+      Service->>DB: insert untrusted drafts, audit events and COMMIT
       MCP-->>Agent: created and reused versions
     end
   end

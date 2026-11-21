@@ -107,3 +107,13 @@ LOCK: OpenCode on vm-agent in /home/mcamp/code/crystal-forge/TASK-534.7-mcp-poli
 
 Branch `TASK-534.7-mcp-policy-drafts` starts at `3b330b87` (TASK-534.6, MR !350). Next free migration 0344.
 <!-- SECTION:NOTES:END -->
+
+## Verification at `f0bde6b5`
+
+Farm PostgreSQL run: `access_tokens` 47, `composite_policy` 38, `mcp_compliance_read` 7, `mcp_policy_authoring` 17, `mcp_transport` 10, `policy_editor_phase2` 5 passed; 0 failed. Web UI derivation (at `1d089a14`, before two non-UI commits; the later `compliance:preview` read-scope change in `logic.rs` is unit-tested but not rebuilt): 969 passed. `nix build .#okf-knowledge` passed after replacing semicolons in one Mermaid message.
+
+Defect found while testing: an interchange policy without `enabled_by_default` made the import insert fail with a database error (HTTP 500 in the browser route as well). The field is NOT NULL and part of the semantic digest, so the import validator now rejects such a document with a validation error. The ignored browser interchange tests in `handlers/api/compliance.rs` built documents without the field; their documents now include it. Those tests are `#[ignore]` and not run by any CI job.
+
+Decision: `compliance:preview` is not a write scope (no production confirmation), in the server and the token dialog.
+
+Integration-access scenario: not run; two farm attempts for TASK-534.6 aborted on NixOS unit builds (builder signal 6) before any case started.
