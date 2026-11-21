@@ -651,11 +651,21 @@ other gets `stale_revision`.
 Migration `0345_bundle_draft_revision_and_agent_attribution.sql` adds
 `draft_revision` (default 1) to `compliance_bundle_versions`. A BEFORE UPDATE
 trigger increments it when a mutable version changes (digest bookkeeping and
-attribution columns do not count). An AFTER trigger on
+attribution columns do not count). Membership changes in
 `compliance_bundle_version_policies` and `compliance_bundle_version_requirements`
-increments the parent draft's counter on every membership row change, so
-browser edits, derivations and MCP writes all change the revision. A published
-or deprecated version never changes. The migration also adds
+also increment the parent draft's counter, so browser edits, derivations and
+MCP writes all change the revision. Migration
+`0347_bundle_revision_statement_trigger.sql` replaces the row-level membership
+triggers of 0345 with statement-level AFTER INSERT, UPDATE and DELETE triggers
+that use transition tables. They increment the counter of each affected
+mutable version at most once per transaction, independent of the number of
+membership rows and of the per-lineage statements of
+`sync_bundle_version_membership`. A replacement of a large membership
+therefore adds a small, bounded number to `draft_revision`: one for the
+membership, plus one for each version-row UPDATE that changes a business
+column, such as a metadata change or a trust reset. A no-op update writes no
+row and keeps the revision. A published or deprecated version never changes.
+Migration 0345 also adds
 `created_via_agent`, `created_access_token_id` (`ON DELETE SET NULL`) and
 `created_access_token_name` to `compliance_bundle_versions`.
 
@@ -683,7 +693,12 @@ lineage; `changed` lists a different exact version or enforcement mode. When
 either side is a resolver conflict (`status: conflict` with `conflicts`), the
 three lists are empty. `members` lists every candidate member with its
 publication and trust state. `coverage` comes from the bundle requirement
-coverage service (counts and up to 100 requirements without full coverage).
+coverage query (counts and up to 100 requirements without full coverage). The
+query runs in the same `REPEATABLE READ, READ ONLY` transaction as the
+candidate read, the member read and the resolver passes, before the rollback.
+`candidate.draft_revision` is read in that snapshot too, so the members, the
+resolver results and the coverage all describe the candidate at that
+revision.
 
 `facts` holds deterministic counts: systems previewed, systems with changes or
 conflicts, added, removed and changed policies, draft and untrusted members.

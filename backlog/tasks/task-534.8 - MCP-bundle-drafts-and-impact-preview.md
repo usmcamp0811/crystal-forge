@@ -107,6 +107,10 @@ Implementation (uncompiled, untested; no build, test or preview was run):
 - Revision: BEFORE UPDATE trigger on `compliance_bundle_versions` plus an AFTER row trigger on `compliance_bundle_version_policies` and `compliance_bundle_version_requirements` that increments the parent draft's counter.
 - Resolver: private `candidate_preview` flag on the single-assignment resolver and public `resolve_system_effective_policies_with_candidate_in_tx` with `CandidateAssignment`; the candidate replaces an active assignment of the same bundle lineage at the same target. Preview runs in a `REPEATABLE READ, READ ONLY` transaction that is rolled back; environments use the batch resolver for the current set and at most 100 systems.
 - Browser `create_bundle` now takes an actor, sets `created_by` on the initial draft and writes `bundle_draft_created`; `update_bundle` writes `bundle_draft_updated`.
+- MR !352 review (two P2 findings, after `024acb67`; uncompiled, untested):
+  - Preview snapshot: `preview_bundle_impact` now reads requirement coverage through `compute_bundle_requirement_coverage_on_conn` inside its `REPEATABLE READ, READ ONLY` transaction before the rollback, and returns `candidate.draft_revision` from the same snapshot. `compute_bundle_requirement_coverage(pool, ..)` is a thin wrapper for the existing callers.
+  - Write amplification: migration `0347_bundle_revision_statement_trigger.sql` (0345 is unchanged) replaces the row-level membership revision triggers with per-event statement-level triggers that use transition tables. The increment is at most once per mutable version per transaction (transaction-local setting `crystal_forge.bundle_revision_bumped`), because the per-lineage statements of `sync_bundle_version_membership` would otherwise still increment once per new lineage.
+  - Tests: `large_membership_replacement_increments_the_revision_a_bounded_number_of_times`, `coverage_reads_the_requirement_membership_of_the_caller_snapshot`, and revision and coverage assertions in `preview_reports_differences_and_review_state_without_writing`.
 <!-- SECTION:NOTES:END -->
 
 ## Verification

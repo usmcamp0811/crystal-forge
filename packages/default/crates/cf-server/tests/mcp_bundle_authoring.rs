@@ -19,12 +19,19 @@ use chrono::{Duration, Utc};
 use crystal_forge::api::models::{CreateAccessTokenRequest, UpdateComplianceBundleRequest};
 use crystal_forge::auth::authorization::RestrictedGrant;
 use crystal_forge::compliance::digest::refresh_policy_mapping_digest;
+use crystal_forge::compliance::framework_model::FrameworkVersionCanonical;
+use crystal_forge::compliance::requirement_model::RequirementVersionCanonical;
 use crystal_forge::handlers::agent_request::CFState;
 use crystal_forge::mcp;
 use crystal_forge::mcp::tools::{ToolCaller, ToolError, call_tool};
 use crystal_forge::models::auth_identity::AuthRole;
 use crystal_forge::queries::auth_identity::{insert_user_environment_membership, sync_user_role};
 use crystal_forge::queries::compliance::{PolicyDraftIntent, ensure_policy_draft, update_bundle};
+use crystal_forge::queries::framework_requirements::{
+    compute_bundle_requirement_coverage, compute_bundle_requirement_coverage_on_conn,
+    insert_bundle_version_requirement, insert_framework_version, insert_requirement_version,
+    upsert_framework_lineage, upsert_requirement_lineage,
+};
 use crystal_forge::queries::users::insert_user;
 use crystal_forge::services::access_tokens::{self as token_service, AccessTokenSettings};
 use crystal_forge::services::bundle_authoring::{
@@ -684,13 +691,12 @@ async fn membership_updates_are_exact_validated_and_revisioned(pool: PgPool) {
     )
     .await;
     assert_eq!(no_op["changed"], false);
-    let trust: String = sqlx::query_scalar(
-        "SELECT trust_state FROM compliance_bundle_versions WHERE id = $1",
-    )
-    .bind(version_id)
-    .fetch_one(&pool)
-    .await
-    .expect("bundle draft trust");
+    let trust: String =
+        sqlx::query_scalar("SELECT trust_state FROM compliance_bundle_versions WHERE id = $1")
+            .bind(version_id)
+            .fetch_one(&pool)
+            .await
+            .expect("bundle draft trust");
     assert_eq!(trust, "trusted");
 
     // Invalid memberships fail without a write.
@@ -963,6 +969,110 @@ async fn concurrent_updates_of_one_draft_have_exactly_one_winner(pool: PgPool) {
     }
 }
 
+/// Migration 0347: membership writes increment `draft_revision` once per
+/// transaction, not once per membership row or per lineage-trigger
+/// statement.
+#[sqlx::test]
+async fn large_membership_replacement_increments_the_revision_a_bounded_number_of_times(
+    pool: PgPool,
+) {
+    const MEMBERS: i32 = 300;
+    let (_, author) = admin_author(&pool, BUNDLES).await;
+    let (_, first) = published_policy(&pool, &unique("first")).await;
+    let created = call(
+        &author,
+        &pool,
+        "create_bundle_draft",
+        new_bundle(&unique("large"), &[first]),
+    )
+    .await;
+    let bundle_id = uuid(&created["bundle_id"]);
+    let version_id = uuid(&created["version_id"]);
+    let initial = created["draft_revision"].as_i64().expect("revision");
+
+    // Set-based form of the `draft_policy` fixture: the lineage trigger
+    // creates one untrusted draft version per inserted lineage.
+    let prefix = unique("bulk");
+    sqlx::query(
+        "INSERT INTO deployment_policies (name, description, policy_type, config, enabled) \
+         SELECT $1 || '-' || lpad(n::text, 3, '0'), 'Bundle fixture', 'custom_check', $2, false \
+         FROM generate_series(1, $3) AS n",
+    )
+    .bind(&prefix)
+    .bind(json!({"mode": "all", "rules": []}))
+    .bind(MEMBERS)
+    .execute(&pool)
+    .await
+    .expect("insert policy lineages");
+    let mut requested: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT current_draft_version_id FROM deployment_policies \
+         WHERE name LIKE $1 || '-%' ORDER BY name",
+    )
+    .bind(&prefix)
+    .fetch_all(&pool)
+    .await
+    .expect("draft versions");
+    assert_eq!(requested.len(), MEMBERS as usize);
+    // A reversed order proves that the stored order is the request order.
+    requested.reverse();
+
+    // Replace one published member with 300 new lineages.
+    let updated = call(
+        &author,
+        &pool,
+        "update_bundle_draft",
+        json!({"version_id": version_id, "draft_revision": initial,
+               "policy_version_ids": requested}),
+    )
+    .await;
+    assert_eq!(updated["changed"], true);
+    let revised = updated["draft_revision"].as_i64().expect("revision");
+    assert_eq!(revised, bundle_revision(&pool, version_id).await);
+    assert!(
+        revised > initial && revised - initial <= 3,
+        "membership replacement must increment the revision a bounded number of times: \
+         {initial} -> {revised}"
+    );
+    assert_eq!(members(&pool, version_id).await, requested);
+    assert_eq!(lineages(&pool, bundle_id).await.len(), MEMBERS as usize);
+
+    // A reorder of the same lineages (only the exact version rows change) is
+    // bounded as well.
+    let mut reordered = requested.clone();
+    reordered.reverse();
+    let moved = call(
+        &author,
+        &pool,
+        "update_bundle_draft",
+        json!({"version_id": version_id, "draft_revision": revised,
+               "policy_version_ids": reordered}),
+    )
+    .await;
+    assert_eq!(moved["changed"], true);
+    let moved_revision = moved["draft_revision"].as_i64().expect("revision");
+    assert_eq!(moved_revision, bundle_revision(&pool, version_id).await);
+    assert!(
+        moved_revision > revised && moved_revision - revised <= 3,
+        "{revised} -> {moved_revision}"
+    );
+    assert_eq!(members(&pool, version_id).await, reordered);
+
+    // The same membership again is a no-op and writes nothing.
+    let before = counts(&pool).await;
+    let unchanged = call(
+        &author,
+        &pool,
+        "update_bundle_draft",
+        json!({"version_id": version_id, "draft_revision": moved_revision,
+               "policy_version_ids": reordered}),
+    )
+    .await;
+    assert_eq!(unchanged["changed"], false);
+    assert_eq!(unchanged["draft_revision"], moved_revision);
+    assert_eq!(bundle_revision(&pool, version_id).await, moved_revision);
+    assert_eq!(counts(&pool).await, before);
+}
+
 // ---------------------------------------------------------------------------
 // Authorization
 // ---------------------------------------------------------------------------
@@ -1181,7 +1291,18 @@ async fn preview_reports_differences_and_review_state_without_writing(pool: PgPo
             .expect("requires_evaluation")
             .is_empty()
     );
+    // The candidate revision comes from the preview snapshot; coverage is read
+    // in that snapshot too.
+    assert_eq!(
+        preview["candidate"]["draft_revision"],
+        bundle_revision(&pool, candidate.version_id).await
+    );
+    assert_eq!(
+        preview["candidate"]["draft_revision"],
+        candidate.draft_revision
+    );
     assert!(preview["coverage"]["total_requirements"].is_i64());
+    assert!(preview["coverage"]["gaps"].is_array());
     assert!(preview.get("passed").is_none() && preview.get("compliant").is_none());
     assert_eq!(
         preview_side_effects(&pool).await,
@@ -1208,6 +1329,7 @@ async fn preview_reports_differences_and_review_state_without_writing(pool: PgPo
     )
     .await
     .expect("update derived draft");
+    let derived_revision = bundle_revision(&pool, derived.version_id).await;
     let before = preview_side_effects(&pool).await;
     let preview = call(
         &previewer,
@@ -1218,6 +1340,8 @@ async fn preview_reports_differences_and_review_state_without_writing(pool: PgPo
     )
     .await;
     assert_eq!(preview["scope_type"], "environment");
+    assert_eq!(preview["candidate"]["draft_revision"], derived_revision);
+    assert!(preview["coverage"]["total_requirements"].is_i64());
     let systems = preview["systems"].as_array().expect("systems");
     let mut listed = systems
         .iter()
@@ -1317,6 +1441,118 @@ async fn preview_hides_targets_outside_the_token_environments(pool: PgPool) {
     assert_eq!(listed, vec![inside]);
     assert!(!preview.to_string().contains(&outside.to_string()));
     assert_eq!(preview_side_effects(&pool).await, before);
+}
+
+/// Creates one framework release with `count` requirement versions and
+/// returns their IDs.
+async fn requirement_versions(pool: &PgPool, count: usize) -> Vec<Uuid> {
+    let key = unique("snapshot-framework");
+    let mut tx = pool.begin().await.expect("begin framework");
+    let framework_id = upsert_framework_lineage(&mut tx, "Snapshot FW", None, &key, None)
+        .await
+        .expect("framework lineage");
+    let release = FrameworkVersionCanonical {
+        canonical_source_key: key.clone(),
+        canonical_release_key: "V1R1".to_owned(),
+        version: "V1R1".to_owned(),
+        publisher: None,
+        title: None,
+    };
+    let framework_version_id =
+        insert_framework_version(&mut tx, framework_id, &release, None, None)
+            .await
+            .expect("framework version");
+    let mut ids = Vec::with_capacity(count);
+    for index in 0..count {
+        let rule = format!("V-{index:03}");
+        let requirement_id = upsert_requirement_lineage(&mut tx, framework_id, &rule)
+            .await
+            .expect("requirement lineage");
+        let canonical = RequirementVersionCanonical {
+            canonical_requirement_key: rule.clone(),
+            external_id: rule,
+            title: None,
+            description: None,
+            kind: "rule".to_owned(),
+            severity: None,
+            check_text: None,
+            fix_text: None,
+            metadata: json!({}),
+        };
+        ids.push(
+            insert_requirement_version(
+                &mut tx,
+                requirement_id,
+                framework_version_id,
+                &canonical,
+                None,
+            )
+            .await
+            .expect("requirement version"),
+        );
+    }
+    tx.commit().await.expect("commit framework");
+    ids
+}
+
+/// The preview reads coverage in its `REPEATABLE READ` snapshot: the
+/// connection-level coverage query sees the requirement membership of the
+/// snapshot, not a later commit, and that snapshot's `draft_revision`.
+#[sqlx::test]
+async fn coverage_reads_the_requirement_membership_of_the_caller_snapshot(pool: PgPool) {
+    let admin = AuthoringActor::browser(user(&pool, AuthRole::Admin).await);
+    let draft = create_bundle_lineage_draft(
+        &pool,
+        &admin,
+        &NewBundleLineage {
+            name: unique("snapshot"),
+            description: None,
+            framework: "CF-TEST".into(),
+            framework_version: None,
+            policy_version_ids: Vec::new(),
+        },
+    )
+    .await
+    .expect("bundle draft");
+    let requirements = requirement_versions(&pool, 2).await;
+    let mut tx = pool.begin().await.expect("begin membership");
+    insert_bundle_version_requirement(&mut tx, draft.version_id, requirements[0], 0)
+        .await
+        .expect("first requirement");
+    tx.commit().await.expect("commit membership");
+
+    let mut snapshot = pool.begin().await.expect("begin snapshot");
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *snapshot)
+        .await
+        .expect("snapshot isolation");
+    // The first query of a REPEATABLE READ transaction takes its snapshot.
+    let snapshot_revision: i64 =
+        sqlx::query_scalar("SELECT draft_revision FROM compliance_bundle_versions WHERE id = $1")
+            .bind(draft.version_id)
+            .fetch_one(&mut *snapshot)
+            .await
+            .expect("snapshot revision");
+
+    // Another transaction adds a requirement after the snapshot.
+    let mut tx = pool.begin().await.expect("begin later membership");
+    insert_bundle_version_requirement(&mut tx, draft.version_id, requirements[1], 1)
+        .await
+        .expect("second requirement");
+    tx.commit().await.expect("commit later membership");
+    let committed_revision = bundle_revision(&pool, draft.version_id).await;
+    assert!(committed_revision > snapshot_revision);
+
+    let in_snapshot = compute_bundle_requirement_coverage_on_conn(&mut *snapshot, draft.version_id)
+        .await
+        .expect("coverage in snapshot");
+    assert_eq!(in_snapshot.total_requirements, 1);
+    snapshot.rollback().await.expect("rollback snapshot");
+
+    let committed = compute_bundle_requirement_coverage(&pool, draft.version_id)
+        .await
+        .expect("committed coverage");
+    assert_eq!(committed.total_requirements, 2);
 }
 
 // ---------------------------------------------------------------------------

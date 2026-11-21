@@ -19,7 +19,7 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::compliance::digest::{refresh_bundle_requirement_digest, refresh_policy_mapping_digest};
@@ -631,8 +631,37 @@ pub async fn delete_policy_mapping(
 /// **All** selected baseline requirements are included in the denominator
 /// regardless of recovery status — unresolved releases do not disappear from
 /// coverage totals.
+///
+/// This function runs [`compute_bundle_requirement_coverage_on_conn`] on one
+/// pooled connection outside an explicit transaction.
+///
+/// # Errors
+///
+/// Returns an error when no pooled connection is available or a query fails.
 pub async fn compute_bundle_requirement_coverage(
     pool: &PgPool,
+    bundle_version_id: Uuid,
+) -> Result<BundleCoverageReport> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire connection for bundle requirement coverage")?;
+    compute_bundle_requirement_coverage_on_conn(&mut conn, bundle_version_id).await
+}
+
+/// Computes the requirement coverage of a bundle version on the caller's
+/// connection, with the rules of [`compute_bundle_requirement_coverage`].
+///
+/// Pass `&mut *tx` to read inside a transaction. The queries then see the
+/// snapshot of that transaction: in a `REPEATABLE READ` transaction the
+/// report describes the same bundle membership and requirement membership as
+/// every other read of that transaction. The function only reads.
+///
+/// # Errors
+///
+/// Returns an error when a query fails.
+pub async fn compute_bundle_requirement_coverage_on_conn(
+    conn: &mut PgConnection,
     bundle_version_id: Uuid,
 ) -> Result<BundleCoverageReport> {
     // Source framework identity reads through the bundle version's own
@@ -656,7 +685,7 @@ pub async fn compute_bundle_requirement_coverage(
         "#,
     )
     .bind(bundle_version_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .context("failed to load bundle coverage source framework")?;
 
@@ -681,7 +710,7 @@ pub async fn compute_bundle_requirement_coverage(
         "#,
     )
     .bind(bundle_version_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load bundle coverage framework releases")?;
 
@@ -770,7 +799,7 @@ pub async fn compute_bundle_requirement_coverage(
         "#,
     )
     .bind(bundle_version_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to compute bundle requirement coverage")?;
 
@@ -858,7 +887,7 @@ pub async fn compute_bundle_requirement_coverage(
         "#,
     )
     .bind(bundle_version_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load bundle requirement mapping evidence")?;
 

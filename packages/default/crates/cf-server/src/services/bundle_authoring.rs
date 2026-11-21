@@ -94,7 +94,7 @@ use crate::queries::compliance::{
     BundleDraftDerivationError, BundleDraftIntent, create_bundle_in_tx, ensure_bundle_draft,
 };
 use crate::queries::framework_requirements::{
-    RequirementCoverage, compute_bundle_requirement_coverage,
+    RequirementCoverage, compute_bundle_requirement_coverage_on_conn,
 };
 use crate::services::policy_authoring::{
     AuthoringActor, PolicyAuthoringError, authorize_token_tx, insert_policy_audit_event,
@@ -753,8 +753,11 @@ fn trimmed(text: &str) -> Option<String> {
 /// `changed: false`. Otherwise it writes metadata through the lineage row
 /// (the browser editor's path; the sync trigger copies it to the draft),
 /// writes the exact membership, recomputes the digests and writes the
-/// `bundle_draft_updated` audit event. The revision triggers of migration
-/// 0345 increment `draft_revision`.
+/// `bundle_draft_updated` audit event. The revision triggers increment
+/// `draft_revision`: the version-row trigger of migration 0345 once per
+/// version UPDATE that changes a business column, and the membership
+/// triggers of migration 0347 once per transaction, independent of the
+/// membership size.
 ///
 /// # Errors
 ///
@@ -1154,6 +1157,10 @@ pub struct CandidateVersion {
     pub trust_state: String,
     /// Semantic digest, or `pending`.
     pub semantic_digest: String,
+    /// Draft revision read in the preview snapshot. The members, the
+    /// resolver results and the coverage of the preview describe the version
+    /// at this revision.
+    pub draft_revision: i64,
 }
 
 /// One member of the candidate version with its review state.
@@ -1201,7 +1208,8 @@ pub struct CoverageGap {
 }
 
 /// Requirement coverage of the candidate from
-/// [`compute_bundle_requirement_coverage`].
+/// [`compute_bundle_requirement_coverage_on_conn`], read in the preview
+/// snapshot.
 #[derive(Debug, Clone, Serialize)]
 pub struct CoverageSummary {
     /// Selected requirements of the candidate.
@@ -1294,14 +1302,17 @@ pub struct BundleImpactPreview {
 /// [`resolve_system_effective_policies_with_candidate_in_tx`], and reports
 /// the difference by policy lineage. The candidate may be a draft or
 /// untrusted; draft and untrusted members are listed. Requirement coverage
-/// comes from [`compute_bundle_requirement_coverage`].
+/// comes from [`compute_bundle_requirement_coverage_on_conn`].
 ///
 /// SECURITY: The target must be in `effective` (the caller's effective
 /// environments); otherwise the result is [`BundleAuthoringError::NotFound`],
 /// the same as for an unknown ID. Only systems of that environment appear in
 /// the result.
 ///
-/// The resolution runs in one `REPEATABLE READ, READ ONLY` transaction that
+/// Every read (target, candidate row with its `draft_revision`, members,
+/// resolver passes and requirement coverage) runs in one
+/// `REPEATABLE READ, READ ONLY` transaction, so the whole result describes
+/// the candidate at the returned `candidate.draft_revision`. The transaction
 /// is always rolled back: the preview writes nothing, assigns nothing and
 /// schedules nothing. It never reports a pass or fail outcome; see
 /// [`REQUIRES_EVALUATION`].
@@ -1372,7 +1383,7 @@ pub async fn preview_bundle_impact(
 
     let candidate = sqlx::query_as::<_, CandidateVersion>(
         r#"SELECT bundle_id, id AS bundle_version_id, version, name, publication_state,
-                  trust_state, semantic_digest
+                  trust_state, semantic_digest, draft_revision
            FROM compliance_bundle_versions WHERE id = $1"#,
     )
     .bind(bundle_version_id)
@@ -1449,12 +1460,16 @@ pub async fn preview_bundle_impact(
             changed,
         });
     }
+    // INVARIANT: Coverage reads in the same snapshot as the candidate row,
+    // the members and the resolver, so all of them describe the candidate at
+    // `candidate.draft_revision`. A concurrent draft update cannot mix two
+    // revisions into one preview.
+    let report = compute_bundle_requirement_coverage_on_conn(&mut *tx, bundle_version_id)
+        .await
+        .map_err(internal(PREVIEW_FAILED))?;
     // The transaction only read; the rollback releases its snapshot.
     tx.rollback().await.map_err(internal(PREVIEW_FAILED))?;
 
-    let report = compute_bundle_requirement_coverage(pool, bundle_version_id)
-        .await
-        .map_err(internal(PREVIEW_FAILED))?;
     let mut gaps = report
         .rows
         .into_iter()
