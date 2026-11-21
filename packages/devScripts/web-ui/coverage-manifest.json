@@ -124,78 +124,78 @@
     {
       "path": "/",
       "covered": true,
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "path": "/systems",
       "covered": true,
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "path": "/systems/:id",
       "covered": true,
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "path": "/environments",
       "covered": true,
-      "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "path": "/flakes",
       "covered": true,
-      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "path": "/builds",
       "covered": true,
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "path": "/evaluations",
       "covered": true,
-      "designRef": "docs/design/CrystalForge/components/EvalsView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "path": "/evaluations/:commit_id",
       "covered": false,
-      "designRef": "docs/design/CrystalForge/components/EvalDrawer.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "reason": "Commit-scoped evaluation view; the evaluation drawer is exercised via /evaluations steps. Dedicated deep-link coverage is a candidate future addition."
     },
     {
       "path": "/builders",
       "covered": true,
-      "designRef": "docs/design/CrystalForge/components/BuildersView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "path": "/caches",
       "covered": true,
-      "designRef": "docs/design/CrystalForge/components/CachesView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "path": "/cves",
       "covered": true,
-      "designRef": "docs/design/CrystalForge/components/CvesView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "path": "/scanning",
       "covered": true,
-      "designRef": "docs/design/CrystalForge/components/ScanningView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "path": "/deployment-policies",
       "covered": true,
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "path": "/compliance",
       "covered": true,
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "path": "/admin",
       "covered": true,
-      "designRef": "docs/design/CrystalForge/components/AdminView.jsx"
+      "designRef": "docs/design/CrystalForge/crystal-forge.html"
     },
     {
       "path": "/style-guide",
@@ -220,7 +220,7 @@
     {
       "path": "/setup",
       "covered": false,
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "reason": "First-run setup wizard conflicts with the already-configured test instance; setup-coach onboarding states are covered via the dashboard onboarding steps (06c*-06f*) instead."
     },
     {
@@ -323,7 +323,7 @@
       "name": "06-dashboard",
       "description": "Dashboard after login",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -337,7 +337,7 @@
       "name": "06-dashboard-loading-spinner",
       "description": "Dashboard loading spinner remains visible while dashboard data is pending",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -351,7 +351,7 @@
       "name": "06y-recent-deployments-scroll",
       "description": "Dashboard recent deployments widget scrolls when list exceeds visible height",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -365,7 +365,7 @@
       "name": "06z-fleet-health-widget-assert",
       "description": "Dashboard Fleet Health widget matches expected status counts",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -379,7 +379,7 @@
       "name": "06z2-dashboard-error-no-fabricated-data",
       "description": "",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -393,7 +393,7 @@
       "name": "06z3-dashboard-widget-visuals-parity",
       "description": "",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -407,7 +407,7 @@
       "name": "06a-onboarding-coach-dashboard",
       "description": "Expanded nine-step Setup Coach with completed prerequisites and Create policy selected as current across desktop, narrow desktop, and mobile in both themes",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -421,7 +421,7 @@
       "name": "06b-onboarding-environments-callout",
       "description": "Environments: page callouts visible, policies guidance present",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -434,7 +434,7 @@
       "name": "06b2-onboarding-environments-form-callouts",
       "description": "Environments: open form, assert policies field callout",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -447,7 +447,7 @@
       "name": "06b3-onboarding-environments-create",
       "description": "Environments: fill form, submit, assert step Configured",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -460,7 +460,7 @@
       "name": "06c-onboarding-flakes-callout",
       "description": "Flakes: page callouts visible",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -473,7 +473,7 @@
       "name": "06c2-onboarding-flakes-form-callouts",
       "description": "Flakes: open form, assert progressive callouts, fill and submit",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -486,7 +486,7 @@
       "name": "06c3-onboarding-flakes-create",
       "description": "Flakes: assert step Configured after creation",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -499,7 +499,7 @@
       "name": "06d-onboarding-builders-callout",
       "description": "Builders: page callouts visible",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -512,7 +512,7 @@
       "name": "06d2-onboarding-builders-form-callouts",
       "description": "Builders: open modal, assert progressive callouts, fill and submit",
       "route": "/builders",
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -525,7 +525,7 @@
       "name": "06d3-onboarding-builders-create",
       "description": "Builders: assert step Configured after creation",
       "route": "/builders",
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -538,7 +538,7 @@
       "name": "06e-onboarding-caches-callout",
       "description": "Caches: page callouts visible",
       "route": "/builders",
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -551,7 +551,7 @@
       "name": "06e2-onboarding-caches-form-callouts",
       "description": "Caches: open modal, assert progressive callouts, fill and submit",
       "route": "/caches",
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -564,7 +564,7 @@
       "name": "06e3-onboarding-caches-create",
       "description": "Caches: assert step Configured after creation",
       "route": "/caches",
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -577,7 +577,7 @@
       "name": "06f-onboarding-systems-callout",
       "description": "Systems: page callouts visible",
       "route": "/caches",
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -590,7 +590,7 @@
       "name": "06f2-onboarding-systems-form-callouts",
       "description": "Systems: open form, assert progressive callouts, generate key",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -603,7 +603,7 @@
       "name": "06f3-onboarding-systems-keygen",
       "description": "Systems: create flake in real DB via API, select env + flake in form",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -616,7 +616,7 @@
       "name": "06f4-onboarding-systems-create",
       "description": "Systems: submit, assert step and agent Configured",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -629,7 +629,7 @@
       "name": "06g-onboarding-coach-minimized",
       "description": "Minimized Setup Coach with Create policy selected as current across desktop, narrow desktop, and mobile in both themes",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -643,7 +643,7 @@
       "name": "06h-onboarding-coach-all-configured",
       "description": "Completed nine-step Setup Coach state across desktop, narrow desktop, and mobile in both themes",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -657,7 +657,7 @@
       "name": "06i-security-workflows-role-coach",
       "description": "Guide and read-only security walkthroughs for Operator and Viewer without setup-progress requests or automatic security mutations",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/CoachTours.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -668,7 +668,7 @@
       "name": "06j-security-coach-cve-evidence",
       "description": "Current exact CVE evidence walkthrough, source-backed fleet drawer, triage modal dock, and mutation-free exit",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/CoachTours.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -679,7 +679,7 @@
       "name": "06k-security-coach-poam-acceptance",
       "description": "POA&M detail and risk acceptance source walkthroughs spotlight lifecycle, verification, human RA identity, immutable source UUID, and mutation-free exit",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/CoachTours.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -690,7 +690,7 @@
       "name": "06b-config-health-bar",
       "description": "Dashboard top notification bar for admin config health issues",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -703,7 +703,7 @@
       "name": "06c-config-health-widget",
       "description": "Dashboard Pipeline Readiness widget with actionable warning links",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -716,7 +716,7 @@
       "name": "06x-pipeline-readiness-scroll",
       "description": "Dashboard pipeline readiness widget supports scrolling for many issues",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -730,7 +730,7 @@
       "name": "07-sidebar-desktop-expanded",
       "description": "Desktop: sidebar expanded — grouped sections with labels visible and attention badges rendered for alerting views",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -743,7 +743,7 @@
       "name": "08-sidebar-desktop-collapsed",
       "description": "Desktop: sidebar in icons-only collapsed state with edge toggle while attention badges remain visible in rail mode",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -756,7 +756,7 @@
       "name": "08b-sidebar-desktop-toggle-expand",
       "description": "Desktop: sidebar expanded via toggle click — full labels and sections",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -769,7 +769,7 @@
       "name": "09-sidebar-tablet-collapsed",
       "description": "Tablet (900px): default icons-only state, edge toggle visible",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -782,7 +782,7 @@
       "name": "09b-sidebar-tablet-expanded",
       "description": "Tablet (900px): sidebar expanded via toggle — section labels visible",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -795,7 +795,7 @@
       "name": "09c-sidebar-mobile-drawer",
       "description": "Mobile (375px): drawer open with grouped navigation sections",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -808,7 +808,7 @@
       "name": "09d-sidebar-narrow-collapsed",
       "description": "Narrow desktop (560px): default icons-only — no hamburger, edge toggle present",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -821,7 +821,7 @@
       "name": "09e-sidebar-sections-fullwidth",
       "description": "Desktop: full-width sidebar showing all section group headers; asserts Evaluations before Builds nav order (TASK-392)",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -835,7 +835,7 @@
       "name": "09f-sidebar-light-expanded",
       "description": "Desktop light theme: expanded shell parity screenshot",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -849,7 +849,7 @@
       "name": "09g-topbar-notifications-dark",
       "description": "Mocked API adaptation covers populated durable-feed, mutation, keyboard, and responsive panel states",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -863,7 +863,7 @@
       "name": "09h-topbar-notifications-light",
       "description": "Mocked API adaptation covers keyset reconciliation, exact retries, stale responses, mutation errors, accessibility, and responsive containment",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -877,7 +877,7 @@
       "name": "09i-topbar-notifications-non-admin",
       "description": "Mocked API response verifies allowed notification presentation in a viewer shell",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -891,7 +891,7 @@
       "name": "10-responsive-reset-desktop",
       "description": "Reset viewport and localStorage to desktop defaults for remaining screenshots",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -904,7 +904,7 @@
       "name": "11-user-menu",
       "description": "User dropdown menu",
       "route": "/",
-      "designRef": "docs/design/CrystalForge/components/Shell.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -917,7 +917,7 @@
       "name": "11a-profile-preferences",
       "description": "Profile page uses account-scoped preferences and reports save failures",
       "route": "/profile",
-      "designRef": "docs/design/CrystalForge/components/ProfileView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -931,7 +931,7 @@
       "name": "11b-builders",
       "description": "Builders list cards/table parity with real-shaped API data",
       "route": "/builders",
-      "designRef": "docs/design/CrystalForge/components/BuildersView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -945,7 +945,7 @@
       "name": "11c-builders-edit-modal",
       "description": "Builders edit modal with keypair actions",
       "route": "/builders",
-      "designRef": "docs/design/CrystalForge/components/BuildersView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -959,7 +959,7 @@
       "name": "12-systems",
       "description": "Systems list cards/table parity with view toggle and shown count",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -973,7 +973,7 @@
       "name": "12a-systems-empty-state",
       "description": "Systems empty state from real API data",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -987,7 +987,7 @@
       "name": "12b-systems-config-warning",
       "description": "Systems warning state for missing flake linkage and agent heartbeat",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1001,7 +1001,7 @@
       "name": "12c-systems-modal-config-field",
       "description": "Systems add modal opens with save action",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -1014,7 +1014,7 @@
       "name": "12d-systems-side-panel-open",
       "description": "Systems side panel opens from selection and exposes design actions",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -1027,7 +1027,7 @@
       "name": "12d2-systems-side-panel-deployment-progress",
       "description": "Systems side panel captures live deployment progress banner and real Recent activity for atlas-03 fixture",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1041,7 +1041,7 @@
       "name": "12e-systems-edit-modal",
       "description": "Systems edit modal for existing systems",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/EditSystemModal.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1055,7 +1055,7 @@
       "name": "12e2-systems-edit-modal-key-rotation",
       "description": "Agent identity key rotation from the edit modal Security tab",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/EditSystemModal.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1069,7 +1069,7 @@
       "name": "12e3-system-detail-key-rotation-reopen",
       "description": "System Detail refreshes canonical key state across edit-modal reopen",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/EditSystemModal.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1083,7 +1083,7 @@
       "name": "12e4-systems-update-key-row-action",
       "description": "Systems-list Update Key action retains its backend-backed PUT flow",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/EditSystemModal.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1097,7 +1097,7 @@
       "name": "12f-systems-deploy-modal",
       "description": "Systems deploy modal with commit selector",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/DeployGate.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1111,7 +1111,7 @@
       "name": "12g-system-detail-history-logs-edit",
       "description": "System detail history/logs tabs and edit action",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -1124,7 +1124,7 @@
       "name": "12k-system-detail-tab-icons",
       "description": "System detail tab rail renders shared Icon SVGs for every tab (design parity)",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1138,7 +1138,7 @@
       "name": "12h-system-detail-cves-grouped-justification",
       "description": "System detail package-first CVEs preserve exact evidence for POA&M creation and keep justification distinct",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1152,7 +1152,7 @@
       "name": "12ha-system-detail-cve-inventory-fallbacks",
       "description": "System detail incrementally loads bounded CVE pages and proves Current uses only the running derivation's exact scan",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1166,7 +1166,7 @@
       "name": "12hb-system-detail-assignment-versions",
       "description": "System Detail shows each host's assigned bundle revision and enforcement mode instead of the catalog version",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1180,7 +1180,7 @@
       "name": "12d-systems-api-error-no-mock-fallback",
       "description": "Systems API failures show error state without deterministic mock hosts",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1194,7 +1194,7 @@
       "name": "12g-systems-warning-clears-after-link",
       "description": "Systems missing-flake warning clears after linking flake via Edit modal",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1208,7 +1208,7 @@
       "name": "13-flakes",
       "description": "Flakes registry list/table parity with errored sync chip and sidebar badge acknowledgment after visiting /flakes",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1222,7 +1222,7 @@
       "name": "13a-flakes-cards-parity",
       "description": "Flakes cards mode parity",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1236,7 +1236,7 @@
       "name": "13aa-flakes-tray-diff-parity",
       "description": "Flake side tray commit explorer and diff modal parity including the Sync failed banner for errored flakes",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1250,7 +1250,7 @@
       "name": "13e-flakes-add-modal-credentials",
       "description": "Flake add modal with build scope and credential controls",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1264,7 +1264,7 @@
       "name": "13ea-flakes-delete-confirm-parity",
       "description": "Flake delete confirmation requires typing the flake name",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1278,7 +1278,7 @@
       "name": "13f-flakes-edit-modal-credentials",
       "description": "Flake edit modal showing existing build scope and credential controls",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1292,7 +1292,7 @@
       "name": "13g-flakes-edit-modal-ssh-save-persist",
       "description": "Flakes edit modal persists SSH auth settings after save/reopen",
       "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/Systems.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1306,7 +1306,7 @@
       "name": "13d-flakes-stress-dataset",
       "description": "Flakes view remains responsive with production-shaped timeline payload",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1320,7 +1320,7 @@
       "name": "13b-flakes-config-warning",
       "description": "Flakes warning state for latest evaluation errors",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -1333,7 +1333,7 @@
       "name": "13c-flakes-history-rewrite-modal",
       "description": "Flakes view history rewrite conflict modal after sync",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -1346,7 +1346,7 @@
       "name": "13h-flakes-force-push-rewrite-recovery",
       "description": "Real git force-push rewrite + sync updates flake timeline state",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1360,7 +1360,7 @@
       "name": "14-environments",
       "description": "Environments registry cards/table parity",
       "route": "/environments",
-      "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1374,7 +1374,7 @@
       "name": "14a-environments-add-modal",
       "description": "Environments unified Add/Edit modal parity",
       "route": "/environments",
-      "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1388,7 +1388,7 @@
       "name": "14b-environments-config-warning",
       "description": "Environments warning state for missing builder and cache assignments",
       "route": "/environments",
-      "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1402,7 +1402,7 @@
       "name": "14c-environments-detail-panel",
       "description": "Environments: clicking a card opens the detail side panel (not the edit form) — TASK-392",
       "route": "/environments",
-      "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1416,7 +1416,7 @@
       "name": "15-builds",
       "description": "Builds page",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1430,7 +1430,7 @@
       "name": "15a-builds-header-and-metrics",
       "description": "Builds header actions and stat strip labels",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -1443,7 +1443,7 @@
       "name": "11b-builds-queue-card-focus",
       "description": "Build queue row selection focus",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1457,7 +1457,7 @@
       "name": "15b-builds-completed-tab",
       "description": "Builds page - Completed Builds tab",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -1470,7 +1470,7 @@
       "name": "15c-builds-completed-filters",
       "description": "Builds page - Completed Builds with filters",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "full"
       ],
@@ -1483,7 +1483,7 @@
       "name": "15d-builds-queue-table-view",
       "description": "Build queue default table view",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1497,7 +1497,7 @@
       "name": "15e-builds-cancelling-state",
       "description": "Build queue showing cancelling/stopping state",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1511,7 +1511,7 @@
       "name": "15f-builds-human-duration",
       "description": "Build queue showing human-readable duration format",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1525,7 +1525,7 @@
       "name": "15g-builds-action-visibility",
       "description": "Build queue action buttons shown only for valid states",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1539,7 +1539,7 @@
       "name": "15h-builds-completed-restart-action",
       "description": "Completed tab restart action requeues cancelled build",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1553,7 +1553,7 @@
       "name": "15h2-builds-obsolete-contract-re-evaluation",
       "description": "Obsolete build recovery queues authoritative evaluation for the exact commit",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1567,7 +1567,7 @@
       "name": "15h3-builds-operator-obsolete-contract-guidance",
       "description": "Operators receive administrator guidance without starting authoritative recovery",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1581,7 +1581,7 @@
       "name": "15h4-builds-completed-bulk-retry",
       "description": "Completed bulk retry exposes accessible selection and reports partial stale results",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1595,7 +1595,7 @@
       "name": "15i-builds-non-operator",
       "description": "Builds view hides retry and mutating controls for non-operators",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1609,7 +1609,7 @@
       "name": "15j-builds-latest-per-flake-populated",
       "description": "Builds active and completed tabs honor server-authoritative latest markers and retain the pressed filter",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1623,7 +1623,7 @@
       "name": "15k-builds-latest-combined-filters-empty-clear",
       "description": "Build latest-only composes with active status criteria and search and exposes a clearable filter-aware empty state",
       "route": "/builds",
-      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1637,7 +1637,7 @@
       "name": "16-cves",
       "description": "CVE dashboard - exact CVE/package fleet detail, history, mixed triage validation, typed assignee, evidence conflict refresh, server-owned scope, POA&M link, and keyboard focus",
       "route": "/cves",
-      "designRef": "docs/design/CrystalForge/components/CvesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1651,7 +1651,7 @@
       "name": "16b-cves-severity-filter",
       "description": "CVE dashboard - severity filter re-issues request with ?severity=critical",
       "route": "/cves",
-      "designRef": "docs/design/CrystalForge/components/CvesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1679,7 +1679,7 @@
       "name": "task433-canonical-large-catalog",
       "description": "Persisted large catalog exercises deep search, collapse, chunking, cards/table, and range selection",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1693,7 +1693,7 @@
       "name": "20af-policy-catalog-selection-delete-regressions",
       "description": "Collapsed selection, Ctrl-click, re-expansion, and real partial bulk deletion are a merge-blocking regression gate",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1707,7 +1707,7 @@
       "name": "19-policies-new-modal-fields",
       "description": "Policies new modal shows the unified design-faithful form",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1721,7 +1721,7 @@
       "name": "20-policies-new-modal-rule-builder",
       "description": "Policies new modal can add an assertion rule via the builder",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1735,7 +1735,7 @@
       "name": "20a-policies-new-modal-pending-mappings",
       "description": "Policies new modal Mappings tab with two queued requirement mappings",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1749,7 +1749,7 @@
       "name": "20aa-policies-new-modal-mappings-roundtrip",
       "description": "Policies new modal persists two real requirement mappings and reloads them",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1763,7 +1763,7 @@
       "name": "20ac-stig-import-reconciliation-fixture",
       "description": "STIG import fixture renders server-authoritative reconciliation proof",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1777,7 +1777,7 @@
       "name": "20ad-stig-nixos-assertion-roundtrip",
       "description": "STIG auditd assertions remain structured through refinement and import serialization",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1791,7 +1791,7 @@
       "name": "task433-canonical-imported-stig-refinement",
       "description": "The official Anduril NixOS STIG import preserves read-only provenance and mappings while added Nix enforcement saves, reopens, and retains lineage",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1805,7 +1805,7 @@
       "name": "20b-policies-cve-gate-create-roundtrip",
       "description": "API: create require_cve_check policy and verify it round-trips correctly",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1819,7 +1819,7 @@
       "name": "20ab-compliance-bundle-requirement-baseline-roundtrip",
       "description": "Compliance bundle requirement and policy memberships remain independent across create, edit, reload, and release changes",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1833,7 +1833,7 @@
       "name": "task433-canonical-unmapped-nix-policy",
       "description": "An Unmapped custom policy authors real metadata-backed Nix enforcement and persists it across save and reopen",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1847,7 +1847,7 @@
       "name": "task433-canonical-multiline-dod",
       "description": "The exact multiline DoD consent banner saves and reopens without semantic or byte-level alteration",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/data-enforcement.js",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1861,7 +1861,7 @@
       "name": "20ab2-policy-editor-eight-kind-roundtrip",
       "description": "All eight exposed composite kinds author, persist, reload, edit, and export without exposing incomplete controls",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/data-enforcement.js",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1875,7 +1875,7 @@
       "name": "task433-canonical-mixed-nix-cve-evidence",
       "description": "A mapped Nix and CVE policy renders human-readable framework and requirement context with exact persisted evaluator output through production evidence APIs and UI",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/data-enforcement.js",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1889,7 +1889,7 @@
       "name": "20ac-policy-editor-category-and-imported-provenance",
       "description": "Category changes preserve enforcement, and an imported policy exposes read-only provenance and mappings",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1903,7 +1903,7 @@
       "name": "20c-policies-multirule-create-roundtrip",
       "description": "API: create multi-rule custom_check (mode=any) and verify rules[] round-trips",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1917,7 +1917,7 @@
       "name": "20d-policies-cve-gate-invalid-rejected",
       "description": "API: require_cve_check with invalid when_no_scan value is rejected 400",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1931,7 +1931,7 @@
       "name": "20e-policies-multirule-rules-only-no-expression-required",
       "description": "API: rules-only custom_check (no top-level expression) is accepted",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1945,7 +1945,7 @@
       "name": "16c-scanning-view",
       "description": "Scanning view - live endpoint wiring, nested rows, and schedule modal",
       "route": "/scanning",
-      "designRef": "docs/design/CrystalForge/components/ScanningView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1959,7 +1959,7 @@
       "name": "16d-scanning-recovery-mock",
       "description": "Mock-only Scanning expired post-build Completed history, archive/card response, and periodic/manual provenance; does not prove DB eligibility or SQL",
       "route": "/scanning",
-      "designRef": "docs/design/CrystalForge/components/ScanningView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -1970,7 +1970,7 @@
       "name": "16e-poam-register-design",
       "description": "Mocked POA&M register pagination, scoped navigation and partial bulk action",
       "route": "/poams",
-      "designRef": "docs/design/CrystalForge/components/PoamsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -1981,7 +1981,7 @@
       "name": "21-caches",
       "description": "Cache management view with stats and Push Jobs tab",
       "route": "/caches",
-      "designRef": "docs/design/CrystalForge/components/CachesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -1995,7 +1995,7 @@
       "name": "21a-caches-cards-table-toggle",
       "description": "Caches: cards/table toggle switches display mode — TASK-392",
       "route": "/caches",
-      "designRef": "docs/design/CrystalForge/components/CachesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2009,7 +2009,7 @@
       "name": "22-caches-modal-nix",
       "description": "Add cache modal with Nix type selected and public test UX",
       "route": "/caches",
-      "designRef": "docs/design/CrystalForge/components/CachesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2023,7 +2023,7 @@
       "name": "23-caches-modal-http",
       "description": "Add cache modal save flow creates a destination row",
       "route": "/caches",
-      "designRef": "docs/design/CrystalForge/components/CachesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2037,7 +2037,7 @@
       "name": "24-caches-modal-s3",
       "description": "Add cache modal with S3 type selected",
       "route": "/caches",
-      "designRef": "docs/design/CrystalForge/components/CachesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2051,7 +2051,7 @@
       "name": "25-caches-modal-attic",
       "description": "Add cache modal with Attic type selected",
       "route": "/caches",
-      "designRef": "docs/design/CrystalForge/components/CachesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2065,7 +2065,7 @@
       "name": "26-evaluations",
       "description": "Evaluations page — Active Queue tab with cancel buttons (TASK-273)",
       "route": "/evaluations",
-      "designRef": "docs/design/CrystalForge/components/EvalsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2079,7 +2079,7 @@
       "name": "26b-evaluations-history",
       "description": "Evaluations page — History tab with completed/failed/cancelled rows (TASK-273)",
       "route": "/evaluations",
-      "designRef": "docs/design/CrystalForge/components/EvalsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2093,7 +2093,7 @@
       "name": "26c-evaluations-latest-per-flake-populated",
       "description": "Evaluation active and history tabs honor server-authoritative latest markers and retain the pressed filter",
       "route": "/evaluations",
-      "designRef": "docs/design/CrystalForge/components/EvalsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2107,7 +2107,7 @@
       "name": "26d-evaluations-latest-combined-filters-empty-clear",
       "description": "Evaluation latest-only composes with search, status, and flake filters and exposes a clearable filter-aware empty state",
       "route": "/evaluations",
-      "designRef": "docs/design/CrystalForge/components/EvalsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2121,7 +2121,7 @@
       "name": "26e-evaluation-policy-bundle-controls",
       "description": "Dense evaluation matrix bundle/control modes, overlap, health, drilldown and preserved state",
       "route": "/evaluations",
-      "designRef": "docs/design/CrystalForge/components/EvalDrawer.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2132,7 +2132,7 @@
       "name": "12i-system-detail-generation-metric",
       "description": "System detail shows API-provided generation in overview metrics",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2146,7 +2146,7 @@
       "name": "12j-system-detail-deploy-generation-list",
       "description": "Deploy tab generation selector matches generation row text styling expectations",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2175,7 +2175,7 @@
       "name": "28-system-hardening-tab",
       "description": "System detail hardening tab table and scan eligibility state",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/HardeningTab.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2189,7 +2189,7 @@
       "name": "29-compliance-empty",
       "description": "Compliance view renders empty state when no bundles exist",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2203,7 +2203,7 @@
       "name": "29a-compliance-populated",
       "description": "Compliance view renders server-backed imported requirement coverage and exact mapped policy details",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2217,7 +2217,7 @@
       "name": "29aa-imported-draft-policy-deletion",
       "description": "Imported draft policy deletion preserves source provenance while updating backend coverage",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2231,7 +2231,7 @@
       "name": "29b-compliance-evidence-drawer",
       "description": "Evidence loading, absent, transport-error, pending, and partial states precede a real persisted aggregate with concurrent Error and Partial presentation",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2245,7 +2245,7 @@
       "name": "29n-compliance-evidence-control-rail-alignment",
       "description": "Compliance evidence control names and ordinals retain fixed horizontal geometry across selection, filtering and CAT group changes",
       "route": "/compliance?view=evidence",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2256,7 +2256,7 @@
       "name": "29c-compliance-export-modal",
       "description": "Compliance export evidence modal renders format picker and toggles",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2270,7 +2270,7 @@
       "name": "29d-compliance-new-bundle-modal",
       "description": "Compliance new bundle modal renders fields, policy picker, and validates",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2284,7 +2284,7 @@
       "name": "29e-compliance-api-error",
       "description": "Compliance view renders error state when bundle API fails",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2298,7 +2298,7 @@
       "name": "29f-compliance-assignment-reason-semantics",
       "description": "Compliance assignment reason survives unrelated edits, changes, and explicit clearing",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2312,7 +2312,7 @@
       "name": "29g-poam-failed-evidence-create",
       "description": "Persisted FAIL evidence creates a POA&M from exact read-only finding context and returns through exact evidence navigation",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2323,7 +2323,7 @@
       "name": "29h-poam-link-compatible-findings",
       "description": "Server-compatible finding-origin search links same-lineage persisted FAIL findings and excludes incompatible lineage",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2334,7 +2334,7 @@
       "name": "29i-poam-detail-edits-milestones-conflicts",
       "description": "Common POA&M detail persists metadata, status, notes, milestone lifecycle, and presents real stale revisions",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2345,7 +2345,7 @@
       "name": "task433-canonical-poam-lifecycle",
       "description": "A mapped POA&M lifecycle renders human-readable framework and requirement context, retains failed evaluator evidence, rejects failing closure, then verifies PASS, closes, reloads, and preserves history",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2356,7 +2356,7 @@
       "name": "29k-poam-system-rollups-navigation",
       "description": "System compliance renders exact server POA&M rollups, filters, common detail, and linked evidence navigation",
       "route": "/systems/:id?tab=compliance",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2367,7 +2367,7 @@
       "name": "29l-poam-bundle-rollups-batching",
       "description": "Bundle compliance renders the authoritative POA&M mixture with bounded batch rollups and no eager row details",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2378,7 +2378,7 @@
       "name": "29m-poam-assignment-relationship-immutability",
       "description": "Assignment POA&M relationship link and unlink preserve exact immutable assignment version content and pointer",
       "route": "/compliance",
-      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2389,7 +2389,7 @@
       "name": "13i-flakes-non-admin",
       "description": "Flakes view hides admin-only mutations for non-admin users",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2403,7 +2403,7 @@
       "name": "30-admin",
       "description": "Admin / Server Management view renders for the logged-in session",
       "route": "/admin",
-      "designRef": "docs/design/CrystalForge/components/AdminView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2417,7 +2417,7 @@
       "name": "30a-admin-automatic-retries-defaults-reset",
       "description": "Admin Server shows retry defaults and Reset restores the server baseline without persisting drafts",
       "route": "/admin",
-      "designRef": "docs/design/CrystalForge/components/AdminView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2431,7 +2431,7 @@
       "name": "30b-admin-automatic-retries-save-reload",
       "description": "Admin saves every retry policy field to the real server and observes the persisted values after reload",
       "route": "/admin",
-      "designRef": "docs/design/CrystalForge/components/AdminView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2445,7 +2445,7 @@
       "name": "30c-admin-automatic-retries-failed-save-retains-draft",
       "description": "Admin retry persistence failure is visible and retains every unsaved draft field",
       "route": "/admin",
-      "designRef": "docs/design/CrystalForge/components/AdminView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2459,7 +2459,7 @@
       "name": "30d-evidence-lifecycle",
       "description": "Evidence editor lifecycle: create → add → save → reopen → edit → clear → save",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2473,7 +2473,7 @@
       "name": "30e-policy-card-direct-edit-preserves-evidence",
       "description": "Direct card Edit (never opening the drawer) shows existing evidence and adding more extends rather than replaces it",
       "route": "/deployment-policies",
-      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": [
         "ci_fast",
         "full"
@@ -2487,7 +2487,7 @@
       "name": "12l-task440-config-lifecycle",
       "description": "TASK-440 real explicit primary prerequisite plus targeted Config Inspector handler/PostgreSQL regression, with mocked prerequisite, lifecycle, endpoint-isolation, and provenance-safe legacy generation states",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2499,7 +2499,7 @@
       "name": "12la-task440-partial-config-inventory",
       "description": "TASK-440 mocked partial Config inventory warning, observed rows, and fail-closed comparison; not live integration",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2511,7 +2511,7 @@
       "name": "12m-task440-config-explorer-keyboard-wide",
       "description": "TASK-440 mocked API Config explorer at 1920x1080 with one cross-surface snapshot token, options/summary 409 restart, token-bound pagination, retained rows and counts during background requests, nearest usable retained-generation and commit baselines, delayed summary isolation, option provenance, stale responses, and keyboard coverage; not live integration",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2523,7 +2523,7 @@
       "name": "12n-task440-config-narrow-keyboard",
       "description": "TASK-440 mocked API Config narrow 900x900 layout, aria-pressed revision controls with keyboard activation, and keyboard-accessible module-source load-more/failure retry; not live integration",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2535,7 +2535,7 @@
       "name": "12p-task440-config-canonical-wide-expanded",
       "description": "TASK-440 canonical atlas-01 generation 160 Config state at 1920x1080 aligned to the authoritative design fixture, with exact metrics, typed drift, measured pagination, and objective 7:5 geometry; not live integration",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2547,7 +2547,7 @@
       "name": "12q-task440-config-canonical-narrow",
       "description": "TASK-440 canonical atlas-01 generation 160 Config state at 900x900 aligned to the authoritative design fixture, with exact metrics, reachable controls, stacking, and clipping assertions; not live integration",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2559,7 +2559,7 @@
       "name": "13j-task440-flake-states-panes-navigation",
       "description": "TASK-440 mocked API flake lifecycle, declaration errors/retry/409 replacement, full-SHA identity, all output panes at 900x900, reconciliation, and exact navigation; not live integration",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2571,7 +2571,7 @@
       "name": "13l-task440-flake-systems-canonical-wide",
       "description": "TASK-440 canonical mocked API Flake Systems state at 1920x1080 with exact reconciliation segments, rows, totals, environment metadata, revision reset, and geometry; not live integration",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2583,7 +2583,7 @@
       "name": "13m-task440-flake-systems-canonical-narrow",
       "description": "TASK-440 canonical mocked API Flake Systems state at 900x900 with exact direct controls, rows, columns, and no nested clipping; not live integration",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2595,7 +2595,7 @@
       "name": "13n-task440-flake-modules-canonical-wide-expanded",
       "description": "TASK-440 canonical mocked API Flake Modules expanded state at 1920x1080 with module-level source path, declarations, and exact geometry; not live integration",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2607,7 +2607,7 @@
       "name": "13o-task440-flake-modules-canonical-narrow-expanded",
       "description": "TASK-440 canonical mocked API Flake Modules expanded state at 900x900 with module-level source path, reachable continuation, and unclipped geometry; not live integration",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2619,7 +2619,7 @@
       "name": "13p-task440-flake-inputs-canonical-wide",
       "description": "TASK-440 canonical mocked API Flake Inputs state at 1920x1080 with direct-root hierarchy, exact headers, totals, transitive counts, deltas, metadata placement, and geometry; not live integration",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2631,7 +2631,7 @@
       "name": "13q-task440-flake-inputs-canonical-narrow",
       "description": "TASK-440 canonical mocked API Flake Inputs state at 900x900 with direct roots, exact headers, reachable metadata, and unclipped column geometry; not live integration",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2643,7 +2643,7 @@
       "name": "13k-task440-drawer-modal-keyboard-layering",
       "description": "TASK-440 flake drawer and diff-modal layering, Escape, focus trap, and restoration",
       "route": "/flakes",
-      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2655,7 +2655,7 @@
       "name": "12o-task440-rollback-notification-auto-latest",
       "description": "TASK-440 rollback preselection and accepted retained identity/generation submission without store_path, unresolved-artifact error contract, selector labels, and typed auto_latest outcomes with idempotent retry",
       "route": "/systems/:id",
-      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
@@ -2667,7 +2667,7 @@
       "name": "14d-task440-cross-surface-auth-navigation",
       "description": "TASK-440 environment return, exact approval navigation, non-disclosure, and Compliance edit authorization",
       "route": "/environments",
-      "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx",
+      "designRef": "docs/design/CrystalForge/crystal-forge.html",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,

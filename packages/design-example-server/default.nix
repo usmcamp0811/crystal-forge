@@ -1,6 +1,6 @@
 # Design example server package
 #
-# Serves docs/design/CrystalForge — the deterministic, fixture-backed design
+# Serves docs/design/CrystalForge — the single-file, fixture-backed design
 # mock — over HTTP without requiring an ambient python3. Snowfall-lib
 # auto-discovers this file as `packages.<system>.design-example-server`, so no
 # flake.nix wiring is needed:
@@ -56,11 +56,11 @@ pkgs.writeShellApplication {
     echo "────────────────────────────────────────────────────────────"
     echo "  Crystal Forge Design Example"
     echo "  Serving: $DESIGN_DIR"
-    echo "  URL:     http://localhost:$PORT/crystal-forge.html?view=dashboard&theme=dark"
+    echo "  URL:     http://localhost:$PORT/crystal-forge.html"
     echo ""
     echo "  Open the above URL in your browser to verify the design."
-    echo "  Change ?view=dashboard to any view name from the manifest."
-    echo "  Change &theme=dark to &theme=light for light mode."
+    echo "  Use sidebar navigation and theme controls in the design."
+    echo "  For Profile and Access Tokens, select Mira Reyes in the sidebar."
     echo "────────────────────────────────────────────────────────────"
 
     cd "$DESIGN_DIR"

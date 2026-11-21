@@ -9493,7 +9493,7 @@ const steps = [
   {
     name: "12e2-systems-edit-modal-key-rotation",
     description: "Agent identity key rotation from the edit modal Security tab",
-    designRef: "docs/design/CrystalForge/components/EditSystemModal.jsx",
+    designRef: "docs/design/CrystalForge/crystal-forge.html",
     action: async (page) => {
       const systemId = "00000000-0000-0000-0000-0000000000a1";
       const seededFingerprint = "SHA256:S7Bvjk46dxXSAdVz0KpCN2LlXavWGiwCJ4+lbMbSlOA";
@@ -9965,7 +9965,7 @@ const steps = [
   {
     name: "12e3-system-detail-key-rotation-reopen",
     description: "System Detail refreshes canonical key state across edit-modal reopen",
-    designRef: "docs/design/CrystalForge/components/EditSystemModal.jsx",
+    designRef: "docs/design/CrystalForge/crystal-forge.html",
     action: async (page) => {
       const systemId = "00000000-0000-0000-0000-0000000000a1";
       const publicKeyRoute = `**/api/v1/systems/${systemId}/public-key`;
@@ -10057,7 +10057,7 @@ const steps = [
   {
     name: "12e4-systems-update-key-row-action",
     description: "Systems-list Update Key action retains its backend-backed PUT flow",
-    designRef: "docs/design/CrystalForge/components/EditSystemModal.jsx",
+    designRef: "docs/design/CrystalForge/crystal-forge.html",
     action: async (page) => {
       const systemId = "00000000-0000-0000-0000-0000000000a1";
       const publicKeyRoute = `**/api/v1/systems/${systemId}/public-key`;

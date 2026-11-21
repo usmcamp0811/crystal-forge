@@ -26,6 +26,7 @@ async fn actor(pool: &PgPool) -> PoamActor {
         .await
         .unwrap();
     PoamActor {
+        credential: crystal_forge::auth::authorization::CredentialIdentity::BrowserSession,
         user_id,
         identifier: "Export Admin".into(),
         is_admin: false,

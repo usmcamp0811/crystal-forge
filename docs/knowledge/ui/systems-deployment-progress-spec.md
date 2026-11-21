@@ -27,7 +27,7 @@ The guide tells an implementer to follow nine sections top to bottom and to copy
 
 | Section | Content |
 | --- | --- |
-| 0 Ground truth | Design references in `docs/design/CrystalForge/components/SystemDetail.jsx`, `Systems.jsx`, `styles.css`, and the current implementation files to read first. |
+| 0 Ground truth | Design reference in `docs/design/CrystalForge/crystal-forge.html` (inline SystemDetail, Systems and CSS), and the current implementation files to read first. |
 | 1 Stage contract | A deployment flows through observable stages derived server-side from `pending_system_deployments` columns and never stored as a string: `queued`, `picked_up`, `applying`, `activated`, `failed`. Superseded and expired rows are not shown as active. The UI must tolerate a jump from `picked_up` to `activated` because old agents never report "applying". |
 | 2 Migration | A new migration adds `delivered_at` and `applying_at` to `pending_system_deployments`. Existing migrations are never edited. |
 | 3 Server | A `source` parameter distinguishes `manual_deploy`, `manual_rollback_commit`, and `manual_rollback_generation`. The heartbeat handler marks `delivered_at`. A new agent endpoint `POST /agent/deployment-started` sets `applying_at` and records a `cf_deployment_started` event idempotently. The history endpoint maps that event. A new `GET /api/v1/systems/:id/deployment-status` returns a `SystemDeploymentProgress` row, or 204 when idle. |

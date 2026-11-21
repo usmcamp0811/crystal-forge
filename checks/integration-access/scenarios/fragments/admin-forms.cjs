@@ -25,7 +25,9 @@ exports.run = async (ctx) => {
   // supply an accessible name. The exact label narrows to one field container.
   const inputFor = (scope, label, tag = "input") => scope.locator("label")
     .filter({ hasText: new RegExp(`^${label}$`) }).locator("..").locator(`:scope > ${tag}`);
-  const userRow = () => page.getByRole("row").filter({ hasText: user.email });
+  let userId = receipts["adminForms.userId"];
+  const userRow = () => page.getByTestId(`admin-user-${userId}`);
+  const editModal = () => page.getByTestId("edit-user-modal");
 
   await ctx.step(`${phase}: independent Admin sign-in`, async () => {
     await page.goto(ctx.url("/login"));
@@ -51,20 +53,30 @@ exports.run = async (ctx) => {
     ]);
     expect(response.status()).toBe(status);
     const body = await response.json();
-    ctx.emit(`adminForms.response.${key}`, { status: response.status(), body });
+    const payload = response.request().postDataJSON();
+    if (method === "PATCH") {
+      if (key === "edit") expect(payload).toEqual({ role: config.editedRoleWire, edit_local_grants: true });
+      else expect(payload).toEqual({ enabled: false });
+    }
+    // Creation contains a public fixture password; retain only PATCH payloads.
+    ctx.emit(`adminForms.response.${key}`, { status: response.status(), body,
+      ...(method === "PATCH" ? { payload } : {}) });
     return body;
   };
   const openEdit = async () => {
     await expect(userRow()).toHaveCount(1);
-    await userRow().getByRole("button", { name: "Edit", exact: true }).click();
+    await userRow().getByRole("button", { name: `Edit user ${user.username} (${user.email})`, exact: true }).click();
     await expect(page.getByRole("heading", { name: "Edit user", exact: true })).toBeVisible();
+    await expect(editModal().getByTestId("edit-local-role")).not.toBeChecked();
+    await expect(editModal().getByTestId("local-role")).toBeDisabled();
+    await expect(editModal().getByTestId("edit-local-environments")).not.toBeChecked();
   };
   const reloadUser = async (role, enabled) => {
     await page.reload();
     await expect(userRow()).toHaveCount(1);
     await expect(userRow().getByText(role, { exact: true })).toBeVisible();
     await expect(userRow().getByText(enabled ? "active" : "disabled", { exact: true })).toBeVisible();
-    await expect(userRow().getByText("all", { exact: true })).toBeVisible();
+    await expect(userRow().getByText("None", { exact: true })).toBeVisible();
   };
   const serverTab = () => page.getByRole("button", { name: "Server", exact: true }).click();
 
@@ -85,6 +97,7 @@ exports.run = async (ctx) => {
         expect(created.role).toBe(config.initialRoleWire);
         expect(created.enabled).toBe(true);
         expect(created.environments).toEqual([]);
+        userId = created.id;
         ctx.emit("adminForms.userId", created.id);
         await expect(page.getByRole("heading", { name: "Add user", exact: true })).toHaveCount(0);
         await reloadUser(config.initialRoleWire, true);
@@ -100,8 +113,9 @@ exports.run = async (ctx) => {
         await reloadUser(config.editedRoleWire, true);
         // Cancel an existing account's draft as well as the new-account draft.
         await openEdit();
-        await inputFor(page, "Role", "select").selectOption(config.initialRoleWire);
-        await page.getByRole("checkbox", { name: /Enabled/ }).uncheck();
+        await editModal().getByTestId("edit-local-role").check();
+        await editModal().getByRole("combobox", { name: "Local role override", exact: true }).selectOption(config.initialRoleWire);
+        await editModal().getByTestId("user-enabled").uncheck();
         await page.getByRole("button", { name: "Cancel", exact: true }).click();
         await expect(page.getByRole("heading", { name: "Edit user", exact: true })).toHaveCount(0);
         await reloadUser(config.editedRoleWire, true);
@@ -110,14 +124,20 @@ exports.run = async (ctx) => {
       }
     } else if (phase === "edit" || phase === "disable") {
       await openEdit();
-      if (phase === "edit") await inputFor(page, "Role", "select").selectOption(config.editedRoleWire);
-      else await page.getByRole("checkbox", { name: /Enabled/ }).uncheck();
+      if (phase === "edit") {
+        await editModal().getByTestId("edit-local-role").check();
+        await editModal().getByRole("combobox", { name: "Local role override", exact: true }).selectOption(config.editedRoleWire);
+      } else await editModal().getByTestId("user-enabled").uncheck();
       const saved = await mutate("PATCH", `/api/v1/admin/users/${receipts["adminForms.userId"]}`,
         () => page.getByRole("button", { name: "Save changes", exact: true }).click(), 200, phase);
       expect(saved.id).toBe(receipts["adminForms.userId"]);
       expect(saved.role).toBe(config.editedRoleWire);
       expect(saved.enabled).toBe(phase !== "disable");
       expect(saved.environments).toEqual([]);
+      expect(saved.grant_sources).toEqual({
+        local_roles: [config.editedRoleWire], local_environments: [],
+        oidc_roles: [], oidc_environments: [], legacy_roles: [], legacy_environments: [],
+      });
       await expect(page.getByRole("heading", { name: "Edit user", exact: true })).toHaveCount(0);
       await reloadUser(config.editedRoleWire, phase !== "disable");
     } else {

@@ -1055,24 +1055,16 @@ async fn seed_users(pool: &PgPool, admin: &FixtureAdmin) -> Result<Vec<(String, 
 
         // Assign role
         let role = user.role.as_deref().unwrap_or("viewer");
-        // Map fixture role names to auth_role enum
+        // Fixture configuration is an explicit local grant. Use the same source
+        // writer as local administration so reseeding an overlapping IdP role
+        // does not silently lose local ownership.
         let db_role = match role {
-            "admin" => "admin",
-            "operator" => "operator",
-            "viewer" | _ => "viewer",
+            "admin" => crate::models::auth_identity::AuthRole::Admin,
+            "operator" => crate::models::auth_identity::AuthRole::Operator,
+            _ => crate::models::auth_identity::AuthRole::Viewer,
         };
 
-        sqlx::query(
-            r#"
-            INSERT INTO user_role_assignments (user_id, role)
-            VALUES ($1, $2::auth_role)
-            ON CONFLICT (user_id, role) DO NOTHING
-            "#,
-        )
-        .bind(user_id)
-        .bind(db_role)
-        .execute(pool)
-        .await?;
+        crate::queries::auth_identity::assign_role_to_user(pool, user_id, db_role, None).await?;
 
         user_ids.push((user.email.clone(), user_id));
     }

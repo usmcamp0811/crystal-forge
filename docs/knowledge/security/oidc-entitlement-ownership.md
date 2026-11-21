@@ -1,0 +1,344 @@
+---
+type: Security Model
+title: OIDC entitlement ownership and freshness
+description: Explains local and IdP grant union, legacy classification, ordered reconciliation, future PAT freshness eligibility, and the one-time upgrade procedure.
+tags:
+  - crystal-forge
+  - security
+  - oidc
+  - authorization
+implementation_status: partial
+sources:
+  - id: migration
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0335_oidc_entitlement_sources.sql at commit c2c22b02"
+    title: Source flags and entitlement state migration
+  - id: reconciliation
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/oidc_entitlements.rs at commit c2c22b02"
+    title: Ordered reconciliation and freshness eligibility helper
+  - id: admin
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/admin.rs at commit c2c22b02"
+    title: Source-aware administrator grant replacement and guards
+  - id: callback
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/handlers/api/auth_oidc.rs at commit c2c22b02"
+    title: Login generation reservation and bound callback reconciliation
+  - id: policy
+    resource: "Crystal Forge repository file packages/default/crates/cf-config/src/config/oidc.rs at commit c2c22b02"
+    title: Positive entitlement maximum age configuration
+---
+
+# OIDC entitlement ownership and freshness
+
+## Status and authority
+
+TASK-534.2 implements the source model and callback reconciliation described
+below. The final database regressions passed on the farm at `24b3bad6`; the
+Access scenario passed at `89e7689b`. Exact review-revision CI remains pending.
+Those are historical checkpoints, not proof of the MR !345 requested-change
+fixes now in the worktree. Current server, database and new real-browser
+verification is **PENDING**. The reported UI farm result is 887 tests, including
+nine new tests; it does not establish server or browser acceptance.
+`implementation_status: partial` also records that the freshness helper is not
+wired to PAT admission. There are no PAT/MCP endpoints or token-row validator.
+The approved [CF-AGENT-ACCESS-001 v1.1 specification](agent-access-tokens-mcp-remediation-context.md),
+sections 4.4 and 5.3, defines the release requirements; its baseline description
+of preserve-on-no-mapping behavior is historical.
+
+The owner has two existing OIDC accounts, Admin and Operator, and chose
+independent local overrides. Neither that account list nor the Users page's
+source labels or `all` environment summary proves ownership of any grant.
+
+## Effective grants are a union
+
+Migration `0335_oidc_entitlement_sources.sql` adds these fields to both
+`user_role_assignments` and `user_environment_memberships`:
+
+| Field | Contribution |
+| --- | --- |
+| `local_grant` boolean | Independent administrator/local grant. |
+| `oidc_identity_id` nullable UUID | Managed grant from one bound OIDC identity. |
+| `legacy_ownership_unresolved` boolean | Preserved effective grant with unknown ownership. |
+
+Each effective row represents the union of its contributions. Local and IdP
+ownership can overlap on the same role or environment row. Removing one source
+retains the row if another source remains. The source CHECK requires
+`local_grant OR oidc_identity_id IS NOT NULL OR legacy_ownership_unresolved`.
+A composite foreign key binds the identity pointer to the same user. Identity
+deletion cannot silently convert managed grants to local grants.
+
+The migration preserves existing effective rows, IDs and actor attribution.
+For users with any external identity, it sets existing grants to unresolved
+legacy ownership, not inferred IdP ownership. Grants for users without external
+identities remain local. Null actor attribution is not classification evidence.
+
+Explicit admin role replacement clears local/unresolved **role** contributions
+and installs the requested local role, while retaining IdP contributions.
+Explicit environment replacement does the same for **memberships**, including
+an explicitly empty list. Omitted categories stay unchanged. A role-only change
+does not resolve legacy memberships. Reassigning the same effective value still
+classifies that category as local when the client explicitly submits replacement.
+`clear_local_role: true` instead removes only local role contributions and retains
+unresolved legacy and IdP roles. PATCH grant edits require
+`edit_local_grants: true`; replacement role and role clear are mutually exclusive.
+PATCH and list responses report the effective union and separate `grant_sources`
+metadata, so requested Viewer can still return Operator or Admin from the IdP.
+The source-aware UI requires explicit category opt-in and acknowledgment before
+legacy replacement. Ordinary save, status and password edits no longer implicitly
+reassign effective grants as local overrides.
+
+All supplied PATCH fields, source flags, notification eligibility and audit events
+now commit in one transaction under the shared grant advisory lock before the
+user lock. Invalid environments, audit failure or last-Admin rejection rolls back
+the entire mutation. See the [PATCH contract](../api/builders-queues-environments-dashboard-admin-api.md#user-patch-contract-mr-345-requested-changes)
+and [editor addendum](../ui/admin-user-grant-source-editor.md). The uncommitted
+fix is in `packages/default/crates/cf-server/src/handlers/api/admin.rs`,
+`src/queries/admin.rs` and `src/api/models.rs` (the latter paths relative to that
+crate); the provenance commits above describe the earlier groundwork.
+
+### In-transaction actor recheck scope
+
+`patch_admin_user` (PATCH `/api/v1/admin/users/:id`) uses the lock order below
+inside one transaction. The advisory lock comes first. The actor and target user
+rows follow in ascending id order. The actor recheck comes last.
+
+1. Take the shared grant advisory lock, transaction scoped.
+2. Lock the actor and target `users` rows with one `ORDER BY id FOR UPDATE`
+   statement. Ascending id prevents a deadlock when two requests name the same
+   pair in opposite roles.
+3. Recheck the acting Admin: the actor is active, holds an Admin role
+   assignment, and owns a live session (not invalidated, not expired). The
+   session row is share-locked because logout and session invalidation do not
+   take the advisory lock.
+4. Look up the target and apply the mutation.
+
+A failed recheck returns HTTP `403`, writes no state and no audit event, and
+precedes target lookup. See the
+[PATCH contract](../api/builders-queues-environments-dashboard-admin-api.md#acting-admin-recheck-inside-the-transaction).
+
+**Not yet rechecked in a transaction.** The other administrator mutations still
+authorize before their work starts. A demoted, disabled or logged-out Admin
+whose request already passed that check can still commit these changes:
+
+- `POST /admin/users` (`create_user`): runs as several separate pool
+  statements, not one transaction.
+- `DELETE /admin/users/:id` (`delete_user`): the guarded delete transaction
+  takes the advisory lock and the target row but does not recheck the actor.
+  The audit event is written after commit.
+- `POST` and `DELETE /admin/oidc-mappings`: single pool statements followed by
+  a separate audit write.
+- `PUT /admin/classification-config` and `PUT /admin/automatic-retry-policy`:
+  single pool statements after the early check.
+- `disable_user_with_admin_guard` has no HTTP handler in the current tree
+  (standalone disable is only the PATCH `enabled` field). A future caller
+  would not be rechecked either.
+
+There is no separate environment membership admin route. Membership edits go
+through create user and PATCH. Only PATCH rechecks the actor.
+
+These gaps are **open, not fixed**. They are tracked as the separate Backlog
+follow-up TASK-535. This slice does not claim them as complete.
+
+## Identity helper and first-creation contract
+
+The MR !345 worktree changes in
+`packages/default/crates/cf-server/src/queries/auth_identity.rs` and
+`packages/default/crates/cf-server/src/handlers/api/auth_oidc.rs` close separate
+binding races. Runtime verification of these fixes is **PENDING**.
+
+- Public `upsert_external_identity` means insert-or-return for the same owner.
+  It MUST NOT move an existing provider/subject/normalized-tenant binding. A
+  different owner returns `IdentityOwnershipConflict`. A same-owner call returns
+  the existing row without updating claims, timestamps or freshness. Only a new
+  row uses the supplied initial claims; later authoritative claims updates belong
+  to reconciliation. The helper does not authorize account linking.
+- `create_user_and_bind_external_identity` takes a transaction-scoped per-key
+  advisory lock before any candidate user insert, then rechecks the **exact**
+  normalized stable key in a fresh statement. An existing binding returns
+  `IdentityAlreadyBound` without creating a user. Hash collisions only serialize
+  unrelated keys; the hash never proves identity. The lock is released before
+  reconciliation; callers must not hold user/identity row locks while waiting.
+- Callback recovery is narrow: `IdentityAlreadyBound`, or SQLSTATE `23505` with
+  constraint `idx_external_identities_provider_subject_tenant`, permits reloading
+  the winning binding by its stable key and validating its active owner. Failed
+  candidate creation rolls back user and preferences before recovery. The callback
+  retains the original pre-redirect generation; it does not reserve a newer one
+  or bypass reconciliation's ordering, linkage and activity checks.
+- An unrelated email/username uniqueness collision or other database failure
+  remains an error. It MUST NOT link accounts by email, retry as another owner,
+  replace claims or transfer the winning identity.
+
+## Ordered callback reconciliation
+
+Login initiation reserves a positive database sequence generation **before**
+redirect. The server retains it with state, nonce and PKCE verifier in the
+server-side flow store. The callback must reuse that generation; it cannot
+allocate a new one. The noncycling sequence uses `CACHE 1`; abandoned flows
+leave intentional gaps. Flow state is in memory with a default 600-second TTL,
+so server restart or a different instance can lose the flow. This TTL is
+separate from entitlement age and browser session expiry.
+
+The callback validates the token, nonce and verified email, then resolves the
+identity by provider `oidc`, subject and issuer, not email. Reconciliation:
+
+1. Locks the user and registers a durable `pending` attempt only when its
+   generation is strictly greater than the identity's highest accepted generation.
+   Rejected older success or failure evidence cannot change claims, grants,
+   freshness or state, and cannot restore removed rights.
+2. Acquires transaction advisory lock `(526, 2)` before the user lock, then locks
+   the identity. The attempt UUID must still match. Guarded admin role changes,
+   disable and deletion use the same advisory lock. Membership replacement uses
+   the user lock. Pending registration and cleanup use the user lock alone
+   because they do not change roles.
+3. Requires an active bound user and exactly one linked external identity,
+   counting **all** providers. Multi-identity linkage is unsupported and fails
+   closed for login as well as future PAT eligibility, even for legacy users.
+4. If either grant category remains unresolved, returns `legacy_unresolved`.
+   Existing grants and browser login survive even missing or malformed groups,
+   but successful freshness does not advance. Other binding, activity, ordering
+   and linkage checks still apply; this is not universal legacy-login support.
+5. Otherwise requires authoritative group evidence. Missing/null/malformed claims
+   or nonstring array elements deny managed login. Valid empty arrays or blank
+   strings are authoritative empty evidence. Dotted claim paths are supported.
+6. Locks mappings and resolves active environments. Unknown/inactive mapped
+   environments fail reconciliation. Success replaces only this identity's IdP
+   contribution, stores claims, sets `valid` and stamps
+   `last_successful_entitlement_sync_at` with database `clock_timestamp()` in one
+   transaction. Local overlap survives.
+
+The highest mapped role is Admin, then Operator, otherwise Viewer. Valid empty
+groups or no matching mapping produce an **OIDC-owned Viewer and no managed
+environment memberships**, removing previous managed privileges. Independent
+local grants can still produce a higher effective role or environment access.
+
+Failure rolls back the grant/claims/successful-time transaction. Attempt-fenced
+cleanup marks only the current pending attempt `invalid`. Cancellation or cleanup
+failure leaves durable `pending`; neither state is fresh. An older failure cannot
+invalidate a newer success. Errors before the callback reaches reconciliation
+deny that login but do not register a pending entitlement attempt.
+
+The last-Admin guard serializes administrative decisions with OIDC revocation.
+It **must not retain revoked IdP Admin authority**. Removing the last IdP Admin
+can leave zero enabled Admins. An independent recovery administrator is a cutover
+prerequisite, not a reason to keep revoked privileges.
+
+## Freshness policy and future PAT boundary
+
+`require_fresh_entitlements` currently checks eligibility only. It requires:
+
+- an active owner and the requested identity bound to that owner with provider `oidc`;
+- exactly one linked external identity and no unresolved legacy grants in either category;
+- state `valid` and a successful timestamp no later than database
+  `statement_timestamp()` and strictly newer than database time minus maximum age.
+
+Missing, pending, invalid, unresolved, future-dated and age-equal timestamps deny.
+Configuration defaults to 86,400 seconds (24 hours). Use
+`services.crystal-forge.server.oidc.entitlementMaxAgeSeconds`, which exports
+`CRYSTAL_FORGE_OIDC_ENTITLEMENT_MAX_AGE_SECONDS`; accepted values are integers
+1 through 4,294,967,295 seconds. Zero cannot disable the policy.
+
+This age bounds **future OIDC-owned PAT admission**, not existing browser session
+TTL. Successful managed sign-in refreshes it. No background provider refresh is
+implemented here. A future unattended PAT can pause until renewed sign-in or
+supported sync. Future handlers must wire this helper and validate the token row,
+owner binding, revocation, grant and resource authority under appropriate
+serialization. The helper alone is not an admission transaction.
+
+## One-time upgrade procedure
+
+This is an operator procedure, not an executed migration or database session.
+
+1. Before deployment, take and verify a restorable backup. Verify the configured
+   issuer, subject-to-user bindings, linked-identity counts, claim path, group
+   mappings and active environment names. Confirm an independent, tested console
+   recovery procedure, such as a controlled switch to the existing local auth
+   mode with a separately provisioned recovery account, or verified backup
+   restoration. This is recovery, not a second concurrent login mode. A bootstrap
+   **group mapping** is still IdP-managed and alone does not protect against
+   losing the final IdP Admin. Do not proceed without recovery.
+2. Inventory the two existing accounts and every role/membership separately.
+   Record current effective grants, identity bindings, source flags and the
+   intended local or IdP ownership. Do not derive ownership from screenshots,
+   actor nulls or current group membership alone. Rehearse on an isolated restored
+   copy before scheduling the production change.
+3. Stop older cf-server writers before deploying the forward migration through
+   the established upgrade process. Mixed old/new OIDC or admin writers are not
+   supported: old code cannot preserve source ownership. Verify
+   preserved effective grants and unresolved flags before classification. Leave
+   ambiguous grants unresolved until their owner approves the inventory; they
+   continue to block future OIDC PAT eligibility.
+4. For the selected independent local overrides, use the source-aware editor's
+   explicit category opt-in and acknowledge legacy replacement. Submit approved
+   roles and membership lists with `edit_local_grants: true`; do not use an old
+   cached merged-field client. Verify each source vector, effective result and
+   audit record after the atomic PATCH.
+   **This creates LOCAL overrides. IdP group removal will not remove them.**
+   Supply an explicit membership list (including empty when intended); a role
+   reassignment alone does not classify memberships. Clearing a local role alone
+   preserves legacy roles and is not classification. Environment replacement,
+   including an empty list, clears both local and legacy memberships before
+   installing the selected local set; the UI requires legacy acknowledgment.
+5. If a pre-existing grant must instead become IdP-owned, stop for an explicit,
+   controlled source-classification change reviewed against the inventory,
+   identity binding, source constraints and locking contract. Existing admin UI
+   replacement does not offer that operation. This slice supplies no
+   classification API or CLI. Do not mistake reassignment for IdP cutover.
+6. After both categories are resolved, perform a fresh sign-in and verify current
+   mappings, managed removals, surviving local overlap and successful sync state.
+   Test recovery and group removal first in the isolated rehearsal. Verify that
+   unresolved/failed attempts do not become fresh. Keep the backup and reviewed
+   inventory for recovery; do not bypass failure by stamping freshness manually.
+
+There is no automatic plaintext token retrieval or Admin human impersonation
+path. The approved future PAT design returns a secret once to its authenticated
+owner; this groundwork does not issue tokens or let an Admin mint another
+human's session/token.
+
+## Verification scope and remaining gates
+
+At `24b3bad6`, the farm executed 29 nonignored PostgreSQL regressions: 18 OIDC
+entitlement cases, 10 admin-source cases and the restricted-grant refresh case.
+They cover populated migration, ownership union, binding conflicts, ordered
+reconciliation, freshness, rollback and concurrency. At `89e7689b`, the full
+Access scenario passed, including both new source-union and Operator-denial HTTP
+cases. Its production server and Web UI package dependencies passed their normal
+unit checks. The separate core package passed its library tests but its extra
+native-Nix post-checks have not yet produced a final package result.
+
+These are checkpoint-specific results, not an exact-head CI or release claim.
+For the MR !345 requested changes, only the reported 887-test UI farm result
+(nine new tests) is available. Atomic PATCH/rollback, metadata projection, public
+identity-helper immutability and concurrent callback recovery still require
+current-source server/database execution and the new real-browser Access cases.
+Documentation validation for this docs-only update is also **PENDING**; no builds
+were requested. No newer checkpoint result or production cutover is asserted.
+The Access scenario proves its browser-admin boundary, not PAT admission or a
+signed provider callback. PAT/OIDC self-service and MCP acceptance remain later
+delivery obligations. The existing ignored real-provider JWT test is not a
+passing provider-integration result. No live grant classification or deployment
+was performed. Review-revision CI and the documented rollout gates still apply.
+
+When execution is authorized, use the configured farm (`max-jobs = 0`, builders
+from `/etc/nix/machines`), from the task worktree:
+
+```bash
+nix config show | grep -E '^(builders|max-jobs) '
+nix build .#packages.x86_64-linux.default.cf-server-core-drv --no-link -L
+nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap --no-link -L
+nix build .#okf-knowledge --no-link -L
+```
+
+Exact commands, derivations, results and remaining runs are recorded in
+TASK-534.2. The core package's ordinary tests do not execute the PostgreSQL
+integration targets; do not substitute a package pass for those database proofs.
+`tests/oidc_entitlements.rs`, `tests/admin_source_grants.rs` and the POA&M target
+are selected by the existing `packages/devScripts/tests/database-regressions.sh`;
+their execution needs a farm/CI-owned disposable database and retained results.
+Do not substitute local Cargo or a live database. M0 remains incomplete until
+the [credential grant release gates](credential-grant-groundwork.md#remaining-release-gates)
+and approved specification acceptance evidence are satisfied.
+
+## Related concepts
+
+- [OIDC role mapping](oidc-role-mapping.md)
+- [API authentication and authorization](api-authentication-and-authorization.md)
+- [Authentication configuration](../operations/authentication-modes-and-oidc-configuration.md)
+- [Session cookies and CSRF](session-cookies-and-csrf.md)

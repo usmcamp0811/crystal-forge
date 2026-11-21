@@ -4123,6 +4123,7 @@ mod tests {
             .expect("triage test system should join the environment");
         let admin = inventory_test_user(&pool, "admin", true).await;
         let actor = crate::services::poam::PoamActor {
+            credential: crate::auth::authorization::CredentialIdentity::BrowserSession,
             user_id: admin,
             identifier: admin.to_string(),
             is_admin: true,

@@ -1,6 +1,7 @@
 //! OIDC provider configuration.
 
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU32;
 
 /// OIDC provider configuration.
 ///
@@ -27,6 +28,14 @@ pub struct OidcConfig {
     /// Claim mapping configuration
     #[serde(default)]
     pub claims: ClaimMappingConfig,
+
+    /// Maximum successful OIDC entitlement sync age in seconds (default: 86400).
+    ///
+    /// The range is 1..=u32::MAX, exactly representable as SQL f64 seconds.
+    /// This policy bounds OIDC-owned PAT eligibility; browser sessions retain
+    /// their existing expiry policy. Zero cannot disable the freshness check.
+    #[serde(default = "default_entitlement_max_age_seconds")]
+    pub entitlement_max_age_seconds: NonZeroU32,
 }
 
 /// Configuration for extracting claims from OIDC tokens.
@@ -79,6 +88,24 @@ fn default_scopes() -> Vec<String> {
     ]
 }
 
+fn default_entitlement_max_age_seconds() -> NonZeroU32 {
+    const DEFAULT: NonZeroU32 = NonZeroU32::new(86_400).unwrap();
+    DEFAULT
+}
+
+fn parse_entitlement_max_age_seconds(value: Option<&str>) -> anyhow::Result<NonZeroU32> {
+    value.map_or_else(
+        || Ok(default_entitlement_max_age_seconds()),
+        |value| {
+            value.parse::<NonZeroU32>().map_err(|_| {
+                anyhow::anyhow!(
+                    "CRYSTAL_FORGE_OIDC_ENTITLEMENT_MAX_AGE_SECONDS must be an integer in 1..=4294967295"
+                )
+            })
+        },
+    )
+}
+
 fn default_email_claim() -> String {
     "email".to_string()
 }
@@ -104,6 +131,11 @@ fn default_preferred_username_claim() -> String {
 }
 
 impl OidcConfig {
+    /// Returns the positive entitlement freshness bound in seconds for queries.
+    pub fn entitlement_max_age_seconds(&self) -> u64 {
+        u64::from(self.entitlement_max_age_seconds.get())
+    }
+
     /// Determine if the application is running in a secure (HTTPS) context.
     ///
     /// This is used to decide whether to use `__Host-` prefixed cookies
@@ -147,7 +179,20 @@ impl OidcConfig {
     /// - CRYSTAL_FORGE_OIDC_NAME_CLAIM (default: "name")
     /// - CRYSTAL_FORGE_OIDC_ROLES_CLAIM (default: "groups")
     /// - CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP (optional initial admin group mapping)
+    /// - CRYSTAL_FORGE_OIDC_ENTITLEMENT_MAX_AGE_SECONDS (default: 86400)
+    ///
+    /// # Errors
+    /// Returns an error for missing required variables or an entitlement maximum
+    /// age outside 1..=4294967295 seconds, malformed text or non-Unicode input.
     pub fn from_env() -> anyhow::Result<Self> {
+        let max_age = match std::env::var("CRYSTAL_FORGE_OIDC_ENTITLEMENT_MAX_AGE_SECONDS") {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("CRYSTAL_FORGE_OIDC_ENTITLEMENT_MAX_AGE_SECONDS must be Unicode")
+            }
+        };
+        let entitlement_max_age_seconds = parse_entitlement_max_age_seconds(max_age.as_deref())?;
         let issuer_url = std::env::var("CRYSTAL_FORGE_OIDC_ISSUER_URL")
             .map_err(|_| anyhow::anyhow!("CRYSTAL_FORGE_OIDC_ISSUER_URL not set"))?;
         let client_id = std::env::var("CRYSTAL_FORGE_OIDC_CLIENT_ID")
@@ -184,6 +229,7 @@ impl OidcConfig {
             redirect_uri,
             scopes,
             claims,
+            entitlement_max_age_seconds,
         })
     }
 }
@@ -191,6 +237,59 @@ impl OidcConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entitlement_policy_defaults_and_validates_environment_range() {
+        assert_eq!(
+            parse_entitlement_max_age_seconds(None).unwrap().get(),
+            86_400
+        );
+        for value in ["1", "86400", "4294967295"] {
+            assert_eq!(
+                parse_entitlement_max_age_seconds(Some(value))
+                    .unwrap()
+                    .get(),
+                value.parse::<u32>().unwrap()
+            );
+        }
+        for value in ["0", "-1", "4294967296", "1.5", "NaN", "", " 1", "invalid"] {
+            assert!(parse_entitlement_max_age_seconds(Some(value)).is_err());
+        }
+    }
+
+    #[test]
+    fn entitlement_policy_deserialization_rejects_zero_and_malformed_values() {
+        let base = serde_json::json!({
+            "issuer_url": "https://auth.example.com",
+            "client_id": "test",
+            "client_secret": "secret",
+            "redirect_uri": "https://app.example.com/callback"
+        });
+        let default: OidcConfig = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(default.entitlement_max_age_seconds(), 86_400);
+        for value in [serde_json::json!(1), serde_json::json!(u32::MAX)] {
+            let mut config = base.clone();
+            config["entitlement_max_age_seconds"] = value.clone();
+            let policy: OidcConfig = serde_json::from_value(config).unwrap();
+            assert_eq!(
+                policy.entitlement_max_age_seconds(),
+                value.as_u64().unwrap()
+            );
+        }
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(4_294_967_296_u64),
+            serde_json::json!(1.5),
+            serde_json::json!("86400"),
+            serde_json::json!(null),
+            serde_json::json!(true),
+        ] {
+            let mut config = base.clone();
+            config["entitlement_max_age_seconds"] = value;
+            assert!(serde_json::from_value::<OidcConfig>(config).is_err());
+        }
+    }
 
     #[test]
     fn default_scopes_includes_openid() {
@@ -217,6 +316,7 @@ mod tests {
             redirect_uri: "https://app.example.com/callback".to_string(),
             scopes: default_scopes(),
             claims: ClaimMappingConfig::default(),
+            entitlement_max_age_seconds: default_entitlement_max_age_seconds(),
         };
         assert!(https_config.is_secure_context());
 
@@ -227,6 +327,7 @@ mod tests {
             redirect_uri: "http://localhost:3445/callback".to_string(),
             scopes: default_scopes(),
             claims: ClaimMappingConfig::default(),
+            entitlement_max_age_seconds: default_entitlement_max_age_seconds(),
         };
         assert!(!http_config.is_secure_context());
     }

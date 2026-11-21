@@ -1,6 +1,6 @@
 //! Security walkthrough definitions and their pure presentation rules.
 //!
-//! The authoritative design is `docs/design/CrystalForge/components/CoachTours.jsx`.
+//! The authoritative design is `docs/design/CrystalForge/crystal-forge.html` (`CoachTours`).
 //! This module holds the five walkthrough modules (A to E), their stops, role
 //! gates and local progress rules. It has no browser, router or network
 //! dependency, so every rule here is unit-testable.

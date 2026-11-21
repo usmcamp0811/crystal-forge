@@ -62,6 +62,124 @@ Failure evidence from tested commit
 database host and missing auth mode; `journals/controller/crystal-forge.journal`
 records `both host and hostaddr are missing`.
 
+## Source-aware administration HTTP boundary (TASK-534.2)
+
+The existing `authorization.py` appends two cases after its original baseline
+assertions, in the same fresh controller VM/database:
+
+- `authorization-admin-replacement-preserves-idp-and-classifies-explicit-category`
+  uses the existing Admin session and matching CSRF cookie/header. Explicit
+  SQL prerequisites give the existing Operator overlapping local/IdP grants,
+  unresolved legacy grants and a local-only membership. Role-only PATCH to
+  Viewer resolves the role category without classifying legacy memberships.
+  Explicit `environments: []` then resolves the membership category. Both writes
+  preserve IdP contributions; PATCH and a subsequent Admin list return effective
+  Operator and the IdP environment, rather than the requested local authority.
+- `authorization-source-union-does-not-admit-operator-admin-mutations` uses the
+  original live Operator session with matching CSRF. Self and cross-user Admin
+  PATCHes return 403 `forbidden` without business, audit-count or source-ownership
+  changes. It restores Operator with empty memberships and removes the injected
+  identity/environments before later fragments.
+
+Authority: approved [CF-AGENT-ACCESS-001 v1.1](../../docs/knowledge/security/agent-access-tokens-mcp-remediation-context.md),
+sections 4.4 (unchanged human-session boundary) and 5.3 (separate local/managed
+ownership), plus the independent administrator/IdP grants decision in TASK-534.2.
+Disposition: extend the existing scenario; retain all earlier assertions. The
+SQL fixtures use the existing VM-only psql mechanism and schema 0335 source
+columns; they supply prerequisites, not the result of the HTTP write.
+This is admin HTTP-boundary coverage, not signed real-OIDC callback,
+freshness/reconciliation or PAT-admission proof. Current-source runtime results
+must come from the parent farm run; the historical passing results above do not
+verify this revision.
+
+### Review P1: source-preserving Users modal
+
+Impact authority: the owner's MR345/TASK-534.2 review P1 instruction requires
+independent local/IdP ownership and explicit local-edit intent. Affected consumers
+are Admin Users create/edit/cancel/disable, environment membership editing, and
+non-Admin route access, owned by `lifecycle-local-bootstrap`. Retain the original
+identity, permission, persistence, cancellation and reload assertions; update
+edit selectors to the opt-in controls and the empty-membership display from
+`all` to `None` (empty explicit scope must not be presented as wildcard authority).
+Create's existing `all` picker remains the existing empty-list input contract.
+These are semantic checks; no visual baseline or layout section is replaced.
+
+`admin-source-grants.{py,cjs}` extends that same lifecycle after authorization
+and before Admin forms, with three cases:
+
+- `admin-source-unmarked-grant-roundtrip-rejected-without-writes`: a real Admin
+  session plus CSRF receives 400 for unmarked effective-grant round trips,
+  unmarked environment/clear requests, explicit false intent, and conflicting
+  set/clear role intent. Full source rows, protected state and audits stay equal.
+- `admin-source-unrelated-modal-save-preserves-idp-only-grants`: SQL prerequisites
+  link the public Operator fixture to one IdP identity, with only IdP Operator
+  and one production membership (no local or legacy sources). The real Users
+  modal must show effective authority read-only, leave local drafts empty and
+  opted out, and submit exactly a public fixture password reset plus disablement.
+  Evidence captures the actual PATCH payload and HTTP 200, six-vector
+  `grant_sources`, a fresh HTTP/UI reload, full SQL role/membership/identity row
+  equality, changed password digest and intended account flag. Audits must contain
+  only account/password changes, with no grant classification.
+- `admin-source-idp-withdrawal-has-no-accidental-local-fallback`: an explicit SQL
+  fixture withdrawal removes only the injected IdP contribution. Any accidental
+  local role/membership survives withdrawal and fails the test. SQL and subsequent
+  Admin HTTP reads require zero grant rows/vectors and no role. An unrelated
+  re-enable and real local login prove the reset public password works with no
+  role restored. This is **fixture withdrawal**, not signed IdP callback coverage;
+  existing Rust integration tests own callback/reconciliation assertions.
+
+The fragment restores the public Operator password, enabled flag, local Operator
+role and empty memberships, then removes the injected identity/environment and
+verifies the original public password. Later environment/preferences cases reuse
+that actor. Fixture SQL is confined to the fresh scenario VM. No production
+test-only endpoint, additional VM, scenario derivation or check is introduced.
+
+`authorization-operator-has-no-usable-admin-mutation-in-ui` also reuses the
+Viewer denial CJS contract with an independent Operator context and verifies no
+protected mutation. Existing `admin-form-edit-role-persists-and-reloads` now
+checks opt-in role intent and exact local source ownership. Existing membership
+and restore phases use opt-in environment intent. Unrelated disablement must
+submit only `enabled`; all positive grant PATCH fixtures carry
+`edit_local_grants: true`.
+
+These additions are **runtime-unverified** until the parent runs the farm gate.
+Local verification is limited to Python AST parsing, Node `--check` and whitespace
+checking; none is an integration pass.
+
+#### Parent-owned preview browser run
+
+The existing `http://127.0.0.1:8529/admin` preview is baseline-only until the
+parent refreshes and verifies the new farm-built server/UI. Do not seed or run
+this mutating script against the baseline or a real user's account. Once the
+parent verifies a task-isolated preview database and fresh binary, it can prepare
+**disposable public fixtures** matching the Python prerequisites and run just
+the CJS browser phase with the existing prebuilt `cf-browser` runner:
+
+```bash
+cf-browser --spec checks/integration-access/scenarios/fragments/admin-source-grants.cjs \
+  --case admin-source-unrelated-save --base-url http://127.0.0.1:8529 \
+  --facts /tmp/opencode/admin-source-preview-facts.json \
+  --receipts /tmp/opencode/admin-source-preview-receipts.json \
+  --out /tmp/opencode/admin-source-preview-browser
+```
+
+The facts JSON needs `admin` (disposable local Admin `username`/`password`),
+`operator` (`username`/`email`), and `adminSourceGrants` from the scenario `.nix`.
+The receipts JSON needs `admin.userId` and `authorization.operator.userId` for
+those exact preview fixtures. The Operator must begin active with a local public
+password but only IdP-owned Operator and `cf-it-source-production` membership;
+the environment must be active and production. Source and environment UUIDs and
+the nonsensitive reset password are authored in `adminSourceGrants`. The Admin
+must have Admin authority independently of that identity. Never substitute real
+account credentials. The spec uses real login/network requests without mocks.
+
+Retain `result.json`, the reloaded modal screenshot and actual PATCH receipt.
+This command runs only the browser portion; the parent must perform the Python
+fragment's SQL/audit checks, fixture withdrawal and restoration separately for
+manual preview proof. The registered farm scenario performs the complete chain
+and remains the acceptance gate. This worker has not mutated the preview or run
+the browser phase.
+
 ## Commands
 
 ```bash
@@ -97,8 +215,8 @@ Environment CRUD/nonempty assignments and specific failed-save states remain
 unfinished in TASK-490.3.
 TASK-490.2 remains `In Progress`: the cross-environment denial rule and the
 closed-registration policy are unimplemented, and each waits for its own
-decision. An Operator browser view, other Admin routes and visual comparison
-are not covered. OIDC, remaining forms, preferences, notifications, and shell behavior
+decision. Other Admin routes and visual comparison
+are not covered by the selected role-denial cases. OIDC, remaining forms, preferences, notifications, and shell behavior
 also remain in the
 [coverage map](../../docs/knowledge/testing/integration-coverage-map.md).
 GitLab runs this owner automatically and requires it (see below). TASK-490.24
@@ -126,7 +244,11 @@ one controller VM/database:
    after the fresh-install assertions and session checks. Its controls restore
    the target and installed retry/banner configuration. `authorization.cjs`
    uses its Viewer receipt under `viewer-admin-denied`.
-4. `fragments/admin-forms.py` requires authorization's `authz_state()` protected
+4. `fragments/admin-source-grants.py` reuses the restored public Operator and
+   Admin session for the pure-IdP Users modal regression. Its CJS is registered
+   as `admin-source-unrelated-save`; SQL assertions, fixture withdrawal and full
+   public actor restoration precede subsequent fragments.
+5. `fragments/admin-forms.py` requires authorization's `authz_state()` protected
    snapshot for cancel checks, the still-absent design identity `u3`, and restored
    installed configuration, including the disabled banner. `admin-forms.cjs`
    serves the seven registered phases; request/completion receipts select one

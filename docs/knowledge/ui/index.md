@@ -22,9 +22,14 @@
 * [Crystal Forge UI/UX Design Extraction for Figma](figma-design-extraction-snapshot.md) - Records the April 2026 audit of the Crystal Forge web UI: design tokens, page layouts and wireframes, component library, breakpoints, and accessibility state.
 * [Figma Extraction: User Workflows, Design Challenges and Redesign Plan](figma-extraction-workflows-and-redesign-plan.md) - Records the April 2026 analysis of deploy, add-system, and CVE investigation workflows, the design challenges found, the phased Figma redesign recommendations, and the questions prepared for Claude in Figma.
 
+# Operator Guide
+
+* [Single-file Crystal Forge design reference](single-file-design-reference.md) - Import Claude HTML exports into readable inline source, preview without a backend, review useful diffs, and distinguish the mockup from authorization requirements.
+
 # UI Design
 
 * [Admin console and login views](admin-console-and-login-views.md) - Describes the Admin console tabs (users, audit log, OIDC mappings), their authorization, and the production OIDC and dev-mode login flows.
+* [Admin user grant source editor](admin-user-grant-source-editor.md) - Maintainer-approved MR !345 addendum: separate effective/local/IdP/legacy values, explicit local edit intent, legacy acknowledgment and prototype comparison; current-source server/database/browser verification pending.
 * [Crystal Forge UI/UX Design System](design-system-overview.md) - Defines the authoritative Crystal Forge web UI design philosophy, technology stack, and source-of-truth hierarchy, and indexes the six design-system concepts.
 * [Dashboard and systems views](dashboard-and-systems-views.md) - Describes the Dashboard, Systems List, and System Detail views: what each shows, user interactions, data flow to the API, and which backend and frontend files to modify.
 * [Design System: Accessibility, Responsive Design and Motion](design-system-accessibility-responsive-motion.md) - Defines the WCAG 2.1 AA accessibility requirements, ARIA and focus rules, breakpoint and mobile behavior, z-index layers, and approved animations for the web UI.

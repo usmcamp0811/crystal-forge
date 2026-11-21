@@ -61,6 +61,7 @@ services.crystal-forge.server = {
     scopes = ["openid" "profile" "email"];
     # Optional: map claims from your provider
     rolesClaim = "groups";           # groups used for role mapping
+    entitlementMaxAgeSeconds = 86400; # future OIDC-owned PAT eligibility, not session TTL
     preferredUsernameClaim = "preferred_username";
     emailClaim = "email";
     nameClaim = "name";
@@ -83,7 +84,16 @@ CRYSTAL_FORGE_OIDC_ISSUER_URL=https://keycloak.example.com/realms/crystal-forge
 CRYSTAL_FORGE_OIDC_CLIENT_ID=crystal-forge-web
 CRYSTAL_FORGE_OIDC_CLIENT_SECRET=secret
 CRYSTAL_FORGE_OIDC_REDIRECT_URI=https://forge.example.com/api/auth/oidc/callback
+CRYSTAL_FORGE_OIDC_ENTITLEMENT_MAX_AGE_SECONDS=86400
 ```
+
+`services.crystal-forge.server.oidc.entitlementMaxAgeSeconds` accepts integer
+seconds from 1 through 4294967295, default 86400 (24 hours). Zero is invalid.
+The source freshness helper uses database time and denies age equality, invalid
+state and unresolved ownership. It is not yet wired to PAT admission and does not
+change existing browser session expiry. Current-source farm verification remains
+pending. Before upgrading existing OIDC accounts, follow the
+[ownership classification and recovery procedure](../security/oidc-entitlement-ownership.md#one-time-upgrade-procedure).
 
 ## Related concepts
 

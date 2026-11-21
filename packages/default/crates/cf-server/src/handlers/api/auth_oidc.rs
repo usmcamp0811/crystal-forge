@@ -17,7 +17,6 @@ use openidconnect::{
 };
 use serde::Deserialize;
 use sqlx::PgPool;
-use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -26,12 +25,12 @@ use crate::auth::oidc::{
 };
 use crate::config::{OidcConfig, ServerConfig};
 use crate::handlers::api::auth_session::{establish_user_session, resolve_client_ip};
-use crate::models::auth_identity::AuthRole;
 use crate::queries::auth_identity::{
-    AuthIdentityRepository, OidcMappingMatchRow, assign_role_to_user,
-    clear_user_environment_memberships, clear_user_role_assignments,
-    create_user_and_bind_external_identity, get_environment_ids_by_names, get_oidc_mapping_matches,
-    get_user_by_id, get_user_roles, insert_user_environment_membership,
+    AuthIdentityRepository, AuthRepositoryError, create_user_and_bind_external_identity,
+    get_user_by_id,
+};
+use crate::queries::oidc_entitlements::{
+    ReconciliationOutcome, reconcile, reserve_entitlement_generation,
 };
 
 /// Shared OIDC client state.
@@ -82,9 +81,18 @@ impl OidcClientState {
 ///
 /// This endpoint redirects the user to the OIDC provider's authorization endpoint.
 /// Sets a secure cookie binding the OIDC state to this browser session.
+/// Reserves an entitlement generation in the database before redirect and stores
+/// it only in the server-side flow session.
+///
+/// # Errors
+/// Returns a database error without redirecting if generation reservation fails.
 pub async fn oidc_login(
     Extension(oidc_state): Extension<Arc<OidcClientState>>,
-) -> impl IntoResponse {
+    State(pool): State<PgPool>,
+) -> Result<impl IntoResponse, OidcError> {
+    let entitlement_generation = reserve_entitlement_generation(&pool)
+        .await
+        .map_err(|_| OidcError::DatabaseError)?;
     // Generate PKCE challenge and verifier
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
@@ -107,7 +115,8 @@ pub async fn oidc_login(
         .url();
 
     // Store CSRF token, nonce, and PKCE verifier in session for validation
-    let session = OidcSession::new(csrf_token.clone(), nonce, pkce_verifier);
+    let mut session = OidcSession::new(csrf_token.clone(), nonce, pkce_verifier);
+    session.entitlement_generation = Some(entitlement_generation);
     let state_value = csrf_token.secret().clone();
     oidc_state
         .session_store
@@ -121,13 +130,14 @@ pub async fn oidc_login(
     let is_secure = oidc_state.config.is_secure_context();
     let cookie = create_oidc_state_cookie(&state_value, is_secure);
 
-    // Return redirect with Set-Cookie header
-    Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, auth_url.as_str())
-        .header(header::SET_COOKIE, cookie)
-        .body(axum::body::Body::empty())
-        .unwrap()
+    // Return redirect with Set-Cookie header.
+    Ok((
+        StatusCode::FOUND,
+        [
+            (header::LOCATION, auth_url.to_string()),
+            (header::SET_COOKIE, cookie),
+        ],
+    ))
 }
 
 /// Query parameters for OIDC callback.
@@ -153,6 +163,19 @@ pub struct OidcCallbackParams {
 ///
 /// **Security**: Validates that the state parameter matches the session cookie
 /// to prevent login CSRF and account confusion attacks.
+/// Reconciles grants for the provider/sub/issuer-bound identity before issuing
+/// session cookies. Reconciliation errors deny login. Unresolved legacy ownership
+/// preserves browser login and existing grants without advancing freshness.
+/// Valid empty mappings produce OIDC-owned Viewer with no managed memberships.
+/// A concurrent first creation serializes by stable identity key. An existing
+/// binding found under that lock or an identity-key insertion conflict reloads
+/// the winning binding and active user without changing claims or reserving a
+/// replacement generation.
+/// Other database failures, including username/email conflicts, remain errors.
+///
+/// # Errors
+/// Returns an error when flow, token, nonce, verified email, identity binding,
+/// active-user reconciliation or session creation validation fails.
 pub async fn oidc_callback(
     Extension(oidc_state): Extension<Arc<OidcClientState>>,
     State(pool): State<PgPool>,
@@ -209,6 +232,12 @@ pub async fn oidc_callback(
         })?;
 
     tracing::debug!("CSRF state token validated successfully");
+    // SECURITY: Never allocate here. A delayed callback must retain its original
+    // initiation order, even if its provider token was exchanged much later.
+    let entitlement_generation = session
+        .entitlement_generation
+        .filter(|generation| *generation > 0)
+        .ok_or(OidcError::EntitlementReconciliationFailed)?;
 
     // Exchange authorization code for tokens with PKCE verifier
     tracing::debug!("Exchanging authorization code for tokens");
@@ -373,7 +402,7 @@ pub async fn oidc_callback(
 
             let claims_json = serde_json::to_value(&user_info.custom_claims)
                 .unwrap_or_else(|_| serde_json::json!({}));
-            let created = create_user_and_bind_external_identity(
+            let creation = create_user_and_bind_external_identity(
                 &pool,
                 email,
                 user_info.display_name.as_deref(),
@@ -382,22 +411,45 @@ pub async fn oidc_callback(
                 tenant_discriminator,
                 claims_json,
             )
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to create user/identity binding: {}", e);
-                OidcError::DatabaseError
-            })?;
-
-            tracing::info!(
-                "Created user + OIDC identity binding atomically: user_id={} provider={} subject={}",
-                created.id,
-                provider_key,
-                subject
-            );
-
-            created
+            .await;
+            match creation {
+                Ok(created) => created,
+                Err(error) if is_identity_creation_conflict(&error) => {
+                    // CONCURRENCY: Only the stable identity key can select a
+                    // winning account. Creation either found an existing binding
+                    // before inserting a user or rolled back user/preferences.
+                    // Its creation lock is released before reconciliation.
+                    // Retain this flow's original generation;
+                    // reconciliation still fences stale or invalid evidence.
+                    let winner = auth_repo
+                        .find_external_identity(provider_key, subject, tenant_discriminator)
+                        .await
+                        .map_err(|_| OidcError::DatabaseError)?
+                        .ok_or(OidcError::DatabaseError)?;
+                    get_user_by_id(&pool, winner.user_id)
+                        .await
+                        .map_err(|_| OidcError::DatabaseError)?
+                }
+                Err(error) => {
+                    tracing::error!("Failed to create user/identity binding: {}", error);
+                    return Err(OidcError::DatabaseError);
+                }
+            }
         }
     };
+
+    if !user.is_active {
+        return Err(OidcError::EntitlementReconciliationFailed);
+    }
+
+    // SECURITY: Reload the binding by provider/sub/issuer, including after atomic
+    // creation. Never select an identity by email or assume a user's identity ID.
+    let identity = auth_repo
+        .find_external_identity(provider_key, subject, tenant_discriminator)
+        .await
+        .map_err(|_| OidcError::DatabaseError)?
+        .filter(|identity| identity.user_id == user.id)
+        .ok_or(OidcError::DatabaseError)?;
 
     let user_agent = headers
         .get(header::USER_AGENT)
@@ -407,201 +459,38 @@ pub async fn oidc_callback(
     let ip_address = resolve_client_ip(addr, &headers, &server_config.trusted_proxy_cidrs)
         .map(|ip| ip.to_string());
 
-    // Extract and normalize OIDC groups from user claims
-    let groups = normalize_oidc_groups(&user_info.roles);
-
-    tracing::info!(
-        user_id = %user.id,
-        email = %user.email,
-        groups_raw_count = user_info.roles.len(),
-        groups_normalized_count = groups.len(),
-        "OIDC groups extracted from ID token"
-    );
-
-    if groups.is_empty() {
-        tracing::warn!(
-            user_id = %user.id,
-            email = %user.email,
-            "No groups found in OIDC token claims - user may not receive appropriate role"
-        );
-    } else {
-        tracing::debug!(
-            user_id = %user.id,
-            email = %user.email,
-            groups = ?groups,
-            "Normalized OIDC groups for mapping"
-        );
-    }
-
-    let mapping_rows = get_oidc_mapping_matches(&pool, &groups)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to load OIDC group mappings: {}", e);
-            OidcError::DatabaseError
-        })?;
-
-    tracing::info!(
-        user_id = %user.id,
-        email = %user.email,
-        matched_mappings = mapping_rows.len(),
-        "OIDC group mappings queried from database"
-    );
-
-    if !groups.is_empty() && mapping_rows.is_empty() {
-        tracing::warn!(
-            user_id = %user.id,
-            email = %user.email,
-            groups = ?groups,
-            "User has OIDC groups but no matching group-to-role mappings found in database"
-        );
-    }
-
-    let mapped_role = derive_highest_role(mapping_rows.iter().filter_map(|row| row.role));
-    let mapped_environments = collect_mapped_environments(&mapping_rows);
-
-    tracing::info!(
-        user_id = %user.id,
-        email = %user.email,
-        mapped_role = ?mapped_role,
-        mapped_environments_count = mapped_environments.len(),
-        "OIDC group-to-role mapping derived"
-    );
-
-    let existing_roles = get_user_roles(&pool, user.id).await.map_err(|e| {
-        tracing::error!("Failed to check user roles: {}", e);
-        OidcError::DatabaseError
-    })?;
-
-    if let Some(role) = mapped_role {
-        tracing::info!(
-            user_id = %user.id,
-            email = %user.email,
-            role = ?role,
-            "Assigning OIDC-mapped role to user"
-        );
-
-        clear_user_role_assignments(&pool, user.id)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to reset user role assignments: {}", e);
-                OidcError::DatabaseError
-            })?;
-
-        assign_role_to_user(&pool, user.id, role, None)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    user_id = %user.id,
-                    email = %user.email,
-                    role = ?role,
-                    error = %e,
-                    "Failed to assign mapped role"
-                );
-                OidcError::DatabaseError
-            })?;
-
-        tracing::info!(
-            user_id = %user.id,
-            email = %user.email,
-            role = ?role,
-            "✅ Successfully assigned OIDC-mapped role"
-        );
-    } else if existing_roles.is_empty() {
-        tracing::info!(
-            user_id = %user.id,
-            email = %user.email,
-            "No OIDC role mapping found and user has no existing roles; assigning default Viewer role"
-        );
-
-        assign_role_to_user(&pool, user.id, AuthRole::Viewer, None)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    user_id = %user.id,
-                    email = %user.email,
-                    error = %e,
-                    "Failed to assign default Viewer role"
-                );
-                OidcError::DatabaseError
-            })?;
-
-        tracing::info!(
-            user_id = %user.id,
-            email = %user.email,
-            "✅ Assigned default Viewer role"
-        );
-    } else {
-        tracing::info!(
-            user_id = %user.id,
-            email = %user.email,
-            existing_roles = ?existing_roles,
-            "No OIDC role mapping found; preserving existing roles"
-        );
-    }
-
-    let mut apply_environment_mappings = false;
-    let mut resolved_environment_ids = Vec::new();
-
-    if !mapping_rows.is_empty() && !mapped_environments.is_empty() {
-        let environment_ids = get_environment_ids_by_names(&pool, &mapped_environments)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to resolve mapped environments: {}", e);
-                OidcError::DatabaseError
-            })?;
-
-        match evaluate_environment_mapping_apply(
-            mapping_rows.len(),
-            mapped_environments.len(),
-            environment_ids.len(),
-        ) {
-            EnvironmentMappingApply::Apply => {
-                apply_environment_mappings = true;
-                resolved_environment_ids = environment_ids;
-            }
-            EnvironmentMappingApply::SkipNoMappings
-            | EnvironmentMappingApply::SkipNoMappedEnvironments => {}
-            EnvironmentMappingApply::SkipUnknownMappedEnvironments => {
-                tracing::warn!(
-                    "OIDC mapped environments include unknown names; preserving existing memberships for user_id={}",
-                    user.id
-                );
-            }
+    let groups = oidc_state
+        .claim_extractor
+        .extract_authoritative_groups(&claims.custom_claims);
+    let claims_json = serde_json::to_value(&claims.custom_claims)
+        .map_err(|_| OidcError::ClaimExtractionFailed)?;
+    // SECURITY: Pass invalid evidence through so the reconciler durably denies
+    // freshness. Only it may write OIDC grants. Valid empty mappings replace the
+    // managed source with OIDC-owned Viewer and no environment memberships.
+    match reconcile(
+        &pool,
+        user.id,
+        identity.id,
+        entitlement_generation,
+        groups,
+        &claims_json,
+    )
+    .await
+    .map_err(|_| {
+        tracing::warn!(user_id = %user.id, "OIDC entitlement reconciliation failed");
+        OidcError::EntitlementReconciliationFailed
+    })? {
+        ReconciliationOutcome::Reconciled => {}
+        ReconciliationOutcome::LegacyUnresolved => {
+            // COMPATIBILITY: Preserve existing grants and browser login while
+            // explicit ownership classification blocks fresh PAT eligibility.
+            tracing::info!(user_id = %user.id, "OIDC grant ownership remains unresolved");
         }
-    }
-
-    if apply_environment_mappings {
-        clear_user_environment_memberships(&pool, user.id)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to reset environment memberships: {}", e);
-                OidcError::DatabaseError
-            })?;
-
-        for environment_id in resolved_environment_ids {
-            insert_user_environment_membership(&pool, user.id, environment_id)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to assign mapped environment: {}", e);
-                    OidcError::DatabaseError
-                })?;
-        }
-    } else if mapping_rows.is_empty() {
-        tracing::debug!(
-            "No OIDC mappings matched groups; preserving existing environment memberships for user_id={}",
-            user.id
-        );
-    } else if mapped_environments.is_empty() {
-        tracing::warn!(
-            "OIDC mappings resolved without environments; preserving existing memberships for user_id={}",
-            user.id
-        );
     }
 
     let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address, "oidc")
         .await
         .map_err(|_| OidcError::SessionCreationFailed)?;
-    // TODO: Update external_identity claims on each login (keep profile fresh)
 
     tracing::info!(
         "User authenticated via OIDC: user_id={} email={}",
@@ -631,70 +520,15 @@ pub async fn oidc_callback(
     Ok(response)
 }
 
-fn derive_highest_role(roles: impl Iterator<Item = AuthRole>) -> Option<AuthRole> {
-    let mut has_operator = false;
-    let mut has_viewer = false;
-    for role in roles {
-        match role {
-            AuthRole::Admin => return Some(AuthRole::Admin),
-            AuthRole::Operator => has_operator = true,
-            AuthRole::Viewer => has_viewer = true,
-        }
-    }
-
-    if has_operator {
-        Some(AuthRole::Operator)
-    } else if has_viewer {
-        Some(AuthRole::Viewer)
-    } else {
-        None
-    }
-}
-
-fn normalize_oidc_groups(values: &[String]) -> Vec<String> {
-    values
-        .iter()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .collect()
-}
-
-fn collect_mapped_environments(rows: &[OidcMappingMatchRow]) -> Vec<String> {
-    rows.iter()
-        .flat_map(|row| row.environments.iter())
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EnvironmentMappingApply {
-    Apply,
-    SkipNoMappings,
-    SkipNoMappedEnvironments,
-    SkipUnknownMappedEnvironments,
-}
-
-fn evaluate_environment_mapping_apply(
-    mapping_row_count: usize,
-    mapped_environment_count: usize,
-    resolved_environment_count: usize,
-) -> EnvironmentMappingApply {
-    if mapping_row_count == 0 {
-        return EnvironmentMappingApply::SkipNoMappings;
-    }
-
-    if mapped_environment_count == 0 {
-        return EnvironmentMappingApply::SkipNoMappedEnvironments;
-    }
-
-    if resolved_environment_count != mapped_environment_count {
-        return EnvironmentMappingApply::SkipUnknownMappedEnvironments;
-    }
-
-    EnvironmentMappingApply::Apply
+// The typed conflict comes only from the exact key recheck under the creation
+// lock. PostgreSQL names the unique index in the constraint field for creators
+// that do not use that lock. User email/name collisions and all other database
+// failures must remain errors, not linking.
+fn is_identity_creation_conflict(error: &AuthRepositoryError) -> bool {
+    matches!(error, AuthRepositoryError::IdentityAlreadyBound)
+        || matches!(error, AuthRepositoryError::Database(sqlx::Error::Database(database))
+        if database.code().as_deref() == Some("23505")
+            && database.constraint() == Some("idx_external_identities_provider_subject_tenant"))
 }
 
 /// Generate the OIDC state cookie name based on security context.
@@ -771,7 +605,10 @@ fn extract_oidc_state_cookie(headers: &HeaderMap) -> Option<String> {
 /// OIDC error responses.
 #[derive(Debug)]
 pub enum OidcError {
-    ProviderError { error: String, description: String },
+    ProviderError {
+        error: String,
+        description: String,
+    },
     MissingStateCookie,
     StateMismatch,
     InvalidCsrfToken,
@@ -785,6 +622,8 @@ pub enum OidcError {
     MissingEmail,
     UnverifiedEmail,
     RoleAssignmentFailed,
+    /// Entitlement evidence or its atomic reconciliation failed; no session issues.
+    EntitlementReconciliationFailed,
     SessionCreationFailed,
     DatabaseError,
 }
@@ -848,6 +687,10 @@ impl IntoResponse for OidcError {
                 StatusCode::FORBIDDEN,
                 "No valid OIDC role mapping found for user".to_string(),
             ),
+            OidcError::EntitlementReconciliationFailed => (
+                StatusCode::FORBIDDEN,
+                "OIDC entitlement reconciliation failed".to_string(),
+            ),
             OidcError::SessionCreationFailed => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Authenticated but failed to create session".to_string(),
@@ -865,73 +708,6 @@ impl IntoResponse for OidcError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn derive_highest_role_prefers_admin_then_operator_then_viewer() {
-        assert_eq!(
-            derive_highest_role(vec![AuthRole::Viewer, AuthRole::Operator].into_iter()),
-            Some(AuthRole::Operator)
-        );
-        assert_eq!(
-            derive_highest_role(vec![AuthRole::Viewer, AuthRole::Admin].into_iter()),
-            Some(AuthRole::Admin)
-        );
-        assert_eq!(derive_highest_role(vec![].into_iter()), None);
-    }
-
-    #[test]
-    fn normalize_oidc_groups_trims_and_lowercases() {
-        let groups = normalize_oidc_groups(&[
-            " Team-Admins ".to_string(),
-            "".to_string(),
-            "Platform/Ops".to_string(),
-        ]);
-
-        assert_eq!(
-            groups,
-            vec!["team-admins".to_string(), "platform/ops".to_string()]
-        );
-    }
-
-    #[test]
-    fn collect_mapped_environments_deduplicates_normalized_values() {
-        let rows = vec![
-            OidcMappingMatchRow {
-                role: Some(AuthRole::Viewer),
-                environments: vec!["Prod".to_string(), " staging ".to_string()],
-            },
-            OidcMappingMatchRow {
-                role: None,
-                environments: vec!["prod".to_string(), "".to_string()],
-            },
-        ];
-
-        let environments = collect_mapped_environments(&rows);
-        assert_eq!(
-            environments,
-            vec!["prod".to_string(), "staging".to_string()]
-        );
-    }
-
-    #[test]
-    fn environment_mapping_apply_requires_actionable_and_resolved_mappings() {
-        assert_eq!(
-            evaluate_environment_mapping_apply(0, 2, 2),
-            EnvironmentMappingApply::SkipNoMappings
-        );
-        assert_eq!(
-            evaluate_environment_mapping_apply(2, 0, 0),
-            EnvironmentMappingApply::SkipNoMappedEnvironments
-        );
-        assert_eq!(
-            evaluate_environment_mapping_apply(2, 2, 1),
-            EnvironmentMappingApply::SkipUnknownMappedEnvironments
-        );
-        assert_eq!(
-            evaluate_environment_mapping_apply(2, 2, 2),
-            EnvironmentMappingApply::Apply
-        );
-    }
 
     #[test]
     fn oidc_state_cookie_uses_host_prefix_in_secure_context() {

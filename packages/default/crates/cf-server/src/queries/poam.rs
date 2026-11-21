@@ -900,6 +900,7 @@ mod register_tests {
             }
         }
         let actor = PoamActor {
+            credential: crate::auth::authorization::CredentialIdentity::BrowserSession,
             user_id: user,
             identifier: "register-tx".into(),
             is_admin: false,

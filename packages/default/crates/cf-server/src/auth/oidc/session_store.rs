@@ -19,15 +19,24 @@ pub struct OidcSession {
     pub nonce: Nonce,
     pub pkce_verifier: PkceCodeVerifier,
     pub created_at: SystemTime,
+    /// Database generation reserved before redirect, held only server-side.
+    /// Missing generations cannot authorize callback reconciliation.
+    pub entitlement_generation: Option<i64>,
 }
 
 impl OidcSession {
+    /// Creates a flow session without an entitlement generation.
+    ///
+    /// Login initiation must attach a reserved database generation before storing
+    /// the session. Callbacks reject the default `None` rather than reserving a
+    /// replacement that could reorder delayed evidence.
     pub fn new(csrf_token: CsrfToken, nonce: Nonce, pkce_verifier: PkceCodeVerifier) -> Self {
         Self {
             csrf_token,
             nonce,
             pkce_verifier,
             created_at: SystemTime::now(),
+            entitlement_generation: None,
         }
     }
 
@@ -176,17 +185,21 @@ mod tests {
     #[tokio::test]
     async fn store_and_retrieve_session() {
         let store = OidcSessionStore::new(None);
-        let session = OidcSession::new(
+        let mut session = OidcSession::new(
             CsrfToken::new("csrf-token".to_string()),
             Nonce::new("nonce".to_string()),
             PkceCodeVerifier::new("verifier".to_string()),
         );
+        assert_eq!(session.entitlement_generation, None);
+        session.entitlement_generation = Some(42);
 
         store.store("state-123".to_string(), session).await;
 
         let retrieved = store.retrieve("state-123").await;
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().csrf_token.secret(), "csrf-token");
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.csrf_token.secret(), "csrf-token");
+        assert_eq!(retrieved.entitlement_generation, Some(42));
     }
 
     #[tokio::test]

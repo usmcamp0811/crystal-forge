@@ -46,14 +46,19 @@ and [Systems API](../api/systems-api.md) for transitions and pending proof.
 
 ## 4. Authentication
 
-CF supports two auth modes:
+CF supports OIDC, local username/password and debug-only dev modes. The NixOS
+module exposes `oidc` and `local`; see [API authentication](api-authentication-and-authorization.md#authentication-modes).
 
 **OIDC:**
 1. The user opens `/login` and follows its link to `GET /api/auth/oidc/login`.
 2. The server redirects to the configured identity provider.
 3. The provider returns the authorization code to `GET /api/auth/oidc/callback`.
-4. The server exchanges the code, validates the identity, maps groups, and
-   creates the session.
+4. The server exchanges the code, validates and binds the identity, reconciles
+   IdP-owned grants without replacing independent local overrides, then creates
+   the session. Unresolved legacy grants preserve login without fresh PAT
+   eligibility; managed invalid evidence and unsupported multiple linked
+   identities deny login. See [OIDC entitlement ownership](oidc-entitlement-ownership.md)
+   for source behavior, upgrade prerequisites and pending verification.
 
 **Dev Mode (Development):**
 1. Set `AUTH_MODE=dev` in configuration.

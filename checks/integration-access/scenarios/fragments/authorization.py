@@ -300,3 +300,141 @@ with case("authorization-viewer-has-no-usable-admin-mutation-in-ui"):
     expect_equal(authz_state(), before, "the UI visit left protected state unchanged")
     expect_equal(authz_state(), authz_baseline, "protected state equals the post-control baseline")
     receipt("authorization.protectedStateUnchanged", True)
+
+
+# CF-AGENT-ACCESS-001 v1.1 sections 4.4/5.3 and the owner's independent
+# administrator/IdP grant decision: human-session administration edits local
+# contributions, not the IdP contribution. These are explicit prerequisite
+# source fixtures, not a simulated successful OIDC callback or PAT admission.
+# Run after the original baseline assertions; restore u2 before later fragments.
+def authz_source_union_boundary():
+    operator_id = receipts()["authorization.operator.userId"]
+    identity_id = "52920000-0000-4000-8000-000000000001"
+    environment_ids = ["52920000-0000-4000-8000-00000000000%d" % n for n in (2, 3, 4)]
+    path = "/api/v1/admin/users/" + operator_id
+
+    def fixture_sql(query):
+        # Same VM-only psql fixture mechanism as environment-forms.py; sql_json
+        # remains read-only. Never contact a host or pre-existing database.
+        controller.succeed("runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 "
+                           "-d crystal_forge -c " + shlex.quote(query))
+
+    def sources(user_id=operator_id):
+        return {
+            "roles": sql_json(controller,
+                "SELECT role::text, local_grant, oidc_identity_id::text, legacy_ownership_unresolved "
+                "FROM user_role_assignments WHERE user_id = '%s'::uuid ORDER BY role::text" % user_id),
+            "environments": sql_json(controller,
+                "SELECT environment_id::text, local_grant, oidc_identity_id::text, legacy_ownership_unresolved "
+                "FROM user_environment_memberships WHERE user_id = '%s'::uuid ORDER BY environment_id" % user_id),
+        }
+
+    def source(key, value, local, identity=None, legacy=False):
+        return {key: value, "local_grant": local, "oidc_identity_id": identity,
+                "legacy_ownership_unresolved": legacy}
+
+    with case("authorization-admin-replacement-preserves-idp-and-classifies-explicit-category"):
+        authz_verify_actor("operator")
+        expect_equal(authz_whoami(authz_admin_jar)["user"]["id"], receipts()["admin.userId"],
+                     "source replacement uses the existing Admin session")
+        fixture_sql("""
+            BEGIN;
+            INSERT INTO external_identities (id, user_id, provider_key, subject)
+            VALUES ('%s', '%s', 'oidc', 'access-source-union-fixture');
+            INSERT INTO environments (id, name) VALUES
+                ('%s', 'cf-it-source-idp'), ('%s', 'cf-it-source-legacy'), ('%s', 'cf-it-source-local');
+            UPDATE user_role_assignments SET oidc_identity_id = '%s'
+                WHERE user_id = '%s' AND role = 'operator';
+            INSERT INTO user_role_assignments (user_id, role, local_grant, legacy_ownership_unresolved)
+                VALUES ('%s', 'viewer', false, true);
+            INSERT INTO user_environment_memberships
+                (user_id, environment_id, local_grant, oidc_identity_id, legacy_ownership_unresolved)
+                VALUES ('%s', '%s', true, '%s', false),
+                       ('%s', '%s', false, NULL, true), ('%s', '%s', true, NULL, false);
+            COMMIT;
+            """ % (identity_id, operator_id, *environment_ids, identity_id, operator_id,
+                   operator_id, operator_id, environment_ids[0], identity_id,
+                   operator_id, environment_ids[1], operator_id, environment_ids[2]))
+        before = sources()
+        expect_equal(before, {
+            "roles": [source("role", "operator", True, identity_id),
+                      source("role", "viewer", False, legacy=True)],
+            "environments": [source("environment_id", environment_ids[0], True, identity_id),
+                             source("environment_id", environment_ids[1], False, legacy=True),
+                             source("environment_id", environment_ids[2], True)],
+        }, "explicit overlapping, legacy and local-only prerequisites")
+
+        status, patched = http(controller, "PATCH", path, {"role": "Viewer", "edit_local_grants": True},
+                               session=authz_admin_jar, csrf=True)
+        expect_equal(status, 200, "Admin explicitly replaces the local role")
+        expect_equal(patched["role"], "Operator", "PATCH returns highest effective role, not requested Viewer")
+        expected_roles = [source("role", "operator", False, identity_id), source("role", "viewer", True)]
+        expect_equal(sources(), {"roles": expected_roles, "environments": before["environments"]},
+                     "role classification preserves IdP and leaves legacy environment category unresolved")
+
+        status, patched = http(controller, "PATCH", path, {"environments": [], "edit_local_grants": True},
+                               session=authz_admin_jar, csrf=True)
+        expect_equal(status, 200, "Admin explicitly replaces local and legacy memberships with empty set")
+        expect_equal(patched["role"], "Operator", "environment PATCH still returns effective Operator")
+        expect_equal(patched["environments"], ["cf-it-source-idp"], "empty local request preserves IdP environment")
+        expect_equal(sources(), {
+            "roles": expected_roles,
+            "environments": [source("environment_id", environment_ids[0], False, identity_id)],
+        }, "explicit category replacement removes legacy/local-only rows and only local part of overlap")
+        status, users = http(controller, "GET", "/api/v1/admin/users", session=authz_admin_jar)
+        expect_equal(status, 200, "independent Admin list read")
+        saved = [u for u in users if u["id"] == operator_id]
+        expect_equal(len(saved), 1, "list returns exactly the edited identity")
+        expect_equal(saved[0]["role"], "Operator", "subsequent read returns effective role")
+        expect_equal(saved[0]["environments"], ["cf-it-source-idp"], "subsequent read returns effective membership")
+        receipt("authorization.sourceUnion.adminReplacement", {
+            "requestedLocalRole": "Viewer", "effectiveRole": "Operator",
+            "effectiveEnvironments": ["cf-it-source-idp"], "categoryClassificationExplicit": True,
+        })
+
+    with case("authorization-source-union-does-not-admit-operator-admin-mutations"):
+        who = authz_whoami(authz_actors["operator"][1])
+        expect_equal(who["is_authenticated"], True, "original Operator session remains authenticated")
+        expect_equal(who["user"]["id"], operator_id, "source-union session identity")
+        expect_equal(sorted(who["roles"]), ["Operator", "Viewer"], "session reads the effective source union")
+        for target in (operator_id, receipts()["authorization.target.userId"]):
+            before_state = authz_state()
+            before_sources = [sources(operator_id), sources(target)]
+            status, body = http(controller, "PATCH", "/api/v1/admin/users/" + target,
+                                {"role": "Admin", "environments": ["cf-it-source-idp"], "edit_local_grants": True},
+                                session=authz_actors["operator"][1], csrf=True)
+            authz_assert_forbidden(status, body, "source-union Operator self/cross-user PATCH")
+            expect_equal(authz_state(), before_state, "denial preserves every protected user, grant and audit count")
+            expect_equal([sources(operator_id), sources(target)], before_sources,
+                         "denial preserves actor and target source ownership flags")
+        receipt("authorization.sourceUnion.operatorDenied", {"ownUser": 403, "otherUser": 403, "stateUnchanged": True})
+
+        # Restore the existing actor through the real Admin API before removing
+        # only the injected IdP prerequisite. Later fragments require Operator
+        # with empty explicit memberships.
+        status, _ = http(controller, "PATCH", path, {"role": "Operator", "environments": [], "edit_local_grants": True},
+                         session=authz_admin_jar, csrf=True)
+        expect_equal(status, 200, "Admin restores the Operator's local contribution")
+        fixture_sql("""
+            BEGIN;
+            DELETE FROM user_environment_memberships WHERE user_id = '%s' AND oidc_identity_id = '%s';
+            UPDATE user_role_assignments SET oidc_identity_id = NULL
+                WHERE user_id = '%s' AND oidc_identity_id = '%s';
+            DELETE FROM external_identities WHERE id = '%s';
+            DELETE FROM environments WHERE id IN ('%s', '%s', '%s');
+            COMMIT;
+            """ % (operator_id, identity_id, operator_id, identity_id, identity_id, *environment_ids))
+        expect_equal(sources(), {"roles": [source("role", "operator", True)], "environments": []},
+                     "later fragments receive the original Operator role and empty scope")
+        authz_verify_actor("operator")
+
+
+authz_source_union_boundary()
+
+with case("authorization-operator-has-no-usable-admin-mutation-in-ui"):
+    before = authz_state()
+    receipt("authorization.operator.browserRequested", True)
+    run_browser(controller, "operator-admin-denied")
+    expect_equal(receipts()["authorization.operator.browserUserId"],
+                 receipts()["authorization.operator.userId"], "browser is the restored Operator")
+    expect_equal(authz_state(), before, "Operator UI denial leaves protected state unchanged")

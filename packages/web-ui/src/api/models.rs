@@ -6563,10 +6563,32 @@ pub struct AdminUserSummary {
     pub id: String,
     pub identifier: String,
     pub identity_source: IdentitySource,
+    /// Reports the effective role across all grant sources.
     pub role: Option<Role>,
     pub enabled: bool,
+    /// Reports effective environments, independently of editable local grants.
     pub environments: Vec<String>,
+    /// Contains source metadata; absence disables grant editing on older servers.
+    #[serde(default)]
+    pub grant_sources: Option<AdminUserGrantSources>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Separates independent local, IdP-managed, and unresolved legacy grants.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminUserGrantSources {
+    /// Lists every independently assigned local role.
+    pub local_roles: Vec<Role>,
+    /// Lists independently assigned local environments.
+    pub local_environments: Vec<String>,
+    /// Lists every IdP-managed role.
+    pub oidc_roles: Vec<Role>,
+    /// Lists IdP-managed environments.
+    pub oidc_environments: Vec<String>,
+    /// Lists roles whose ownership requires explicit classification.
+    pub legacy_roles: Vec<Role>,
+    /// Lists environments whose ownership requires explicit classification.
+    pub legacy_environments: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -6662,13 +6684,31 @@ pub struct AdminCreateUserRequest {
     pub environments: Vec<String>,
 }
 
-/// Request payload for updating a local admin-managed user.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Updates account fields and explicitly selected local grant categories.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AdminUpdateUserRequest {
+    /// Replaces local/unresolved roles only when grant editing is explicit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
+    /// Updates account availability when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// Replaces local/unresolved environments; an empty vector removes them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environments: Option<Vec<String>>,
+    /// Resets the password when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// Marks an intentional local grant mutation; omitted for account-only edits.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub edit_local_grants: bool,
+    /// Removes local roles while preserving IdP and unresolved legacy roles.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clear_local_role: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Reports whether one server-derived setup coach step is complete.

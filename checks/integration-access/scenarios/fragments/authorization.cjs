@@ -1,5 +1,5 @@
-// Requires facts.viewer and authorization.viewer.userId from authorization.py's
-// same-run Admin API creation. A fresh context signs in as that Viewer and
+// Requires facts.viewer/operator and authorization.<actor>.userId from authorization.py's
+// same-run Admin API creation. A fresh context signs in as that actor and
 // looks for administrative surfaces through the
 // production UI. It never imports cookies from another context and it changes
 // no application code, DOM element, selector, or response.
@@ -17,10 +17,11 @@ const ADMIN_MUTATION_BUTTONS = /^(Add user|Delete user|Save changes|Save retry c
 
 exports.run = async (ctx) => {
   const { page, expect, facts, receipts } = ctx;
-  const viewer = facts.viewer;
+  const actor = receipts["authorization.operator.browserRequested"] ? "operator" : "viewer";
+  const user = facts[actor];
 
   // Record every non-GET request to an administrative API. The UI MUST NOT
-  // issue one on behalf of a Viewer.
+  // issue one on behalf of either non-Admin role.
   const adminMutations = [];
   page.on("request", (request) => {
     const path = new URL(request.url()).pathname;
@@ -29,18 +30,18 @@ exports.run = async (ctx) => {
     }
   });
 
-  await ctx.step("Viewer signs in through the production login", async () => {
+  await ctx.step(`${user.roleWire} signs in through the production login`, async () => {
     await page.goto(ctx.url("/login"));
     // The server accepts a username or an email in the same field.
-    await page.getByPlaceholder("Enter your username", { exact: true }).fill(viewer.email);
-    await page.getByPlaceholder("Enter your password", { exact: true }).fill(viewer.password);
+    await page.getByPlaceholder("Enter your username", { exact: true }).fill(user.email);
+    await page.getByPlaceholder("Enter your password", { exact: true }).fill(user.password);
     await page.getByRole("button", { name: "Sign In", exact: true }).click();
     await expect(page).toHaveURL(ctx.url("/"));
     const who = await ctx.whoami();
     expect(who.body.is_authenticated).toBe(true);
-    expect(who.body.user.id).toBe(receipts["authorization.viewer.userId"]);
-    expect(who.body.roles).toEqual([viewer.roleWire]);
-    ctx.emit("authorization.viewer.browserUserId", who.body.user.id);
+    expect(who.body.user.id).toBe(receipts[`authorization.${actor}.userId`]);
+    expect(who.body.roles).toEqual([user.roleWire]);
+    ctx.emit(`authorization.${actor}.browserUserId`, who.body.user.id);
   });
 
   await ctx.step("navigation offers no administration entry", async () => {
@@ -56,7 +57,7 @@ exports.run = async (ctx) => {
     await expect(page.getByText("This page requires an administrator role.", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: ADMIN_MUTATION_BUTTONS })).toHaveCount(0);
     await expect(page.locator('a[href="/admin"]')).toHaveCount(0);
-    await ctx.screenshot("viewer-admin-access-denied");
+    await ctx.screenshot(`${actor}-admin-access-denied`);
   });
 
   await ctx.step("the UI issued no administrative mutation request", async () => {
