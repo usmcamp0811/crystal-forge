@@ -108,3 +108,9 @@ Implementation (uncompiled, untested; no build, test or preview was run):
 - Resolver: private `candidate_preview` flag on the single-assignment resolver and public `resolve_system_effective_policies_with_candidate_in_tx` with `CandidateAssignment`; the candidate replaces an active assignment of the same bundle lineage at the same target. Preview runs in a `REPEATABLE READ, READ ONLY` transaction that is rolled back; environments use the batch resolver for the current set and at most 100 systems.
 - Browser `create_bundle` now takes an actor, sets `created_by` on the initial draft and writes `bundle_draft_created`; `update_bundle` writes `bundle_draft_updated`.
 <!-- SECTION:NOTES:END -->
+
+## Verification
+
+Farm PostgreSQL run at `170bfd2f`: `access_tokens` 47, `assignment_semantics` 13, `compliance_assignment_zombie_repair` 1, `composite_policy` 38, `mcp_compliance_read` 7, `mcp_policy_authoring` 17, `mcp_transport` 10, `resolver_enforcement` 0 run (8 ignored by design), `task433_assignment_visibility` 1, `task433_csrf` 4 passed; `mcp_bundle_authoring` 8 passed and 1 failed (`membership_updates_are_exact_validated_and_revisioned`: the fixture deprecated a published policy version whose `mapping_digest` was still `pending`, which the existing immutability trigger only allows as a digest backfill). The fixture now computes the mapping digest before publishing, as the publish path does. At that fix (`mcp_bundle_authoring` only): 9 passed, 0 failed, including `full_agent_workflow_over_http`. Web UI at `170bfd2f`: 970 passed. `nix build .#okf-knowledge` passed.
+
+Not run: integration-access scenario (farm builder aborted NixOS unit builds twice during TASK-534.6); CI pending.
