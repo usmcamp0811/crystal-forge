@@ -1,5 +1,5 @@
-//! Migration-backed checks for scoped configuration scan inventory. The HTTP
-//! test drives the production route in-process without opening a socket.
+//! Migration-backed checks for scoped configuration scan inventory and POA&M
+//! planning. HTTP cases drive production handlers without opening a socket.
 
 use std::sync::Arc;
 
@@ -12,15 +12,16 @@ use axum::{
 use chrono::Utc;
 use crystal_forge::{
     api::models::CreateAccessTokenRequest,
+    auth::session::{CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token},
     config::ServerConfig,
-    handlers::agent_request::CFState,
+    handlers::{agent_request::CFState, api::poam},
     mcp::{
         self,
         tools::{ToolCaller, ToolError, call_tool},
     },
     models::auth_identity::AuthRole,
     queries::{
-        auth_identity::{insert_user_environment_membership, sync_user_role},
+        auth_identity::{create_user_session, insert_user_environment_membership, sync_user_role},
         users::insert_user,
     },
     queue::QueueNotifier,
@@ -41,6 +42,15 @@ fn config() -> ServerConfig {
 }
 
 async fn issue(pool: &PgPool, role: AuthRole, env: Uuid, scope: &str) -> (ToolCaller, String) {
+    issue_scopes(pool, role, env, &[scope]).await
+}
+
+async fn issue_scopes(
+    pool: &PgPool,
+    role: AuthRole,
+    env: Uuid,
+    scopes: &[&str],
+) -> (ToolCaller, String) {
     let user = insert_user(pool, &format!("{}@example.invalid", Uuid::new_v4()), None)
         .await
         .unwrap();
@@ -56,7 +66,7 @@ async fn issue(pool: &PgPool, role: AuthRole, env: Uuid, scope: &str) -> (ToolCa
         audience: Some("mcp".into()),
         expires_in_days: Some(30),
         environment_ids: Some(vec![env.to_string()]),
-        scopes: Some(vec![scope.into()]),
+        scopes: Some(scopes.iter().map(|scope| (*scope).to_owned()).collect()),
         confirm_production_write: None,
     };
     let issued = access_tokens::create(pool, user.id, &request, &settings)
@@ -444,6 +454,23 @@ async fn rpc(app: &Router, secret: &str, name: &str, args: Value) -> Value {
     body["result"].clone()
 }
 
+fn http_app(pool: &PgPool) -> Router {
+    Router::new()
+        .route("/mcp", post(mcp::handle))
+        .route("/api/v1/poams/:id/close", post(poam::close))
+        .route("/api/v1/poams/cves", post(poam::create_cve))
+        .route(
+            "/api/v1/poams/:id/cve-findings",
+            post(poam::link_cve_finding),
+        )
+        .with_state(CFState::new(
+            pool.clone(),
+            config(),
+            Arc::new(QueueNotifier::new()),
+            BackgroundJobRegistry::new(),
+        ))
+}
+
 #[sqlx::test]
 async fn http_discovery_and_findings_enforce_scope_and_current_environment(pool: PgPool) {
     let env = environment(&pool, "visible").await;
@@ -454,14 +481,7 @@ async fn http_discovery_and_findings_enforce_scope_and_current_environment(pool:
     let hidden = host(&pool, repo, other, "Host-C").await;
     let (admitted, secret) = issue(&pool, AuthRole::Operator, env, "cves:read").await;
     let (_, wrong_scope) = issue(&pool, AuthRole::Admin, env, "poams:read").await;
-    let app = Router::new()
-        .route("/mcp", post(mcp::handle))
-        .with_state(CFState::new(
-            pool.clone(),
-            config(),
-            Arc::new(QueueNotifier::new()),
-            BackgroundJobRegistry::new(),
-        ));
+    let app = http_app(&pool);
     let found = rpc(
         &app,
         &secret,
@@ -596,4 +616,439 @@ async fn http_discovery_and_findings_enforce_scope_and_current_environment(pool:
     .await
     .unwrap();
     assert_eq!(empty["systems"], json!([]));
+}
+
+const PLAN_CVE: &str = "CVE-2099-0346";
+const PLAN_PACKAGE: &str = "fixture-pkg";
+const PLAN_STORE_PATH: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-planning-head";
+
+async fn external_planning_host(pool: &PgPool) -> (Uuid, Uuid, i32, i32) {
+    let env = environment(pool, "planning").await;
+    let repo = flake(pool, "planning-repo").await;
+    let system = host(pool, repo, env, "planning-host").await;
+    sqlx::query("UPDATE systems SET management_mode='external' WHERE id=$1")
+        .bind(system)
+        .execute(pool)
+        .await
+        .unwrap();
+    let head = commit(pool, repo, "a").await;
+    let drv = derivation(pool, head, "Shared_Config", PLAN_STORE_PATH).await;
+    set_head(pool, repo, head).await;
+    sqlx::query("INSERT INTO cves(id,cvss_v3_score) VALUES($1,7.5)")
+        .bind(PLAN_CVE)
+        .execute(pool)
+        .await
+        .unwrap();
+    (env, system, head, drv)
+}
+
+async fn planning_scan(pool: &PgPool, drv: i32, version: &str, path: &str) -> Uuid {
+    let id = scan(pool, drv, "in_progress").await;
+    sqlx::query(
+        "INSERT INTO cve_scan_vulnerability_observations(scan_id,canonical_cve_id,canonical_package_name,\
+         observed_package_name,observed_package_version,observed_derivation_path,is_whitelisted,detection_method) \
+         VALUES($1,$2,$3,$3,$4,$5,false,'test')",
+    )
+    .bind(id)
+    .bind(PLAN_CVE)
+    .bind(PLAN_PACKAGE)
+    .bind(version)
+    .bind(path)
+    .execute(pool)
+    .await
+    .unwrap();
+    seal(pool, id).await;
+    id
+}
+
+fn plan_args(system: Uuid, scan_id: Uuid) -> Value {
+    json!({"system_id":system,"cve_id":PLAN_CVE,"canonical_package_name":PLAN_PACKAGE,
+           "expected_scan_id":scan_id,"title":"Plan package upgrade","plan":"Review update"})
+}
+
+fn tool_success(reply: &Value) -> &Value {
+    assert!(reply["structuredContent"].is_object(), "{reply}");
+    assert_ne!(reply["isError"], true, "{reply}");
+    &reply["structuredContent"]
+}
+
+fn assert_tool_error(reply: &Value, code: &str) {
+    assert_eq!(reply["isError"], true, "{reply}");
+    assert!(
+        reply["content"][0]["text"].as_str().unwrap().contains(code),
+        "expected {code}: {reply}"
+    );
+}
+
+#[sqlx::test]
+async fn http_head_plan_keeps_its_baseline_and_requires_mcp_runtime_handoff(pool: PgPool) {
+    let (env, system, head, drv) = external_planning_host(&pool).await;
+    let first_scan = planning_scan(&pool, drv, "1", "/fixture-package-v1.drv").await;
+    let (creator, create_token) = issue(&pool, AuthRole::Operator, env, "poams:create").await;
+    let (writer, progress_token) = issue_scopes(
+        &pool,
+        AuthRole::Operator,
+        env,
+        &["cves:read", "poams:read", "poams:write", "poams:verify"],
+    )
+    .await;
+    let app = http_app(&pool);
+
+    let created = rpc(
+        &app,
+        &create_token,
+        "create_cve_poam",
+        plan_args(system, first_scan),
+    )
+    .await;
+    let created = tool_success(&created);
+    let id: Uuid = serde_json::from_value(created["poam_id"].clone()).unwrap();
+    assert_eq!(created["created"], true);
+    assert_eq!(created["evidence_kind"], "configuration_scan");
+    assert_eq!(created["baseline_scan_id"], json!(first_scan));
+    assert_eq!(created["revision"], 1);
+    assert_eq!(created["status"], "open");
+
+    let detail = || {
+        rpc(
+            &app,
+            &progress_token,
+            "get_poam_detail",
+            json!({"poam_id":id}),
+        )
+    };
+    let initial = detail().await;
+    let initial = tool_success(&initial);
+    assert_eq!(initial["visibility"], "full");
+    let baseline = &initial["poam"]["configuration_cve_finding"];
+    assert_eq!(baseline["system_id"], json!(system));
+    assert_eq!(baseline["canonical_cve_id"], PLAN_CVE);
+    assert_eq!(baseline["canonical_package_name"], PLAN_PACKAGE);
+    assert_eq!(baseline["baseline_head_commit_id"], head);
+    assert_eq!(baseline["baseline_head_commit_hash"], "a".repeat(40));
+    assert_eq!(baseline["baseline_configuration_derivation_id"], drv);
+    assert_eq!(baseline["baseline_scan_id"], json!(first_scan));
+    assert_eq!(baseline["baseline_scan_derivation_id"], drv);
+    assert_eq!(baseline["baseline_scanned_store_path"], PLAN_STORE_PATH);
+    assert_eq!(
+        baseline["baseline_occurrence_derivation_path"],
+        "/fixture-package-v1.drv"
+    );
+    assert_eq!(baseline["baseline_observed_package_version"], "1");
+    assert_eq!(initial["poam"]["cve_findings"], json!([]));
+
+    let second_scan = planning_scan(&pool, drv, "2", "/fixture-package-v2.drv").await;
+    let inventory = rpc(
+        &app,
+        &progress_token,
+        "list_scan_findings",
+        json!({"system_id":system}),
+    )
+    .await;
+    let inventory = tool_success(&inventory);
+    assert_eq!(
+        inventory["provenance"]["scan"]["scan_id"],
+        json!(second_scan)
+    );
+    assert_eq!(inventory["is_runtime_authoritative"], false);
+    let mut retry = plan_args(system, second_scan);
+    retry["title"] = json!("A retry must not rewrite the plan");
+    retry["plan"] = json!("Replacement text");
+    let reused = rpc(&app, &create_token, "create_cve_poam", retry).await;
+    let mut expected = created.clone();
+    expected["created"] = json!(false);
+    assert_eq!(tool_success(&reused), &expected);
+    let after_rescan = detail().await;
+    assert_eq!(tool_success(&after_rescan), initial);
+
+    let note = rpc(
+        &app,
+        &progress_token,
+        "update_poam_progress",
+        json!({"poam_id":id,"revision":1,"action":{"type":"add_note","text":"Reviewed configuration update"}}),
+    )
+    .await;
+    assert_eq!(tool_success(&note)["revision"], 2);
+    let progress = detail().await;
+    let progress = tool_success(&progress);
+    let activity = progress["poam"]["activity"].as_array().unwrap();
+    assert_eq!(activity.len(), 2);
+    for (kind, actor) in [("created", &creator), ("note", &writer)] {
+        let entry = activity.iter().find(|row| row["kind"] == kind).unwrap();
+        assert_eq!(entry["actor_user_id"], json!(actor.owner_user_id));
+        assert_eq!(entry["access_token_id"], json!(actor.token_id));
+        assert_eq!(entry["via_agent"], true);
+        assert_eq!(entry["access_token_name"], "Scan inventory test");
+        if kind == "note" {
+            assert_eq!(entry["payload"]["text"], "Reviewed configuration update");
+        }
+    }
+
+    for (tool, args) in [
+        ("verify_poam", json!({"poam_id":id,"revision":2})),
+        (
+            "update_poam_progress",
+            json!({"poam_id":id,"revision":2,
+            "action":{"type":"set_status","status":"awaiting_verification"}}),
+        ),
+    ] {
+        assert_tool_error(
+            &rpc(&app, &progress_token, tool, args).await,
+            "configuration_planning_only",
+        );
+    }
+
+    // Exercise the actual closure route with a valid browser session and CSRF.
+    let session = Uuid::new_v4().to_string();
+    create_user_session(
+        &pool,
+        writer.owner_user_id,
+        hash_token(&session),
+        Utc::now() + chrono::Duration::hours(1),
+        None,
+        None,
+        "local".into(),
+    )
+    .await
+    .unwrap();
+    let close = Request::post(format!("/api/v1/poams/{id}/close"))
+        .header(
+            "cookie",
+            format!("{SESSION_COOKIE_NAME}={session}; {CSRF_COOKIE_NAME}=fixture-csrf"),
+        )
+        .header(CSRF_HEADER_NAME.as_str(), "fixture-csrf")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"revision":2}).to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(close).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), mcp::MAX_BODY_BYTES)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "configuration_planning_only");
+    let after_denials = detail().await;
+    assert_eq!(tool_success(&after_denials), progress);
+    assert_eq!(progress["poam"]["configuration_cve_finding"], *baseline);
+    assert_eq!(progress["poam"]["status"], "open");
+    assert_eq!(progress["poam"]["verification_attempts"], json!([]));
+
+    let audits: Vec<(String, Option<Uuid>, Option<Uuid>, Value)> = sqlx::query_as(
+        "SELECT action,actor_user_id,access_token_id,metadata FROM admin_audit_events \
+         WHERE target=$1 ORDER BY action",
+    )
+    .bind(format!("poam:{id}"))
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audits.len(), 2);
+    for ((action, user, token, metadata), (expected_action, actor)) in audits
+        .iter()
+        .zip([("poam_created", &creator), ("poam_note", &writer)])
+    {
+        assert_eq!(action, expected_action);
+        assert_eq!(*user, Some(actor.owner_user_id));
+        assert_eq!(*token, Some(actor.token_id));
+        assert_eq!(metadata["via"], "mcp");
+        assert_eq!(metadata["access_token_id"], json!(actor.token_id));
+        assert_eq!(metadata["access_token_name"], "Scan inventory test");
+    }
+
+    sqlx::query(
+        "UPDATE systems SET management_mode='managed',public_key='fixture-key' WHERE id=$1",
+    )
+    .bind(system)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO system_states(hostname,change_reason,store_path,generation, \
+         generation_matches_current_store_path) VALUES('planning-host','startup',$1,1,true)",
+    )
+    .bind(PLAN_STORE_PATH)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // The new authority cannot promote by itself or through browser link/create.
+    let observation = json!({"system_id":system,"scan_id":second_scan,
+        "occurrence_derivation_path":"/fixture-package-v2.drv",
+        "canonical_cve_id":PLAN_CVE,"canonical_package_name":PLAN_PACKAGE});
+    for (path, body, expected_error) in [
+        (
+            format!("/api/v1/poams/{id}/cve-findings"),
+            json!({"revision":2,"observation":observation}),
+            "incompatible_finding",
+        ),
+        (
+            "/api/v1/poams/cves".to_owned(),
+            json!({"title":"Duplicate","risk":"medium","observation":observation}),
+            "configuration_plan_exists",
+        ),
+    ] {
+        let request = Request::post(path)
+            .header(
+                "cookie",
+                format!("{SESSION_COOKIE_NAME}={session}; {CSRF_COOKIE_NAME}=fixture-csrf"),
+            )
+            .header(CSRF_HEADER_NAME.as_str(), "fixture-csrf")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let bytes = to_bytes(response.into_body(), mcp::MAX_BODY_BYTES)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], expected_error, "{body}");
+    }
+    assert_tool_error(
+        &rpc(
+            &app,
+            &progress_token,
+            "verify_poam",
+            json!({"poam_id":id,"revision":2}),
+        )
+        .await,
+        "configuration_planning_only",
+    );
+
+    let promote = || {
+        rpc(
+            &app,
+            &create_token,
+            "create_cve_poam",
+            plan_args(system, first_scan),
+        )
+    };
+    sqlx::query(
+        "INSERT INTO system_cve_justifications(system_id,cve_id,category,reason,updated_by,updated_at) \
+         VALUES($1,$2,'accepted_risk','test',$3,now())",
+    )
+    .bind(system)
+    .bind(PLAN_CVE)
+    .bind(writer.owner_user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_tool_error(&promote().await, "cve_occurrence_justified");
+    assert_eq!(tool_success(&detail().await), progress);
+    sqlx::query("DELETE FROM system_cve_justifications WHERE system_id=$1 AND cve_id=$2")
+        .bind(system)
+        .bind(PLAN_CVE)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (promoted, retry) = tokio::join!(promote(), promote());
+    let promoted = tool_success(&promoted);
+    assert_eq!(promoted, tool_success(&retry));
+    assert_eq!(promoted["poam_id"], json!(id));
+    assert_eq!(promoted["created"], false);
+    assert_eq!(promoted["revision"], 3);
+    assert_eq!(promoted["status"], "open");
+    assert_eq!(promoted["evidence_kind"], "runtime_cve");
+    assert_eq!(promoted["baseline_scan_id"], json!(second_scan));
+    let after = detail().await;
+    let after = &tool_success(&after)["poam"];
+    assert_eq!(after["configuration_cve_finding"], *baseline);
+    assert_eq!(after["cve_findings"].as_array().unwrap().len(), 1);
+    let activity = after["activity"].as_array().unwrap();
+    assert_eq!(activity.len(), 3);
+    let handoff = activity
+        .iter()
+        .find(|row| row["kind"] == "cve_finding_linked")
+        .unwrap();
+    assert_eq!(handoff["access_token_id"], json!(creator.token_id));
+    assert_eq!(handoff["payload"]["configuration_handoff"], true);
+    assert_eq!(handoff["payload"]["observation"], observation);
+
+    let awaiting = rpc(
+        &app,
+        &progress_token,
+        "update_poam_progress",
+        json!({"poam_id":id,"revision":3,"action":{"type":"set_status","status":"awaiting_verification"}}),
+    )
+    .await;
+    assert_eq!(tool_success(&awaiting)["revision"], 4);
+    let verified = rpc(
+        &app,
+        &progress_token,
+        "verify_poam",
+        json!({"poam_id":id,"revision":4}),
+    )
+    .await;
+    assert_eq!(tool_success(&verified)["outcome"], "rejected");
+}
+
+#[sqlx::test]
+async fn http_head_plan_create_is_scoped_and_deduplicates_concurrent_requests(pool: PgPool) {
+    let (env, system, _, drv) = external_planning_host(&pool).await;
+    let stale = planning_scan(&pool, drv, "1", "/fixture-package-v1.drv").await;
+    let current = planning_scan(&pool, drv, "2", "/fixture-package-v2.drv").await;
+    let other = environment(&pool, "outside-token-grant").await;
+    let (_, creator) = issue(&pool, AuthRole::Operator, env, "poams:create").await;
+    let (_, wrong_scope) = issue(&pool, AuthRole::Operator, env, "poams:write").await;
+    let (_, outside) = issue_scopes(
+        &pool,
+        AuthRole::Admin,
+        other,
+        &["poams:create", "poams:read", "poams:write", "poams:verify"],
+    )
+    .await;
+    let app = http_app(&pool);
+    let create = |token, args| rpc(&app, token, "create_cve_poam", args);
+    let args = plan_args(system, current);
+    assert_tool_error(&create(&wrong_scope, args.clone()).await, "forbidden");
+    let unknown = create(&outside, plan_args(Uuid::new_v4(), current)).await;
+    assert_tool_error(&unknown, "not_found");
+    assert_eq!(create(&outside, args.clone()).await, unknown);
+    assert_tool_error(
+        &create(&creator, plan_args(system, stale)).await,
+        "head_finding_not_current",
+    );
+
+    // Poll both HTTP requests together so they can contend on the same identity.
+    let (left, right) = tokio::join!(
+        create(&creator, args.clone()),
+        create(&creator, args.clone())
+    );
+    let left = tool_success(&left);
+    let right = tool_success(&right);
+    assert_eq!(left["poam_id"], right["poam_id"]);
+    assert_eq!(left["baseline_scan_id"], json!(current));
+    assert_eq!(right["baseline_scan_id"], json!(current));
+    assert_ne!(
+        left["created"].as_bool().unwrap(),
+        right["created"].as_bool().unwrap()
+    );
+    assert_eq!(create(&outside, args).await, unknown);
+
+    let id = &left["poam_id"];
+    for (tool, args) in [
+        ("get_poam_detail", json!({"poam_id":id})),
+        ("verify_poam", json!({"poam_id":id,"revision":1})),
+        (
+            "update_poam_progress",
+            json!({"poam_id":id,"revision":1,
+            "action":{"type":"add_note","text":"Outside the token grant"}}),
+        ),
+    ] {
+        let mut absent = args.clone();
+        absent["poam_id"] = json!(Uuid::new_v4());
+        let missing = rpc(&app, &outside, tool, absent).await;
+        assert_tool_error(&missing, "not_found");
+        assert_eq!(rpc(&app, &outside, tool, args).await, missing);
+    }
+    let counts: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM poams), \
+                (SELECT COUNT(*) FROM poam_configuration_cve_findings), \
+                (SELECT COUNT(*) FROM poam_cve_finding_links), \
+                (SELECT COUNT(*) FROM poam_activity)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, (1, 1, 0, 1));
 }

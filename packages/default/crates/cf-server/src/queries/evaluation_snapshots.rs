@@ -4954,9 +4954,8 @@ pub async fn reclaim_orphaned_snapshot_content(pool: &PgPool) -> Result<Snapshot
     .rows_affected();
     // RETENTION: Source reset preserves exact deployment lineage until the
     // ingestion window closes. Reclaim only archived derivations for which no
-    // retained generation, deployment binding, system target, or sealed POA&M
-    // verification item remains. Unreferenced schema-1 scans follow their
-    // parent derivation lifecycle.
+    // retained generation, deployment binding, system target, sealed POA&M
+    // verification item, or configuration planning baseline remains.
     let derivation_rows = sqlx::query(
         r#"
         DELETE FROM derivations derivation
@@ -4999,6 +4998,10 @@ pub async fn reclaim_orphaned_snapshot_content(pool: &PgPool) -> Result<Snapshot
                      AND scan.evidence_schema_version = 1
                      AND attempt.sealed_at IS NOT NULL
                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM poam_configuration_cve_findings baseline
+                    WHERE baseline.baseline_scan_derivation_id = candidate.id
+                )
             ORDER BY candidate.id
             LIMIT 100
         )

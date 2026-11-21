@@ -76,7 +76,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", 
 ///
 /// The authoritative definitions live in [`tools`]; `tools/list` uses
 /// [`tools::visible_tools`], not this list.
-pub const MCP_TOOL_NAMES: [&str; 23] = [
+pub const MCP_TOOL_NAMES: [&str; 24] = [
     "find_systems",
     "list_scan_findings",
     "list_remediation_work",
@@ -85,6 +85,7 @@ pub const MCP_TOOL_NAMES: [&str; 23] = [
     "get_poam_detail",
     "request_cve_scan",
     "get_scan_result",
+    "create_cve_poam",
     "update_poam_progress",
     "verify_poam",
     "list_compliance_policies",
@@ -142,8 +143,8 @@ const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 
 const INSTRUCTIONS: &str = "Crystal Forge provides CVE and POA&M remediation context \
-for NixOS systems. Write tools (scan requests, POA&M progress and verification, policy drafts \
-and imports, bundle drafts) are available \
+for NixOS systems. Write tools (scan requests, CVE POA&M creation, POA&M progress and \
+verification, policy drafts and imports, bundle drafts) are available \
 only when the access token grants their scope, and every write is recorded as made by this \
 agent token. Results are limited to the environments and scopes of the access \
 token and the owner's current role. Compliance read tools (policies:read, bundles:read) \

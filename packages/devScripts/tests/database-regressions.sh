@@ -440,6 +440,7 @@ SQL
     beginPhase critical-integration-targets
     # Preserve the existing targets and Cargo's failure propagation. Separate
     # compilation/linking from execution to identify a silent boundary.
+    # mcp_scan_findings also runs the sealed HEAD POA&M planning HTTP cases.
     for testTarget in \
       access_tokens \
       admin_source_grants \

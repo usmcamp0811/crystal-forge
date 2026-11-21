@@ -51,6 +51,7 @@ const ALL_WRITE: &[&str] = &[
     "cves:read",
     "poams:read",
     "scans:request",
+    "poams:create",
     "poams:write",
     "poams:verify",
 ];
@@ -598,7 +599,15 @@ async fn tools_list_shows_write_tools_only_with_write_scopes(pool: PgPool) {
     let writer = issue(&pool, owner, ALL_WRITE, &[env]).await;
     let listed = tool_names(&server.rpc(&writer, "tools/list", json!({})).await);
     let mut expected = read_tools;
-    expected.extend(["request_cve_scan", "update_poam_progress", "verify_poam"].map(str::to_owned));
+    expected.extend(
+        [
+            "create_cve_poam",
+            "request_cve_scan",
+            "update_poam_progress",
+            "verify_poam",
+        ]
+        .map(str::to_owned),
+    );
     assert_eq!(listed, expected);
 }
 

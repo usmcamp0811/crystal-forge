@@ -253,28 +253,12 @@ pub(super) async fn list_scan_findings(
     // select that build. Exact execution reuse is proved by the existing view.
     // The view returns an execution ID even before a build exists, so use its
     // execution status and actual output to decide whether HEAD is usable.
-    let head = sqlx::query_as::<_, Head>(
-        r#"SELECT f.snapshot_ready_at IS NOT NULL AS snapshot_ready,f.branch,
-                  c.id AS commit_id,c.git_commit_hash AS commit_hash,
-                  d.id AS configuration_derivation_id,d.execution_derivation_id,
-                  COALESCE(status.name IN ('build-complete','complete')
-                    AND NULLIF(BTRIM(d.derivation_path),'') IS NOT NULL
-                    AND NULLIF(BTRIM(d.store_path),'') IS NOT NULL,false) AS target_ready
-           FROM flakes f
-           LEFT JOIN flake_branch_commit_snapshot h ON h.flake_id=f.id AND h.position=0
-             AND f.snapshot_ready_at IS NOT NULL
-           LEFT JOIN commits c ON c.id=h.commit_id AND c.flake_id=f.id
-            LEFT JOIN view_derivation_execution_evidence d ON d.commit_id=c.id
-              AND d.derivation_type='nixos' AND d.derivation_name=$2
-              AND lower(COALESCE(d.policy_results->>'execution_mode','native')) <> 'mock'
-            LEFT JOIN derivation_statuses status ON status.id=d.execution_status_id
-           WHERE f.id=$1"#,
-    )
-    .bind(system.flake_id)
-    .bind(&system.configuration_name)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(db_error)?;
+    let head = sqlx::query_as::<_, Head>("SELECT * FROM configuration_cve_head($1,$2)")
+        .bind(system.flake_id)
+        .bind(&system.configuration_name)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_error)?;
     let execution_id = head
         .as_ref()
         .filter(|head| head.target_ready)
@@ -285,45 +269,26 @@ pub(super) async fn list_scan_findings(
 
     // An explicit ID may name historical (including archived) evidence. The
     // scan's own derivation must belong to this exact flake and configuration.
-    // For HEAD the same membership check applies to the proven execution id;
-    // equal hashes, paths, and physical alias IDs alone cannot select a scan.
-    // Keep the exact-ID primary key lookup separate from the HEAD lookup on
-    // derivation and completion time. Neither branch searches unrelated scans.
-    // For provenance, use the scan's own built output, never an expected path
-    // or the output of a different execution adopted by that derivation.
-    let selector = if args.scan_id.is_some() {
-        "s.id=$1"
+    // The HEAD query is also used by POA&M admission so read and write cannot
+    // disagree about which scan is eligible for a planning baseline.
+    let scan = if let Some(scan_id) = args.scan_id {
+        sqlx::query_as::<_, SealedScan>(
+            "SELECT * FROM sealed_configuration_cve_scans \
+             WHERE scan_id=$1 AND flake_id=$2 AND configuration_name=$3",
+        )
+        .bind(scan_id)
+        .bind(system.flake_id)
+        .bind(&system.configuration_name)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_error)?
     } else {
-        "s.derivation_id=$1 ORDER BY s.completed_at DESC,s.id DESC"
-    };
-    let sql = format!(
-        r#"SELECT s.id AS scan_id,s.completed_at,s.scanner_name,s.scanner_version,
-                  d.id AS derivation_id,c.id AS commit_id,c.git_commit_hash AS commit_hash,
-                  d.derivation_path,NULLIF(BTRIM(d.store_path),'') AS scanned_system_store_path,
-                  jsonb_build_object('total_packages',s.total_packages,
-                    'total_vulnerabilities',s.total_vulnerabilities,'critical',s.critical_count,
-                    'high',s.high_count,'medium',s.medium_count,'low',s.low_count) AS raw_counts
-           FROM cve_scans s JOIN derivations d ON d.id=s.derivation_id
-           JOIN commits c ON c.id=d.commit_id
-            WHERE c.flake_id=$2 AND d.derivation_type='nixos' AND d.derivation_name=$3
-              AND lower(COALESCE(d.policy_results->>'execution_mode','native')) <> 'mock'
-              AND s.status='completed' AND s.completed_at IS NOT NULL AND s.evidence_schema_version=1
-              AND {selector} LIMIT 1"#,
-    );
-    let selection = sqlx::query_as::<_, SealedScan>(&sql);
-    let scan = match (args.scan_id, execution_id) {
-        (Some(id), _) => Some(selection.bind(id)),
-        (None, Some(id)) => Some(selection.bind(id)),
-        (None, None) => None,
-    };
-    let scan = match scan {
-        Some(selection) => selection
+        sqlx::query_as::<_, SealedScan>("SELECT * FROM configuration_head_cve_scan($1,$2)")
             .bind(system.flake_id)
             .bind(&system.configuration_name)
             .fetch_optional(&mut *tx)
             .await
-            .map_err(db_error)?,
-        None => None,
+            .map_err(db_error)?
     };
     if args.scan_id.is_some() && scan.is_none() {
         return Err(ToolError::NotFound);
