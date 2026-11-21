@@ -546,7 +546,7 @@ async fn tools_list_shows_only_tools_allowed_by_token_scopes(pool: PgPool) {
         .filter(|name| !mcp::tools::is_write_tool(name) && **name != "validate_policy_draft")
         .map(|name| (*name).to_owned())
         .collect();
-    assert_eq!(expected.len(), 12);
+    assert_eq!(expected.len(), 14);
     assert_eq!(tool_names(&reply), expected);
 }
 
