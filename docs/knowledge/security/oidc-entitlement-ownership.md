@@ -287,6 +287,34 @@ This is an operator procedure, not an executed migration or database session.
    unresolved/failed attempts do not become fresh. Keep the backup and reviewed
    inventory for recovery; do not bypass failure by stamping freshness manually.
 
+### Automated upgrade rehearsal
+
+`packages/default/crates/cf-server/tests/legacy_grant_upgrade.rs` automates the
+database part of steps 3, 4 and 6. Each test migrates a disposable database
+through 0334, seeds a pre-0335 population with raw SQL and then applies 0335
+and later migrations unchanged. The population has a local-only Admin, an
+OIDC-linked Operator, an OIDC-linked Admin, a user with two linked identities,
+a disabled linked user, two group mappings and pre-upgrade browser sessions.
+
+- `upgrade_preserves_effective_grants_and_browser_login` proves that effective
+  rows, IDs, actors and session-resolved roles do not change.
+- `upgrade_classifies_sources_and_denies_oidc_linked_freshness` proves that
+  only grants of linked users become unresolved, that no linked identity is
+  fresh, and that an OIDC callback returns `LegacyUnresolved` without changes.
+- `recovery_classifies_local_overrides_then_idp_sync_and_removal_touch_only_managed_grants`
+  classifies the Operator through the real PATCH handler with
+  `edit_local_grants: true`, checks the source flags and audit events, then
+  reconciles mapped groups (fresh, IdP grants beside the local override) and
+  authoritative empty groups (only IdP contributions removed).
+- `two_identity_user_stays_blocked_after_classification` proves that local
+  classification does not make a two-identity user reconcilable or fresh.
+
+The rehearsal does not use a real IdP, a signed callback, backup restoration,
+the local-auth console recovery or the browser UI. It does not replace the
+production inventory or the isolated restored-copy rehearsal in step 2. The
+target is selected by `packages/devScripts/tests/database-regressions.sh`. Its
+result is **PENDING**; it has not run on the farm.
+
 There is no automatic plaintext token retrieval or Admin human impersonation
 path. The approved future PAT design returns a secret once to its authenticated
 owner; this groundwork does not issue tokens or let an Admin mint another
@@ -329,8 +357,8 @@ nix build .#okf-knowledge --no-link -L
 Exact commands, derivations, results and remaining runs are recorded in
 TASK-534.2. The core package's ordinary tests do not execute the PostgreSQL
 integration targets; do not substitute a package pass for those database proofs.
-`tests/oidc_entitlements.rs`, `tests/admin_source_grants.rs` and the POA&M target
-are selected by the existing `packages/devScripts/tests/database-regressions.sh`;
+`tests/oidc_entitlements.rs`, `tests/admin_source_grants.rs`,
+`tests/legacy_grant_upgrade.rs` and the POA&M target are selected by the existing `packages/devScripts/tests/database-regressions.sh`;
 their execution needs a farm/CI-owned disposable database and retained results.
 Do not substitute local Cargo or a live database. M0 remains incomplete until
 the [credential grant release gates](credential-grant-groundwork.md#remaining-release-gates)
