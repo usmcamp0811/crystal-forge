@@ -330,8 +330,10 @@ pub(super) fn masked_token(id: Uuid) -> String {
     format!("cfat_v1_{}_{}", id.simple(), "•".repeat(MASK_BULLETS))
 }
 
+/// Read scopes end in `:read`; `compliance:preview` also only reads. The server
+/// uses the same rule for the production-write confirmation.
 fn is_read_scope(scope: &str) -> bool {
-    scope.ends_with(":read")
+    scope.ends_with(":read") || scope == "compliance:preview"
 }
 
 /// Summarizes granted scopes as `Read · 3` or `Read + write · 3`.
@@ -951,6 +953,8 @@ mod tests {
         assert_eq!(scope_summary(&read), "Read · 2");
         let mixed = vec!["cves:read".to_string(), "poams:write".to_string()];
         assert_eq!(scope_summary(&mixed), "Read + write · 2");
+        let preview = vec!["policies:read".to_string(), "compliance:preview".to_string()];
+        assert_eq!(scope_summary(&preview), "Read · 2");
         assert_eq!(scope_summary(&[]), "None");
     }
 

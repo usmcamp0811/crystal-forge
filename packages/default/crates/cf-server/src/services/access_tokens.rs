@@ -331,10 +331,11 @@ pub fn scope_requires_admin(scope: &str) -> bool {
     scope_spec(scope).is_some_and(|spec| spec.requires_admin)
 }
 
-/// Reports whether a scope lets a token request a write. The web UI uses the
-/// same `:read` suffix rule for its "includes write" review line.
+/// Reports whether a scope lets a token request a write. Read scopes end in
+/// `:read`; `compliance:preview` only reads and previews and is not a write.
+/// The web UI uses the same rule for its "includes write" review line.
 fn is_write_scope(scope: &str) -> bool {
-    !scope.ends_with(":read")
+    !scope.ends_with(":read") && scope != "compliance:preview"
 }
 
 /// Field message when a write scope and a production environment are
@@ -1534,6 +1535,8 @@ mod tests {
         assert!(!scope_requires_admin("compliance:preview"));
         assert!(!scope_requires_admin("admin"));
         assert!(!is_write_scope("cves:read"));
+        assert!(!is_write_scope("compliance:preview"));
+        assert!(is_write_scope("policies:draft"));
         assert!(scope_spec("admin").is_none());
         assert_eq!(SCOPES.len(), 13);
     }

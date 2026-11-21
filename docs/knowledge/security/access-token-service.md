@@ -177,9 +177,8 @@ Admin role again inside their transaction, so a demotion that commits before the
 write also denies it.
 
 Every scope that does not end in `:read` counts as a write scope for the
-production confirmation and the "includes write" review text. This includes
-`compliance:preview`, although its only tool, `preview_policy_import`, writes
-nothing.
+production confirmation and the "includes write" review text, except
+`compliance:preview`, which only previews and writes nothing.
 
 ## Serialization and ordering
 
