@@ -1760,6 +1760,17 @@ pub async fn validate_policy_interchange_document_async(
 ) -> Result<(), String> {
     let mut seen_versions = HashSet::new();
     for policy in policies {
+        // INVARIANT: `deployment_policy_versions.enabled_by_default` is NOT
+        // NULL and part of the semantic digest. A default chosen here would
+        // store a digest computed without the field, so a document must state
+        // the value. Without this check the insert failed with a database
+        // error and HTTP 500.
+        if policy.enabled_by_default.is_none() {
+            return Err(format!(
+                "policy version {} must set enabled_by_default to true or false",
+                policy.version_id
+            ));
+        }
         let composite =
             validate_policy_type_config_async(&policy.policy_type, &policy.config).await?;
         if composite.is_some() && policy.execution_phase != "multi-phase" {

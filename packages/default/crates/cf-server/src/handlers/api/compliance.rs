@@ -14784,6 +14784,7 @@ packages = ["git"]
                 "version": version,
                 "name": name,
                 "policy_type": "custom_check",
+                "enabled_by_default": true,
                 "implementation_state": "native",
                 "execution_phase": "deploy",
                 "config": serde_json::json!({"mode":"all","context":"nixos-configuration-v1","binding":"cfg","rules":[]}),
@@ -15108,6 +15109,7 @@ packages = ["git"]
                 "version_id": incoming_version_id,
                 "name": format!("mismatch-{}", Uuid::new_v4().simple()),
                 "policy_type": "custom_check",
+                "enabled_by_default": true,
                 "implementation_state": "native",
                 "execution_phase": "deploy",
                 "config": serde_json::json!({}),
@@ -15179,6 +15181,7 @@ packages = ["git"]
                     "version_id": dup_version,
                     "name": format!("policy-dup-1-{}", Uuid::new_v4().simple()),
                     "policy_type": "custom_check",
+                "enabled_by_default": true,
                     "implementation_state": "native",
                     "execution_phase": "deploy",
                     "config": serde_json::json!({"mode":"all","context":"nixos-configuration-v1","binding":"cfg","rules":[]}),
@@ -15189,6 +15192,7 @@ packages = ["git"]
                     "version_id": dup_version,  // SAME version ID
                     "name": format!("policy-dup-2-{}", Uuid::new_v4().simple()),
                     "policy_type": "custom_check",
+                "enabled_by_default": true,
                     "implementation_state": "native",
                     "execution_phase": "deploy",
                     "config": serde_json::json!({"mode":"all","context":"nixos-configuration-v1","binding":"cfg","rules":[]}),
@@ -15597,6 +15601,7 @@ packages = ["git"]
         let legacy_doc = serde_json::json!({
             "policies": [{
                 "policy_type": "custom_check",
+                "enabled_by_default": true,
                 "name": format!("legacy-{}", Uuid::new_v4().simple()),
                 "description": "Legacy policy without portable IDs",
                 "config": {"mode": "all", "context": "nixos-configuration-v1", "binding": "cfg", "rules": []}

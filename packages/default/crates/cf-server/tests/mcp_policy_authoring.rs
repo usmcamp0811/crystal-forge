@@ -361,7 +361,8 @@ fn interchange(lineage_id: Uuid, version_id: Uuid, name: &str, expression: &str)
             "config": {
                 "mode": "all",
                 "rules": [{"field_name": "check", "expression": expression, "strict": true}]
-            }
+            },
+            "enabled_by_default": true
         }]
     })
     .to_string()
@@ -1002,7 +1003,7 @@ async fn preview_writes_nothing(pool: PgPool) {
         assert_eq!(preview["has_blocking_conflicts"], false);
     }
     let toml = format!(
-        "[[policies]]\nname = \"{}\"\npolicy_type = \"custom_check\"\n\n[policies.config]\nmode = \"all\"\nrules = []\n",
+        "[[policies]]\nname = \"{}\"\npolicy_type = \"custom_check\"\nenabled_by_default = true\n\n[policies.config]\nmode = \"all\"\nrules = []\n",
         unique("toml")
     );
     let preview = call(
@@ -1156,6 +1157,32 @@ async fn import_rejects_digest_conflicts_source_mismatch_and_bad_formats(pool: P
         message.starts_with("POLICY_INTERCHANGE_INVALID:"),
         "{message}"
     );
+
+    // A policy without enabled_by_default is a validation error, not a
+    // database failure: the column is NOT NULL and part of the digest.
+    let mut without_default: Value = serde_json::from_str(&interchange(
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        &unique("nodef"),
+        "config.c.enable",
+    ))
+    .unwrap();
+    without_default["policies"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("enabled_by_default");
+    let without_default = without_default.to_string();
+    let message = invalid_message(
+        call_err(
+            &importer,
+            &pool,
+            "import_policy_draft",
+            import_args(&without_default),
+        )
+        .await,
+    );
+    assert!(message.contains("enabled_by_default"), "{message}");
+
     for format in ["xml", "xccdf", "yaml"] {
         let mut arguments = import_args(&original);
         arguments["format"] = json!(format);
@@ -1236,7 +1263,8 @@ async fn failed_import_rolls_back_completely(pool: PgPool) {
                 "version": "1.0.0",
                 "name": unique("rolled-back"),
                 "policy_type": "custom_check",
-                "config": {"mode": "all", "rules": []}
+                "config": {"mode": "all", "rules": []},
+                "enabled_by_default": true
             },
             {
                 "lineage_id": existing_lineage,
@@ -1244,7 +1272,8 @@ async fn failed_import_rolls_back_completely(pool: PgPool) {
                 "version": "0.1.0",
                 "name": unique("duplicate-label"),
                 "policy_type": "custom_check",
-                "config": {"mode": "all", "rules": []}
+                "config": {"mode": "all", "rules": []},
+                "enabled_by_default": true
             }
         ]
     })
