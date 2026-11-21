@@ -44,7 +44,7 @@ use crystal_forge::{
 };
 use reqwest::Client;
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 const BUNDLES: &[&str] = &["bundles:read", "bundles:draft"];
@@ -1071,6 +1071,136 @@ async fn large_membership_replacement_increments_the_revision_a_bounded_number_o
     assert_eq!(unchanged["draft_revision"], moved_revision);
     assert_eq!(bundle_revision(&pool, version_id).await, moved_revision);
     assert_eq!(counts(&pool).await, before);
+}
+
+/// Migration 0347: `ROLLBACK TO SAVEPOINT` reverts the increment and the
+/// transaction-local `crystal_forge.bundle_revision_bumped` entry together, so
+/// the next membership write of the same transaction increments the counter
+/// again, and only once.
+///
+/// The membership edits are raw SQL on `compliance_bundle_version_policies`.
+/// On a mutable draft the membership immutability guard accepts them, the
+/// digest trigger only resets `semantic_digest` (a column that the revision
+/// trigger ignores), and the lineage trigger `sync_bundle_version_membership`
+/// does not fire because `compliance_bundle_policies` does not change.
+#[sqlx::test]
+async fn savepoint_rollback_restores_revision_and_bump_tracking(pool: PgPool) {
+    async fn revision(conn: &mut PgConnection, version_id: Uuid) -> i64 {
+        sqlx::query_scalar("SELECT draft_revision FROM compliance_bundle_versions WHERE id = $1")
+            .bind(version_id)
+            .fetch_one(conn)
+            .await
+            .expect("revision in transaction")
+    }
+    async fn bumped(conn: &mut PgConnection) -> Option<String> {
+        sqlx::query_scalar("SELECT current_setting('crystal_forge.bundle_revision_bumped', true)")
+            .fetch_one(conn)
+            .await
+            .expect("bump tracking setting")
+    }
+    async fn in_tx_members(conn: &mut PgConnection, version_id: Uuid) -> Vec<Uuid> {
+        sqlx::query_scalar(
+            "SELECT policy_version_id FROM compliance_bundle_version_policies \
+             WHERE bundle_version_id = $1 ORDER BY policy_order",
+        )
+        .bind(version_id)
+        .fetch_all(conn)
+        .await
+        .expect("members in transaction")
+    }
+
+    let (_, author) = admin_author(&pool, BUNDLES).await;
+    let (_, first) = published_policy(&pool, &unique("first")).await;
+    let (_, second) = published_policy(&pool, &unique("second")).await;
+    let (_, third) = published_policy(&pool, &unique("third")).await;
+    let created = call(
+        &author,
+        &pool,
+        "create_bundle_draft",
+        new_bundle(&unique("savepoint"), &[first, second, third]),
+    )
+    .await;
+    let version_id = uuid(&created["version_id"]);
+    assert_eq!(members(&pool, version_id).await, vec![first, second, third]);
+
+    let mut tx = pool.begin().await.expect("begin");
+    let r0 = revision(&mut tx, version_id).await;
+
+    sqlx::query("SAVEPOINT s1")
+        .execute(&mut *tx)
+        .await
+        .expect("savepoint");
+    sqlx::query(
+        "DELETE FROM compliance_bundle_version_policies \
+         WHERE bundle_version_id = $1 AND policy_version_id = $2",
+    )
+    .bind(version_id)
+    .bind(third)
+    .execute(&mut *tx)
+    .await
+    .expect("delete inside savepoint");
+    assert_eq!(revision(&mut tx, version_id).await, r0 + 1);
+    let tracked = bumped(&mut tx).await.unwrap_or_default();
+    assert!(
+        tracked.contains(&version_id.to_string()),
+        "the bump must be tracked: {tracked:?}"
+    );
+
+    sqlx::query("ROLLBACK TO SAVEPOINT s1")
+        .execute(&mut *tx)
+        .await
+        .expect("rollback to savepoint");
+    assert_eq!(revision(&mut tx, version_id).await, r0);
+    assert_eq!(
+        in_tx_members(&mut tx, version_id).await,
+        vec![first, second, third]
+    );
+    // A pooled connection that ran an earlier membership write reports the
+    // reset placeholder as an empty string instead of NULL.
+    let tracked = bumped(&mut tx).await;
+    assert!(
+        matches!(tracked.as_deref(), None | Some("")),
+        "the rollback must clear the tracking: {tracked:?}"
+    );
+
+    // The tracking was rolled back, so the next write increments again.
+    let first_order: i32 = sqlx::query_scalar(
+        "SELECT policy_order FROM compliance_bundle_version_policies \
+         WHERE bundle_version_id = $1 AND policy_version_id = $2",
+    )
+    .bind(version_id)
+    .bind(first)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("first order");
+    sqlx::query(
+        "DELETE FROM compliance_bundle_version_policies \
+         WHERE bundle_version_id = $1 AND policy_version_id = $2",
+    )
+    .bind(version_id)
+    .bind(first)
+    .execute(&mut *tx)
+    .await
+    .expect("delete after rollback");
+    assert_eq!(revision(&mut tx, version_id).await, r0 + 1);
+
+    // A second membership write of the same transaction does not increment.
+    // The freed order slot keeps the non-deferrable order key unique.
+    sqlx::query(
+        "UPDATE compliance_bundle_version_policies SET policy_order = $3 \
+         WHERE bundle_version_id = $1 AND policy_version_id = $2",
+    )
+    .bind(version_id)
+    .bind(third)
+    .bind(first_order)
+    .execute(&mut *tx)
+    .await
+    .expect("reorder");
+    assert_eq!(revision(&mut tx, version_id).await, r0 + 1);
+    tx.commit().await.expect("commit");
+
+    assert_eq!(bundle_revision(&pool, version_id).await, r0 + 1);
+    assert_eq!(members(&pool, version_id).await, vec![third, second]);
 }
 
 // ---------------------------------------------------------------------------
