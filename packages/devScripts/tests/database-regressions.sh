@@ -444,6 +444,7 @@ SQL
     for testTarget in \
       access_tokens \
       admin_source_grants \
+      agent_access_migration_order \
       already_current_deployment \
       assignment_semantics \
       compliance_assignment_zombie_repair \
