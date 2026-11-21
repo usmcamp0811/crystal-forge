@@ -21,9 +21,10 @@ use crate::api::models::{
     PublishPolicyVersionRequest, SystemComplianceBundle, SystemComplianceBundlesResponse,
     TrustBundleVersionRequest, TrustPolicyVersionRequest, UpdateComplianceBundleRequest,
 };
-// The handler keeps its own `validate_policy_interchange_document*` functions
-// below. They add server-side composite-policy validation that the database-
-// free `cf_compliance::policy_document` version intentionally does not have.
+// The test-only `validate_policy_interchange_document` below and
+// `services::policy_authoring::validate_policy_interchange_document_async` add
+// server-side composite-policy validation that the database-free
+// `cf_compliance::policy_document` version intentionally does not have.
 use cf_compliance::policy_document::{
     NormalizedPolicyImport, normalize_policy_import, parse_policy_document,
 };
@@ -47,16 +48,15 @@ use crate::compliance::xccdf::importer::{
     validate_import_plan, validate_sha256_match,
 };
 use crate::compliance::xccdf::package::{ProcessingError, process_xccdf_bytes};
-use crate::compliance::xccdf::reconciliation::{NativeReconcileFailure, ReconcileConflict};
+use crate::compliance::xccdf::reconciliation::NativeReconcileFailure;
 use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
 use crate::handlers::api::auth_session::require_csrf;
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
     BundleDeleteOutcome, BundleDraftDerivationError, BundleDraftIntent, BundleValidationError,
-    PolicyDraftDerivationError, PolicyDraftIntent, bundle_deletion_eligibility,
-    create_bundle as create_bundle_row, create_grouping_scheme, delete_bundle as delete_bundle_row,
-    delete_grouping_scheme, ensure_bundle_draft, ensure_policy_draft, get_system_evidence,
-    get_system_evidence_in_tx, list_bundle_systems_for_locked_ids_in_tx,
+    bundle_deletion_eligibility, create_bundle as create_bundle_row, create_grouping_scheme,
+    delete_bundle as delete_bundle_row, delete_grouping_scheme, ensure_bundle_draft,
+    get_system_evidence, get_system_evidence_in_tx, list_bundle_systems_for_locked_ids_in_tx,
     list_bundle_systems_for_user, list_bundle_version_policy_membership,
     list_bundle_version_requirement_membership, list_bundles, list_grouping_schemes,
     list_system_bundles, list_system_bundles_in_tx, load_policy_version_usage,
@@ -1591,6 +1591,11 @@ pub async fn publish_policy_version(
 
 /// `POST /api/v1/policies/:policy_id/drafts`
 /// Create a new draft policy version from the published version.
+///
+/// The derivation and the `policy_draft_created` audit event live in
+/// [`crate::services::policy_authoring::derive_policy_draft_tx`], which the
+/// MCP `create_policy_draft` tool shares. This handler keeps the Admin
+/// session check, CSRF and the response contract.
 pub async fn create_policy_draft(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -1598,6 +1603,9 @@ pub async fn create_policy_draft(
     Json(_payload): Json<crate::api::models::CreatePolicyDraftRequest>,
 ) -> impl IntoResponse {
     use crate::api::models::CreatePolicyDraftResponse;
+    use crate::services::policy_authoring::{
+        AuthoringActor, PolicyAuthoringError, derive_policy_draft_tx,
+    };
 
     let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
@@ -1617,23 +1625,17 @@ pub async fn create_policy_draft(
             return internal_error("Failed to create policy draft");
         }
     };
-    let draft_id = match ensure_policy_draft(
+    let draft = match derive_policy_draft_tx(
         &mut tx,
+        &AuthoringActor::browser(user_id),
         policy_id,
-        Some(user_id),
+        None,
         _payload.new_version.as_deref(),
-        PolicyDraftIntent::CreateExplicit,
     )
     .await
     {
-        Ok(id) => id,
-        Err(error)
-            if error
-                .downcast_ref::<PolicyDraftDerivationError>()
-                .is_some_and(|error| {
-                    matches!(error, PolicyDraftDerivationError::NoPublishedSource)
-                }) =>
-        {
+        Ok(draft) => draft,
+        Err(PolicyAuthoringError::NoPublishedSource) => {
             let _ = tx.rollback().await;
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1645,13 +1647,7 @@ pub async fn create_policy_draft(
             )
                 .into_response();
         }
-        Err(error)
-            if error
-                .downcast_ref::<PolicyDraftDerivationError>()
-                .is_some_and(|error| {
-                    matches!(error, PolicyDraftDerivationError::MutableDraftExists(_))
-                }) =>
-        {
+        Err(PolicyAuthoringError::MutableDraftExists(_)) => {
             let _ = tx.rollback().await;
             return (
                 StatusCode::CONFLICT,
@@ -1663,45 +1659,27 @@ pub async fn create_policy_draft(
             )
                 .into_response();
         }
+        // COMPATIBILITY: An unknown lineage kept the 500 response of the
+        // route before the service extraction.
         Err(error) => {
             let _ = tx.rollback().await;
-            tracing::error!(error = %error, %policy_id, "failed to derive policy draft");
+            tracing::error!(error = ?error, %policy_id, "failed to derive policy draft");
             return internal_error("Failed to create policy draft");
         }
     };
-    let draft = match sqlx::query_as::<_, (String, Option<Uuid>)>(
-        r#"
-        SELECT dpv.version,
-               COALESCE(dpv.derived_from_version_id, dp.current_published_version_id)
-        FROM deployment_policy_versions dpv
-        JOIN deployment_policies dp ON dp.id = dpv.policy_id
-        WHERE dpv.id = $1
-        "#,
-    )
-    .bind(draft_id)
-    .fetch_one(&mut *tx)
-    .await
-    {
-        Ok(draft) => draft,
-        Err(error) => {
-            let _ = tx.rollback().await;
-            tracing::error!(error = %error, %draft_id, "failed to load derived policy draft");
-            return internal_error("Failed to create policy draft");
-        }
-    };
-    let Some(derived_from_version_id) = draft.1 else {
+    let Some(derived_from_version_id) = draft.derived_from_version_id else {
         let _ = tx.rollback().await;
-        tracing::error!(%draft_id, "derived policy draft has no published source");
+        tracing::error!(version_id = %draft.version_id, "derived policy draft has no published source");
         return internal_error("Failed to create policy draft");
     };
     if let Err(error) = tx.commit().await {
-        tracing::error!(error = %error, %draft_id, "failed to commit policy draft");
+        tracing::error!(error = %error, version_id = %draft.version_id, "failed to commit policy draft");
         return internal_error("Failed to create policy draft");
     }
 
     let response = CreatePolicyDraftResponse {
-        version_id: draft_id,
-        version: draft.0,
+        version_id: draft.version_id,
+        version: draft.version,
         publication_state: "draft".to_string(),
         derived_from_version_id,
     };
@@ -6671,65 +6649,22 @@ fn safe_policy_toml_filename(name: &str) -> String {
 ///
 /// Imports a canonical JSON or TOML policy-set document. Imported policies are
 /// always created as disabled draft versions; this endpoint never trusts or
-/// activates executable content.
-/// Load policy reconciliation data within an existing transaction and run the authoritative planner.
-/// Used by both preview (via pool wrapper) and import (direct transaction use).
-async fn load_and_plan_policy_reconciliation_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    imported: &[NormalizedPolicyImport],
-) -> Result<crate::compliance::xccdf::reconciliation::PolicyReconciliationPlan, String> {
-    use crate::compliance::xccdf::reconciliation::{ExistingPolicyIdentity, NativePolicyIdentity};
-
-    let imported_lineage_ids: Vec<Uuid> = imported.iter().map(|p| p.lineage_id).collect();
-    let imported_version_ids: Vec<Uuid> = imported.iter().map(|p| p.version_id).collect();
-
-    // Load policy versions that match imported IDs OR belong to imported lineages
-    let matching_versions: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
-        "SELECT id, policy_id, semantic_digest, policy_type FROM deployment_policy_versions WHERE id = ANY($1) OR policy_id = ANY($2)"
-    )
-    .bind(&imported_version_ids)
-    .bind(&imported_lineage_ids)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|e| format!("Failed to load matching versions: {e}"))?;
-
-    // Convert imported to native identities
-    let native_imported: Vec<NativePolicyIdentity> = imported
-        .iter()
-        .map(|p| NativePolicyIdentity {
-            lineage_id: p.lineage_id,
-            version_id: p.version_id,
-            policy_type: p.policy_type.clone(),
-            semantic_digest: p.semantic_digest.clone(),
-            source_rule_id: p.name.clone(),
-        })
-        .collect();
-
-    // Convert existing to policy identities
-    let native_existing: Vec<ExistingPolicyIdentity> = matching_versions
-        .iter()
-        .map(|(vid, lid, digest, ptype)| ExistingPolicyIdentity {
-            lineage_id: *lid,
-            version_id: *vid,
-            policy_type: ptype.clone(),
-            semantic_digest: digest.clone(),
-        })
-        .collect();
-
-    // Run the authoritative planner
-    Ok(
-        crate::compliance::xccdf::reconciliation::plan_policy_reconciliation(
-            &native_imported,
-            &native_existing,
-        ),
-    )
-}
-
+/// activates executable content. The `X-Policy-Source-SHA256` header must
+/// carry the digest that the preview returned.
+///
+/// The reconciliation and the all-or-nothing write live in
+/// [`crate::services::policy_authoring::import_policy_interchange`], which
+/// the MCP `import_policy_draft` tool shares. This handler keeps the Admin
+/// session check, the multipart upload and the response contract.
 pub async fn policy_interchange_import(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
+    use crate::services::policy_authoring::{
+        AuthoringActor, PolicyAuthoringError, import_policy_interchange,
+    };
+
     let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
@@ -6742,402 +6677,60 @@ pub async fn policy_interchange_import(
         Ok(_) => return bad_request("No policy interchange file was attached"),
         Err(error) => return multipart_read_error_response(error),
     };
-
-    let actual_source_sha256 = {
-        use sha2::{Digest, Sha256};
-        hex::encode(Sha256::digest(&upload.bytes))
-    };
-    let expected_source_sha256 = match headers
+    let Some(expected_source_sha256) = headers
         .get("x-policy-source-sha256")
         .and_then(|value| value.to_str().ok())
+    else {
+        return bad_request("X-Policy-Source-SHA256 header is required");
+    };
+
+    let imported = match import_policy_interchange(
+        &pool,
+        &AuthoringActor::browser(user_id),
+        &upload.bytes,
+        upload.filename.as_deref(),
+        expected_source_sha256,
+    )
+    .await
     {
-        Some(value) if value.eq_ignore_ascii_case(&actual_source_sha256) => value,
-        Some(value) => {
+        Ok(imported) => imported,
+        Err(PolicyAuthoringError::SourceDigestMismatch { expected, actual }) => {
             return (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({
                     "error": "POLICY_SOURCE_DIGEST_MISMATCH",
-                    "expected": value,
-                    "actual": actual_source_sha256,
+                    "expected": expected,
+                    "actual": actual,
                 })),
             )
                 .into_response();
         }
-        None => return bad_request("X-Policy-Source-SHA256 header is required"),
-    };
-    let _ = expected_source_sha256;
-
-    // Use source-aware deterministic parsing to match preview behavior
-    let policies = match parse_policy_interchange_upload_with_source(&upload, &actual_source_sha256)
-    {
-        Ok(policies) => policies,
-        Err(message) => return policy_interchange_invalid_response(&message).into_response(),
-    };
-
-    // Validate no duplicate version IDs within the document (shared validator)
-    if let Err(message) = validate_policy_interchange_document_async(&policies).await {
-        return policy_interchange_invalid_response(&message).into_response();
-    }
-
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
+        Err(PolicyAuthoringError::Invalid { message, .. }) => {
+            return policy_interchange_invalid_response(&message).into_response();
+        }
+        Err(PolicyAuthoringError::InterchangeConflicts(conflicts)) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "POLICY_INTERCHANGE_CONFLICTS",
+                    "conflicts": conflicts,
+                })),
+            )
+                .into_response();
+        }
+        Err(PolicyAuthoringError::Internal { context, error }) => {
+            let detail = format!("{error:#}");
+            tracing::error!(error = %detail, context, "policy interchange import failed");
+            return internal_error(context);
+        }
         Err(error) => {
-            tracing::error!(error = %error, "failed to begin policy interchange import");
+            tracing::error!(error = ?error, "policy interchange import failed");
             return internal_error("Failed to import policies");
         }
     };
-    // Acquire advisory locks for all imported identities to prevent concurrent races
-    // Includes policy-name locks to protect UNIQUE name constraint (case-sensitive, exact text)
-    let mut lock_keys: Vec<String> = Vec::new();
-    for policy in &policies {
-        lock_keys.push(format!("policy-lineage:{}", policy.lineage_id));
-        lock_keys.push(format!("policy-version:{}", policy.version_id));
-        // Lock the exact policy name to prevent concurrent imports with same name
-        // DB uniqueness is case-sensitive exact text (NOT citext)
-        lock_keys.push(format!("policy-name:{}", policy.name));
-    }
-    lock_keys.sort();
-    lock_keys.dedup();
 
-    for lock_key in &lock_keys {
-        if let Err(error) = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(lock_key)
-            .execute(&mut *tx)
-            .await
-        {
-            let _ = tx.rollback().await;
-            tracing::error!("Failed to acquire advisory lock for {}: {error}", lock_key);
-            return internal_error("Failed to acquire import locks");
-        }
-    }
-
-    // Run authoritative reconciliation planner under transaction locks
-    let plan = match load_and_plan_policy_reconciliation_in_tx(&mut tx, &policies).await {
-        Ok(p) => p,
-        Err(error) => {
-            let _ = tx.rollback().await;
-            tracing::error!("Failed to plan policy reconciliation during import: {error}");
-            return internal_error("Failed to plan policy reconciliation");
-        }
-    };
-
-    // Reject if any conflicts were detected
-    if !plan.conflicts.is_empty() {
-        let _ = tx.rollback().await;
-        // Return structured conflict response matching preview
-        let conflicts_info: Vec<ConflictInfo> = plan
-            .conflicts
-            .iter()
-            .filter(|c| reconciliation_conflict_is_blocking(c))
-            .map(conflict_to_info)
-            .collect();
-
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": "POLICY_INTERCHANGE_CONFLICTS",
-                "conflicts": conflicts_info,
-            })),
-        )
-            .into_response();
-    }
-
-    // Check for name collisions on CreateLineageAndVersion decisions
-    // (unique constraint will be violated if we proceed without this check)
-    for (imported_identity, decision) in &plan.decisions {
-        if let crate::compliance::xccdf::reconciliation::ReconcileDecision::CreateLineageAndVersion {
-            portable_lineage_id,
-            ..
-        } = decision
-        {
-            let imported_policy = policies
-                .iter()
-                .find(|p| p.version_id == imported_identity.version_id)
-                .expect("imported policy must exist");
-
-            // Check if a different lineage already has this name (case-sensitive exact match)
-            let collision_lineage_id: Option<Uuid> = match sqlx::query_scalar(
-                "SELECT id FROM deployment_policies WHERE name = $1 AND id != $2",
-            )
-            .bind(&imported_policy.name)
-            .bind(portable_lineage_id)
-            .fetch_optional(&mut *tx)
-            .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    let _ = tx.rollback().await;
-                    tracing::error!("Failed to check name collision: {error}");
-                    return internal_error("Failed to import policies");
-                }
-            };
-
-            if let Some(local_lineage_id) = collision_lineage_id {
-                let _ = tx.rollback().await;
-                // Return structured name collision response
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": "POLICY_INTERCHANGE_CONFLICTS",
-                        "conflicts": vec![serde_json::json!({
-                            "code": "POLICY_INTERCHANGE_NAME_COLLISION",
-                            "imported_lineage_id": portable_lineage_id,
-                            "imported_name": imported_policy.name,
-                            "local_lineage_id": local_lineage_id,
-                        })],
-                    })),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    struct PolicyImportOutcome {
-        lineage_id: Uuid,
-        version_id: Uuid,
-        reconciliation_action: &'static str,
-        created: bool,
-        publication_state: String,
-        trust_state: String,
-        enabled: bool,
-    }
-
-    let mut reused = 0u32;
-    let mut created = 0u32;
-    let mut outcomes: Vec<PolicyImportOutcome> = Vec::new();
-
-    // Apply reconciliation decisions
-    for (imported_identity, decision) in &plan.decisions {
-        match decision {
-            crate::compliance::xccdf::reconciliation::ReconcileDecision::ReuseExact {
-                local_lineage_id,
-                local_version_id,
-            } => {
-                // Exact match: load actual state, do not mutate
-                let (pub_state, trust_state, lineage_enabled): (String, String, bool) =
-                    match sqlx::query_as(
-                        "SELECT dpv.publication_state, COALESCE(dpv.trust_state, 'untrusted'), dp.enabled FROM deployment_policy_versions dpv JOIN deployment_policies dp ON dpv.policy_id = dp.id WHERE dpv.id = $1"
-                    )
-                    .bind(local_version_id)
-                    .fetch_one(&mut *tx)
-                    .await
-                    {
-                        Ok(row) => row,
-                        Err(error) => {
-                            let _ = tx.rollback().await;
-                            tracing::error!("Failed to load actual state for exact match: {error}");
-                            return internal_error("Failed to import policies");
-                        }
-                    };
-
-                outcomes.push(PolicyImportOutcome {
-                    lineage_id: *local_lineage_id,
-                    version_id: *local_version_id,
-                    reconciliation_action: "exact_match",
-                    created: false,
-                    publication_state: pub_state,
-                    trust_state,
-                    enabled: lineage_enabled,
-                });
-                reused += 1;
-            }
-            crate::compliance::xccdf::reconciliation::ReconcileDecision::CreateLineageAndVersion {
-                portable_lineage_id,
-                portable_version_id,
-            } => {
-                // Create new lineage
-                let imported_policy = policies
-                    .iter()
-                    .find(|p| p.version_id == imported_identity.version_id)
-                    .expect("imported policy must exist");
-
-                if let Err(error) = sqlx::query(
-                    "INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled) VALUES ($1, $2, $3, $4, $5, false)",
-                )
-                .bind(portable_lineage_id)
-                .bind(&imported_policy.name)
-                .bind(&imported_policy.description)
-                .bind(&imported_policy.policy_type)
-                .bind(&imported_policy.config)
-                .execute(&mut *tx)
-                .await
-                {
-                    let _ = tx.rollback().await;
-                    tracing::error!("Failed to create policy lineage: {error}");
-                    return internal_error("Failed to import policies");
-                }
-
-                // Remove trigger-created synthetic draft
-                if let Ok(Some(generated_version)) = sqlx::query_scalar::<_, Option<Uuid>>(
-                    "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1"
-                )
-                .bind(portable_lineage_id)
-                .fetch_one(&mut *tx)
-                .await
-                {
-                    let _ = sqlx::query("UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1")
-                        .bind(portable_lineage_id)
-                        .execute(&mut *tx)
-                        .await;
-                    let _ = sqlx::query("DELETE FROM deployment_policy_versions WHERE id = $1")
-                        .bind(generated_version)
-                        .execute(&mut *tx)
-                        .await;
-                }
-
-                // Create exact portable version
-                if let Err(error) = sqlx::query(
-                    "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, name, description, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies, opaque_xml, enabled_by_default, semantic_digest, created_by) VALUES ($1, $2, $3, 'draft', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
-                )
-                .bind(portable_version_id)
-                .bind(portable_lineage_id)
-                .bind(&imported_policy.version)
-                .bind(&imported_policy.name)
-                .bind(&imported_policy.description)
-                .bind(&imported_policy.policy_type)
-                .bind(&imported_policy.implementation_state)
-                .bind(&imported_policy.execution_phase)
-                .bind(&imported_policy.config)
-                .bind(&imported_policy.compliance_metadata)
-                .bind(&imported_policy.dependencies)
-                .bind(&imported_policy.opaque_xml)
-                .bind(imported_policy.enabled_by_default)
-                .bind(&imported_policy.semantic_digest)
-                .bind(user_id)
-                .execute(&mut *tx)
-                .await
-                {
-                    let _ = tx.rollback().await;
-                    tracing::error!("Failed to create policy version: {error}");
-                    return internal_error("Failed to import policies");
-                }
-
-                // Update draft pointer
-                if let Err(error) = sqlx::query(
-                    "UPDATE deployment_policies SET current_draft_version_id = $1 WHERE id = $2"
-                )
-                .bind(portable_version_id)
-                .bind(portable_lineage_id)
-                .execute(&mut *tx)
-                .await
-                {
-                    let _ = tx.rollback().await;
-                    tracing::error!("Failed to set draft pointer: {error}");
-                    return internal_error("Failed to import policies");
-                }
-
-                outcomes.push(PolicyImportOutcome {
-                    lineage_id: *portable_lineage_id,
-                    version_id: *portable_version_id,
-                    reconciliation_action: "new_lineage",
-                    created: true,
-                    publication_state: "draft".to_string(),
-                    trust_state: "untrusted".to_string(),
-                    enabled: false,
-                });
-                created += 1;
-            }
-            crate::compliance::xccdf::reconciliation::ReconcileDecision::CreateVersionInExistingLineage {
-                local_lineage_id,
-                portable_version_id,
-            } => {
-                // Create new version under existing lineage
-                let imported_policy = policies
-                    .iter()
-                    .find(|p| p.version_id == imported_identity.version_id)
-                    .expect("imported policy must exist");
-
-                // Load actual lineage enabled state
-                let lineage_enabled: bool =
-                    match sqlx::query_scalar("SELECT enabled FROM deployment_policies WHERE id = $1")
-                        .bind(local_lineage_id)
-                        .fetch_one(&mut *tx)
-                        .await
-                    {
-                        Ok(enabled) => enabled,
-                        Err(error) => {
-                            let _ = tx.rollback().await;
-                            tracing::error!("Failed to load lineage enabled state: {error}");
-                            return internal_error("Failed to import policies");
-                        }
-                    };
-
-                if let Err(error) = sqlx::query(
-                    "INSERT INTO deployment_policy_versions (id, policy_id, version, publication_state, name, description, policy_type, implementation_state, execution_phase, config, compliance_metadata, dependencies, opaque_xml, enabled_by_default, semantic_digest, created_by) VALUES ($1, $2, $3, 'draft', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
-                )
-                .bind(portable_version_id)
-                .bind(local_lineage_id)
-                .bind(&imported_policy.version)
-                .bind(&imported_policy.name)
-                .bind(&imported_policy.description)
-                .bind(&imported_policy.policy_type)
-                .bind(&imported_policy.implementation_state)
-                .bind(&imported_policy.execution_phase)
-                .bind(&imported_policy.config)
-                .bind(&imported_policy.compliance_metadata)
-                .bind(&imported_policy.dependencies)
-                .bind(&imported_policy.opaque_xml)
-                .bind(imported_policy.enabled_by_default)
-                .bind(&imported_policy.semantic_digest)
-                .bind(user_id)
-                .execute(&mut *tx)
-                .await
-                {
-                    let _ = tx.rollback().await;
-                    tracing::error!("Failed to create policy version: {error}");
-                    return internal_error("Failed to import policies");
-                }
-
-                outcomes.push(PolicyImportOutcome {
-                    lineage_id: *local_lineage_id,
-                    version_id: *portable_version_id,
-                    reconciliation_action: "new_version",
-                    created: true,
-                    publication_state: "draft".to_string(),
-                    trust_state: "untrusted".to_string(),
-                    enabled: lineage_enabled,
-                });
-                created += 1;
-            }
-        }
-    }
-
-    // Write audit events for each imported policy using actual outcomes
-    for outcome in &outcomes {
-        let audit_metadata = serde_json::json!({
-            "lineage_id": outcome.lineage_id,
-            "version_id": outcome.version_id,
-            "source_digest": actual_source_sha256,
-            "reconciliation_action": outcome.reconciliation_action,
-            "created": outcome.created,
-            "final_publication_state": outcome.publication_state,
-            "final_trust_state": outcome.trust_state,
-            "final_enabled": outcome.enabled,
-        });
-
-        if let Err(e) = write_audit_event(
-            &mut tx,
-            user_id,
-            "policy_interchange_imported",
-            &outcome.version_id.to_string(),
-            audit_metadata,
-        )
-        .await
-        {
-            let _ = tx.rollback().await;
-            tracing::error!("Failed to write import audit event: {e}");
-            return internal_error("Failed to write import audit events");
-        }
-    }
-
-    if let Err(error) = tx.commit().await {
-        tracing::error!(error = %error, "failed to commit policy interchange import");
-        return internal_error("Failed to import policies");
-    }
-
-    // Build per-policy response outcomes
-    let policies: Vec<serde_json::Value> = outcomes
+    let policies: Vec<serde_json::Value> = imported
+        .policies
         .iter()
         .map(|outcome| {
             serde_json::json!({
@@ -7155,8 +6748,8 @@ pub async fn policy_interchange_import(
     (
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "created_policy_count": created,
-            "reused_policy_count": reused,
+            "created_policy_count": imported.created,
+            "reused_policy_count": imported.reused,
             "publication_state": "draft",
             "enabled": false,
             "trusted": false,
@@ -7166,343 +6759,22 @@ pub async fn policy_interchange_import(
         .into_response()
 }
 
-/// Reconciliation preview for a single imported policy.
-/// Contains both reconciliation decision and local context information.
-#[derive(Debug, Clone, serde::Serialize)]
-struct PolicyReconciliationPreview {
-    lineage_id: Uuid,
-    version_id: Uuid,
-    version: String,
-    name: String,
-    policy_type: String,
-    semantic_digest: String,
-    reconciliation_state: String, // "exact_match", "new_lineage", "new_version", "identity_conflict"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    local_lineage_id: Option<Uuid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    local_version_id: Option<Uuid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    local_semantic_digest: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name_collision: Option<NameCollision>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    blocking_conflicts: Vec<ConflictInfo>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct NameCollision {
-    local_policy_id: Uuid,
-    local_policy_name: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct ConflictInfo {
-    code: String,
-    #[serde(flatten)]
-    details: serde_json::Value,
-}
-
-/// Helper: determine if a reconciliation conflict is blocking for import.
-fn reconciliation_conflict_is_blocking(conflict: &ReconcileConflict) -> bool {
-    matches!(
-        conflict,
-        ReconcileConflict::VersionDigestMismatch { .. }
-            | ReconcileConflict::VersionBelongsToDifferentLineage { .. }
-            | ReconcileConflict::PolicyTypeMismatch { .. }
-            | ReconcileConflict::LineageObjectTypeMismatch { .. }
-            | ReconcileConflict::InvalidPortableIdentity { .. }
-    )
-}
-
-/// Convert ReconcileConflict to serializable ConflictInfo with relevant context.
-fn conflict_to_info(conflict: &ReconcileConflict) -> ConflictInfo {
-    let (code, details) = match conflict {
-        ReconcileConflict::VersionDigestMismatch {
-            lineage_id,
-            version_id,
-            local_digest,
-            imported_digest,
-            ..
-        } => (
-            "INTERCHANGE_VERSION_DIGEST_CONFLICT".to_string(),
-            serde_json::json!({
-                "lineage_id": lineage_id,
-                "version_id": version_id,
-                "local_digest": local_digest,
-                "imported_digest": imported_digest,
-            }),
-        ),
-        ReconcileConflict::VersionBelongsToDifferentLineage {
-            lineage_id,
-            version_id,
-            actual_lineage_id,
-        } => (
-            "INTERCHANGE_VERSION_LINEAGE_MISMATCH".to_string(),
-            serde_json::json!({
-                "imported_lineage_id": lineage_id,
-                "version_id": version_id,
-                "actual_lineage_id": actual_lineage_id,
-            }),
-        ),
-        ReconcileConflict::PolicyTypeMismatch {
-            lineage_id,
-            version_id,
-        } => (
-            "INTERCHANGE_POLICY_TYPE_MISMATCH".to_string(),
-            serde_json::json!({
-                "lineage_id": lineage_id,
-                "version_id": version_id,
-            }),
-        ),
-        ReconcileConflict::LineageObjectTypeMismatch { lineage_id } => (
-            "INTERCHANGE_LINEAGE_TYPE_MISMATCH".to_string(),
-            serde_json::json!({
-                "lineage_id": lineage_id,
-            }),
-        ),
-        ReconcileConflict::InvalidPortableIdentity { source_rule_id } => (
-            "INTERCHANGE_INVALID_PORTABLE_ID".to_string(),
-            serde_json::json!({
-                "source_rule_id": source_rule_id,
-            }),
-        ),
-    };
-    ConflictInfo { code, details }
-}
-
-/// Load local policy identities and reconcile imported policies using the
-/// authoritative planner. This function performs NO mutations.
-async fn load_and_plan_policy_reconciliation(
-    pool: &PgPool,
-    imported: &[NormalizedPolicyImport],
-) -> Result<(Vec<PolicyReconciliationPreview>, Vec<ReconcileConflict>), String> {
-    use crate::compliance::xccdf::reconciliation::{ExistingPolicyIdentity, NativePolicyIdentity};
-
-    // Load only relevant local policies
-    let imported_lineage_ids: Vec<Uuid> = imported.iter().map(|p| p.lineage_id).collect();
-    let imported_version_ids: Vec<Uuid> = imported.iter().map(|p| p.version_id).collect();
-    let imported_names: Vec<String> = imported.iter().map(|p| p.name.clone()).collect();
-
-    // Load policy versions that match imported IDs OR belong to imported lineages
-    // This allows distinguishing new_version from new_lineage
-    let matching_versions: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
-        "SELECT id, policy_id, semantic_digest, policy_type FROM deployment_policy_versions WHERE id = ANY($1) OR policy_id = ANY($2)"
-    )
-    .bind(&imported_version_ids)
-    .bind(&imported_lineage_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to load matching versions: {e}"))?;
-
-    // Load policies by name for collision detection
-    let policies_by_name: Vec<(String, Uuid)> =
-        sqlx::query_as("SELECT name, id FROM deployment_policies WHERE name = ANY($1)")
-            .bind(&imported_names)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("Failed to load policies by name: {e}"))?;
-
-    // Build maps
-    let version_to_lineage: std::collections::HashMap<Uuid, (Uuid, String, String)> =
-        matching_versions
-            .iter()
-            .map(|(vid, lid, digest, ptype)| (*vid, (*lid, digest.clone(), ptype.clone())))
-            .collect();
-
-    let name_to_lineage: std::collections::HashMap<String, Uuid> = policies_by_name
-        .iter()
-        .map(|(name, id)| (name.clone(), *id))
-        .collect();
-
-    // Convert imported to native identities
-    let native_imported: Vec<NativePolicyIdentity> = imported
-        .iter()
-        .map(|p| NativePolicyIdentity {
-            lineage_id: p.lineage_id,
-            version_id: p.version_id,
-            policy_type: p.policy_type.clone(),
-            semantic_digest: p.semantic_digest.clone(),
-            source_rule_id: p.name.clone(), // Use name as identifier for error reporting
-        })
-        .collect();
-
-    // Convert existing to policy identities
-    let native_existing: Vec<ExistingPolicyIdentity> = matching_versions
-        .iter()
-        .map(|(vid, lid, digest, ptype)| ExistingPolicyIdentity {
-            lineage_id: *lid,
-            version_id: *vid,
-            policy_type: ptype.clone(),
-            semantic_digest: digest.clone(),
-        })
-        .collect();
-
-    // Run the authoritative planner
-    let plan = crate::compliance::xccdf::reconciliation::plan_policy_reconciliation(
-        &native_imported,
-        &native_existing,
-    );
-
-    // Build previews from decisions + conflicts
-    let mut previews = Vec::new();
-    let mut preview_map: std::collections::HashMap<(Uuid, Uuid), PolicyReconciliationPreview> =
-        std::collections::HashMap::new();
-
-    // Add previews for decisions (successful reconciliation)
-    for (imported_identity, decision) in &plan.decisions {
-        let mut preview = PolicyReconciliationPreview {
-            lineage_id: imported_identity.lineage_id,
-            version_id: imported_identity.version_id,
-            version: imported
-                .iter()
-                .find(|p| p.version_id == imported_identity.version_id)
-                .map(|p| p.version.clone())
-                .unwrap_or_else(|| "0.1.0".to_string()),
-            name: imported_identity.source_rule_id.clone(),
-            policy_type: imported_identity.policy_type.clone(),
-            semantic_digest: imported_identity.semantic_digest.clone(),
-            reconciliation_state: match decision {
-                crate::compliance::xccdf::reconciliation::ReconcileDecision::ReuseExact { .. } => {
-                    "exact_match".to_string()
-                }
-                crate::compliance::xccdf::reconciliation::ReconcileDecision::CreateLineageAndVersion { .. } => {
-                    "new_lineage".to_string()
-                }
-                crate::compliance::xccdf::reconciliation::ReconcileDecision::CreateVersionInExistingLineage { .. } => {
-                    "new_version".to_string()
-                }
-            },
-            local_lineage_id: match decision {
-                crate::compliance::xccdf::reconciliation::ReconcileDecision::ReuseExact {
-                    local_lineage_id,
-                    ..
-                } => Some(*local_lineage_id),
-                crate::compliance::xccdf::reconciliation::ReconcileDecision::CreateVersionInExistingLineage {
-                    local_lineage_id,
-                    ..
-                } => Some(*local_lineage_id),
-                _ => None,
-            },
-            local_version_id: match decision {
-                crate::compliance::xccdf::reconciliation::ReconcileDecision::ReuseExact {
-                    local_version_id,
-                    ..
-                } => Some(*local_version_id),
-                _ => None,
-            },
-            local_semantic_digest: match decision {
-                crate::compliance::xccdf::reconciliation::ReconcileDecision::ReuseExact {
-                    local_version_id,
-                    ..
-                } => matching_versions
-                    .iter()
-                    .find(|(vid, _, _, _)| vid == local_version_id)
-                    .map(|(_, _, digest, _)| digest.clone()),
-                _ => None,
-            },
-            name_collision: None,
-            blocking_conflicts: Vec::new(),
-        };
-
-        // Check for name collision
-        if let Some(collision_lineage_id) = name_to_lineage.get(&preview.name) {
-            if *collision_lineage_id != preview.lineage_id {
-                preview.name_collision = Some(NameCollision {
-                    local_policy_id: *collision_lineage_id,
-                    local_policy_name: preview.name.clone(),
-                });
-            }
-        }
-
-        preview_map.insert((preview.lineage_id, preview.version_id), preview);
-    }
-
-    // Add previews for conflicts (identity conflicts) - these have no decision
-    for conflict in &plan.conflicts {
-        let (lineage_id, version_id) = match conflict {
-            ReconcileConflict::VersionDigestMismatch {
-                lineage_id,
-                version_id,
-                ..
-            }
-            | ReconcileConflict::VersionBelongsToDifferentLineage {
-                lineage_id,
-                version_id,
-                ..
-            }
-            | ReconcileConflict::PolicyTypeMismatch {
-                lineage_id,
-                version_id,
-            } => (*lineage_id, *version_id),
-            ReconcileConflict::LineageObjectTypeMismatch { .. }
-            | ReconcileConflict::InvalidPortableIdentity { .. } => {
-                // These don't map to a specific version, skip preview
-                continue;
-            }
-        };
-
-        let imported_policy = imported
-            .iter()
-            .find(|p| p.lineage_id == lineage_id && p.version_id == version_id);
-
-        if let Some(imported_policy) = imported_policy {
-            let (local_lineage_id, local_version_id, local_digest) =
-                if let Some((lid, digest, _ptype)) = version_to_lineage.get(&version_id) {
-                    (Some(*lid), Some(version_id), Some(digest.clone()))
-                } else {
-                    (None, None, None)
-                };
-
-            let mut preview = PolicyReconciliationPreview {
-                lineage_id: imported_policy.lineage_id,
-                version_id: imported_policy.version_id,
-                version: imported_policy.version.clone(),
-                name: imported_policy.name.clone(),
-                policy_type: imported_policy.policy_type.clone(),
-                semantic_digest: imported_policy.semantic_digest.clone(),
-                reconciliation_state: "identity_conflict".to_string(),
-                local_lineage_id,
-                local_version_id,
-                local_semantic_digest: local_digest,
-                name_collision: None,
-                blocking_conflicts: vec![conflict_to_info(conflict)],
-            };
-
-            // Check for name collision
-            if let Some(collision_lineage_id) = name_to_lineage.get(&preview.name) {
-                if *collision_lineage_id != preview.lineage_id {
-                    preview.name_collision = Some(NameCollision {
-                        local_policy_id: *collision_lineage_id,
-                        local_policy_name: preview.name.clone(),
-                    });
-                }
-            }
-
-            preview_map.insert((lineage_id, version_id), preview);
-        }
-    }
-
-    // Collect all previews
-    previews.extend(preview_map.into_values());
-    previews.sort_by(|a, b| {
-        a.lineage_id
-            .cmp(&b.lineage_id)
-            .then(a.version_id.cmp(&b.version_id))
-    });
-
-    Ok((previews, plan.conflicts))
-}
-
 /// `POST /api/v1/policies/interchange/preview`
 ///
 /// Parses and validates a policy interchange document without writing to the
 /// database. The returned source digest is the digest the import endpoint must
-/// be checked against by the caller.
+/// be checked against by the caller. The analysis lives in
+/// [`crate::services::policy_authoring::preview_policy_interchange`], which
+/// the MCP `preview_policy_import` tool shares.
 pub async fn policy_interchange_preview(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
+    use crate::services::policy_authoring::{
+        PolicyAuthoringError, preview_policy_interchange, source_sha256,
+    };
+
     let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
@@ -7515,78 +6787,35 @@ pub async fn policy_interchange_preview(
         Ok(_) => return bad_request("No policy interchange file was attached"),
         Err(error) => return multipart_read_error_response(error),
     };
-    let source_sha256 = {
-        use sha2::{Digest, Sha256};
-        hex::encode(Sha256::digest(&upload.bytes))
-    };
-    let policies = match parse_policy_interchange_upload_with_source(&upload, &source_sha256) {
-        Ok(policies) => policies,
-        Err(message) => {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(serde_json::json!({
-                    "source_sha256": source_sha256,
-                    "error": "POLICY_INTERCHANGE_INVALID",
-                    "message": message,
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    // Validate no duplicate version IDs within the document (shared validator)
-    if let Err(message) = validate_policy_interchange_document_async(&policies).await {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({
-                "source_sha256": source_sha256,
-                "error": "POLICY_INTERCHANGE_INVALID",
-                "message": message,
-            })),
-        )
-            .into_response();
-    }
-
-    let (previews, conflicts) = match load_and_plan_policy_reconciliation(&pool, &policies).await {
-        Ok((p, c)) => (p, c),
-        Err(error) => {
-            tracing::error!("Failed to reconcile imported policies: {error}");
-            return internal_error("Failed to analyze policy compatibility");
-        }
-    };
-
-    let has_blocking_conflicts = conflicts.iter().any(reconciliation_conflict_is_blocking);
-
-    // Check for name collisions and add to blocking conflicts if present
-    let mut all_blocking_conflicts: Vec<serde_json::Value> = conflicts
-        .iter()
-        .filter(|c| reconciliation_conflict_is_blocking(c))
-        .map(|c| serde_json::to_value(conflict_to_info(c)).unwrap_or(serde_json::json!({})))
-        .collect();
-
-    // Add name collisions as blocking conflicts
-    for preview in &previews {
-        if let Some(collision) = &preview.name_collision {
-            all_blocking_conflicts.push(serde_json::json!({
-                "code": "POLICY_INTERCHANGE_NAME_COLLISION",
-                "imported_lineage_id": preview.lineage_id,
-                "imported_name": preview.name,
-                "local_lineage_id": collision.local_policy_id,
-            }));
-        }
-    }
-
-    let has_name_collisions = previews.iter().any(|p| p.name_collision.is_some());
+    let preview =
+        match preview_policy_interchange(&pool, &upload.bytes, upload.filename.as_deref()).await {
+            Ok(preview) => preview,
+            Err(PolicyAuthoringError::Invalid { message, .. }) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "source_sha256": source_sha256(&upload.bytes),
+                        "error": "POLICY_INTERCHANGE_INVALID",
+                        "message": message,
+                    })),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                tracing::error!(error = ?error, "Failed to reconcile imported policies");
+                return internal_error("Failed to analyze policy compatibility");
+            }
+        };
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "source_sha256": source_sha256,
+            "source_sha256": preview.source_sha256,
             "filename": upload.filename,
-            "policy_count": policies.len(),
-            "policies": previews,
-            "has_blocking_conflicts": has_blocking_conflicts || has_name_collisions,
-            "blocking_conflicts": all_blocking_conflicts,
+            "policy_count": preview.policy_count,
+            "policies": preview.policies,
+            "has_blocking_conflicts": preview.has_blocking_conflicts,
+            "blocking_conflicts": preview.blocking_conflicts,
         })),
     )
         .into_response()
@@ -7626,43 +6855,6 @@ fn validate_policy_interchange_document(policies: &[NormalizedPolicyImport]) -> 
         }
     }
     Ok(())
-}
-
-async fn validate_policy_interchange_document_async(
-    policies: &[NormalizedPolicyImport],
-) -> Result<(), String> {
-    let mut seen_versions = std::collections::HashSet::new();
-    for policy in policies {
-        let composite = crate::models::deployment_policies::validate_policy_type_config_async(
-            &policy.policy_type,
-            &policy.config,
-        )
-        .await?;
-        if composite.is_some() && policy.execution_phase != "multi-phase" {
-            return Err(format!(
-                "composite policy version {} must use execution_phase multi-phase",
-                policy.version_id
-            ));
-        }
-        if !seen_versions.insert(policy.version_id) {
-            return Err(format!(
-                "Duplicate version ID {} in import document",
-                policy.version_id
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn parse_policy_interchange_upload_with_source(
-    upload: &MultipartUpload,
-    source_sha256: &str,
-) -> Result<Vec<NormalizedPolicyImport>, String> {
-    parse_policy_document(
-        &upload.bytes,
-        upload.filename.as_deref(),
-        Some(source_sha256),
-    )
 }
 
 fn parse_policy_interchange_upload(

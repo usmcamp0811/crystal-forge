@@ -1308,6 +1308,12 @@ pub fn PolicyDrawer(
 
     let selected_revision = selected_version_id()
         .and_then(|id| policy.revisions.iter().find(|revision| revision.id == id));
+    let agent_label = selected_revision.and_then(|revision| {
+        agent_attribution_label(
+            revision.created_via_agent,
+            revision.created_access_token_name.as_deref(),
+        )
+    });
     // One shared exact-version projection, so the drawer, the catalog, and the
     // compliance entry point all hand the editor the same coherent revision
     // (classification, config, evidence, and imported provenance together).
@@ -1617,11 +1623,11 @@ pub fn PolicyDrawer(
                   div { class: "ed-stat", div { class: "ed-stat-label", "Modified" } div { class: "ed-stat-val", style: "font-size:12px;", "{modified_at}" } }
                    if let Some(origin) = displayed_policy.provenance.first() {
                        if let Some(display_name) = origin.imported_by_display.as_deref() {
-                           div { class: "ed-stat", div { class: "ed-stat-label", "Imported by" } div { class: "ed-stat-val", style: "font-size:11px;", "{display_name}" } }
+                           div { class: "ed-stat", div { class: "ed-stat-label", "Imported by" } div { class: "ed-stat-val", style: "font-size:11px;", "{display_name}" if let Some(agent) = agent_label.as_deref() { div { style: "font-size:10.5px;color:var(--cf-text-muted);", "{agent}" } } } }
                        }
                    } else if let Some(selected_rev) = selected_revision {
                        if let Some(display_name) = selected_rev.created_by_display.as_deref() {
-                           div { class: "ed-stat", div { class: "ed-stat-label", "Owner" } div { class: "ed-stat-val", style: "font-size:11px;", "{display_name}" } }
+                           div { class: "ed-stat", div { class: "ed-stat-label", "Owner" } div { class: "ed-stat-val", style: "font-size:11px;", "{display_name}" if let Some(agent) = agent_label.as_deref() { div { style: "font-size:10.5px;color:var(--cf-text-muted);", "{agent}" } } } }
                        }
                    }
              }
@@ -1647,6 +1653,7 @@ pub fn PolicyDrawer(
                                             div { class: "mono", style: "font-weight:700;", "v{revision.version}" }
                                             if let Some(description) = revision.description.as_ref() { div { style: "margin-top:4px;font-size:12px;color:var(--cf-text-secondary);", "{description}" } }
                                             div { style: "margin-top:6px;font-size:11px;color:var(--cf-text-muted);", "Created {revision.created_at}" }
+                                            if let Some(agent) = agent_attribution_label(revision.created_via_agent, revision.created_access_token_name.as_deref()) { div { style: "margin-top:2px;font-size:11px;color:var(--cf-text-muted);", "{agent}" } }
                                         }
                                         div { style: "display:flex;flex-wrap:wrap;justify-content:flex-end;gap:5px;",
                                             span { class: "chip chip-unknown", "{revision.publication_state}" }
@@ -1848,6 +1855,20 @@ fn mapping_relationship_label(relationship: &str) -> &str {
         "provides_evidence_for" => "Provides evidence for",
         other => other,
     }
+}
+
+/// Returns the agent attribution shown next to a version's author, or `None`
+/// for a version that a browser user created.
+///
+/// The server records the token name when an owner access token creates the
+/// version through MCP. Without a recorded name the label says "(deleted)".
+fn agent_attribution_label(created_via_agent: bool, token_name: Option<&str>) -> Option<String> {
+    created_via_agent.then(
+        || match token_name.map(str::trim).filter(|name| !name.is_empty()) {
+            Some(name) => format!("via agent token {name}"),
+            None => "via agent token (deleted)".to_string(),
+        },
+    )
 }
 
 fn mapping_provenance_label(provenance: &str) -> &str {
@@ -2326,6 +2347,29 @@ fn sanitize_filename(value: &str) -> String {
         "policy".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod agent_attribution_tests {
+    use super::agent_attribution_label;
+
+    #[test]
+    fn agent_versions_name_the_token_or_report_it_deleted() {
+        assert_eq!(agent_attribution_label(false, Some("ci-agent")), None);
+        assert_eq!(agent_attribution_label(false, None), None);
+        assert_eq!(
+            agent_attribution_label(true, Some("ci-agent")).as_deref(),
+            Some("via agent token ci-agent")
+        );
+        assert_eq!(
+            agent_attribution_label(true, None).as_deref(),
+            Some("via agent token (deleted)")
+        );
+        assert_eq!(
+            agent_attribution_label(true, Some("  ")).as_deref(),
+            Some("via agent token (deleted)")
+        );
     }
 }
 

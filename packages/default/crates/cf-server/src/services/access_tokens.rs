@@ -204,9 +204,11 @@ struct ScopeSpec {
 ///
 /// The compliance scopes come from TASK-534.6. `policies:read` and
 /// `bundles:read` are released for every role. The authoring scopes
-/// `policies:draft`, `policies:import` and `bundles:draft` are Admin-only and
-/// unreleased until TASK-534.7 and TASK-534.8; `compliance:preview` is open to
-/// every role and unreleased until TASK-534.8.
+/// `policies:draft`, `policies:import` and `bundles:draft` are Admin-only;
+/// TASK-534.7 releases `policies:draft` and `policies:import`, and
+/// `bundles:draft` stays unreleased until TASK-534.8. `compliance:preview` is
+/// open to every role and released by TASK-534.7 for the policy import
+/// preview; it grants no write.
 const SCOPES: [ScopeSpec; 13] = [
     ScopeSpec {
         scope: "cves:read",
@@ -278,7 +280,7 @@ const SCOPES: [ScopeSpec; 13] = [
         default_selected: false,
         requires_operator: false,
         requires_admin: true,
-        released: false,
+        released: true,
     },
     ScopeSpec {
         scope: "policies:import",
@@ -286,7 +288,7 @@ const SCOPES: [ScopeSpec; 13] = [
         default_selected: false,
         requires_operator: false,
         requires_admin: true,
-        released: false,
+        released: true,
     },
     ScopeSpec {
         scope: "bundles:read",
@@ -310,7 +312,7 @@ const SCOPES: [ScopeSpec; 13] = [
         default_selected: false,
         requires_operator: false,
         requires_admin: false,
-        released: false,
+        released: true,
     },
 ];
 
@@ -1506,6 +1508,7 @@ mod tests {
             Some("Not supported yet")
         );
         // Admin-only scopes report the role first, then the release state.
+        // TASK-534.7 released the policy authoring scopes.
         for authoring in ["policies:draft", "policies:import", "bundles:draft"] {
             let spec = scope_spec(authoring).unwrap();
             assert!(scope_requires_admin(authoring));
@@ -1517,16 +1520,17 @@ mod tests {
                 unavailable_reason(spec, true, false),
                 Some("Requires Admin")
             );
-            assert_eq!(
-                unavailable_reason(spec, true, true),
-                Some("Not supported yet")
-            );
         }
-        let preview = scope_spec("compliance:preview").unwrap();
+        for released in ["policies:draft", "policies:import"] {
+            let spec = scope_spec(released).unwrap();
+            assert_eq!(unavailable_reason(spec, true, true), None, "{released}");
+        }
         assert_eq!(
-            unavailable_reason(preview, false, false),
+            unavailable_reason(scope_spec("bundles:draft").unwrap(), true, true),
             Some("Not supported yet")
         );
+        let preview = scope_spec("compliance:preview").unwrap();
+        assert_eq!(unavailable_reason(preview, false, false), None);
         assert!(!scope_requires_admin("compliance:preview"));
         assert!(!scope_requires_admin("admin"));
         assert!(!is_write_scope("cves:read"));

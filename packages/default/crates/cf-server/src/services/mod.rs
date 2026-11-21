@@ -17,6 +17,7 @@ pub mod cve_threshold_policy;
 pub mod hardening_scans;
 pub mod oscal_poam_export;
 pub mod poam;
+pub mod policy_authoring;
 pub mod register_export_selection;
 pub mod register_mixed_tabular;
 pub mod register_oscal_snapshot;

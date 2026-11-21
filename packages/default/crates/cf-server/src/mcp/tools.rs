@@ -4,7 +4,10 @@
 //! live in `scan_tools` and `poam_write`. Five more read tools in
 //! `compliance_read` return the global compliance catalog (security policies,
 //! compliance bundles and framework requirements); they need `policies:read`
-//! or `bundles:read` and do not use the effective environments.
+//! or `bundles:read` and do not use the effective environments. The five
+//! policy authoring tools in `policy_authoring` (TASK-534.7) create, update,
+//! validate, preview and import policy drafts of the same global catalog;
+//! three of them write. They also ignore the effective environments.
 //!
 //! The transport layer authenticates the bearer token and builds a
 //! [`ToolCaller`]. This module never trusts a cached tool list: [`call_tool`]
@@ -36,6 +39,10 @@ use uuid::Uuid;
 use super::compliance_read::{
     GET_COMPLIANCE_BUNDLE, GET_COMPLIANCE_POLICY, LIST_COMPLIANCE_BUNDLES,
     LIST_COMPLIANCE_POLICIES, LIST_COMPLIANCE_REQUIREMENTS,
+};
+use super::policy_authoring::{
+    CREATE_POLICY_DRAFT, IMPORT_POLICY_DRAFT, PREVIEW_POLICY_IMPORT, UPDATE_POLICY_DRAFT,
+    VALIDATE_POLICY_DRAFT,
 };
 use crate::api::models::SystemCveInventoryParams;
 use crate::auth::authorization::{CredentialIdentity, RestrictedGrant};
@@ -70,8 +77,19 @@ const VERIFY_POAM: &str = "verify_poam";
 
 /// Returns whether a tool changes state. The transport audits a denied call of
 /// such a tool as `mcp_write_denied`.
+///
+/// `validate_policy_draft` and `preview_policy_import` write nothing and are
+/// not write tools, although `validate_policy_draft` needs `policies:draft`.
 pub fn is_write_tool(name: &str) -> bool {
-    matches!(name, REQUEST_CVE_SCAN | UPDATE_POAM_PROGRESS | VERIFY_POAM)
+    matches!(
+        name,
+        REQUEST_CVE_SCAN
+            | UPDATE_POAM_PROGRESS
+            | VERIFY_POAM
+            | CREATE_POLICY_DRAFT
+            | UPDATE_POLICY_DRAFT
+            | IMPORT_POLICY_DRAFT
+    )
 }
 
 const EVIDENCE_NOTE: &str = "Authority no_scan means that no usable completed \
@@ -135,22 +153,27 @@ pub enum ToolError {
     /// An unexpected internal failure. The transport MUST NOT send the error
     /// detail to the client.
     Internal(anyhow::Error),
+    /// A dependency gave no verdict, for example the Nix syntax parser hit
+    /// its deadline. Nothing was checked or written. The message is a static
+    /// retry hint that the transport sends with `internal_error`; it never
+    /// contains request or database data.
+    Unavailable(String),
 }
 
 impl std::fmt::Display for ToolError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnknownTool => formatter.write_str("unknown tool"),
-            Self::InvalidArguments(message) | Self::Forbidden(message) => {
-                formatter.write_str(message)
-            }
+            Self::InvalidArguments(message)
+            | Self::Forbidden(message)
+            | Self::Unavailable(message) => formatter.write_str(message),
             Self::NotFound => formatter.write_str("resource not found"),
             Self::Internal(_) => formatter.write_str("internal error"),
         }
     }
 }
 
-static TOOLS: [ToolDef; 13] = [
+static TOOLS: [ToolDef; 18] = [
     ToolDef {
         name: LIST_REMEDIATION_WORK,
         title: "List remediation work",
@@ -296,6 +319,62 @@ it with relationship, coverage and trust state.",
         required_scopes: &["policies:read"],
         input_schema: super::compliance_read::list_compliance_requirements_schema,
     },
+    ToolDef {
+        name: CREATE_POLICY_DRAFT,
+        title: "Create security policy draft",
+        description: "Creates an untrusted draft policy version owned by this token's \
+owner. mode new_lineage creates a new, disabled policy lineage with an initial draft from \
+name, policy_type, config, execution_phase, enabled_by_default, compliance_metadata and \
+requirement_mappings. mode derive creates a draft from the current published version of \
+policy_id. Returns policy_id, version_id, version and draft_revision. Never trusts, \
+publishes, assigns or enables. Requires an Admin token owner. Recorded in the audit log as \
+made by this agent token.",
+        required_scopes: &["policies:draft"],
+        input_schema: super::policy_authoring::create_policy_draft_schema,
+    },
+    ToolDef {
+        name: UPDATE_POLICY_DRAFT,
+        title: "Update security policy draft",
+        description: "Replaces fields of a mutable draft version that this token's owner \
+created, at its current draft_revision: description, config, execution_phase, \
+enabled_by_default, compliance_metadata and manual requirement_mappings. A stale revision \
+is rejected with stale_revision; values equal to the stored values change nothing. \
+Published versions and other users' drafts cannot change. Requires an Admin token owner. \
+Recorded in the audit log as made by this agent token.",
+        required_scopes: &["policies:draft"],
+        input_schema: super::policy_authoring::update_policy_draft_schema,
+    },
+    ToolDef {
+        name: VALIDATE_POLICY_DRAFT,
+        title: "Validate security policy draft",
+        description: "Validates an inline policy definition or a stored policy version with \
+the server validator and returns valid, structured errors and warnings. Nix expressions \
+are parsed with a 2 second deadline, never evaluated. Writes nothing. Syntax validity does \
+not prove that the check is effective.",
+        required_scopes: &["policies:draft"],
+        input_schema: super::policy_authoring::validate_policy_draft_schema,
+    },
+    ToolDef {
+        name: PREVIEW_POLICY_IMPORT,
+        title: "Preview policy import",
+        description: "Parses a JSON or TOML policy interchange document and returns its \
+source_sha256, the recognized policies and versions, their identities, the reconciliation \
+decision of each (exact_match, new_lineage, new_version), identity conflicts, name \
+collisions and blocking errors. Writes nothing and runs no evaluation or deployment work.",
+        required_scopes: &["compliance:preview"],
+        input_schema: super::policy_authoring::preview_policy_import_schema,
+    },
+    ToolDef {
+        name: IMPORT_POLICY_DRAFT,
+        title: "Import policy drafts",
+        description: "Imports a JSON or TOML policy interchange document whose SHA-256 \
+equals expected_source_sha256 (from preview_policy_import). Reconciles with existing \
+identities, reuses exact matches and creates untrusted draft versions and disabled \
+lineages, all or nothing. Never changes an existing version. Requires an Admin token \
+owner. Recorded in the audit log with the source digest as made by this agent token.",
+        required_scopes: &["policies:import"],
+        input_schema: super::policy_authoring::import_policy_draft_schema,
+    },
 ];
 
 pub(super) fn limit_schema() -> Value {
@@ -420,9 +499,12 @@ pub fn visible_tools(caller: &ToolCaller) -> Vec<&'static ToolDef> {
 /// effective environments again before it reads any resource. The compliance
 /// catalog tools read global data and need only their scope. Read tools never
 /// mutate state. Write tools (`request_cve_scan`, `update_poam_progress`,
-/// `verify_poam`) reauthorize against the token row, the owner's current role
-/// and environments inside the transaction of their change, and record the
-/// token as the acting credential. No tool runs Nix commands.
+/// `verify_poam`, `create_policy_draft`, `update_policy_draft`,
+/// `import_policy_draft`) reauthorize against the token row and the owner's
+/// current role (and, for POA&M and scan tools, environments) inside the
+/// transaction of their change, and record the token as the acting
+/// credential. No tool runs Nix commands or evaluates Nix; policy validation
+/// only parses expressions.
 ///
 /// # Errors
 ///
@@ -436,6 +518,7 @@ pub fn visible_tools(caller: &ToolCaller) -> Vec<&'static ToolDef> {
 /// - [`ToolError::NotFound`] when a requested system, finding, or POA&M is
 ///   absent or hidden.
 /// - [`ToolError::Internal`] on a database or serialization failure.
+/// - [`ToolError::Unavailable`] when the Nix syntax parser gave no verdict.
 pub async fn call_tool(
     pool: &PgPool,
     caller: &ToolCaller,
@@ -497,6 +580,25 @@ pub async fn call_tool(
         }
         LIST_COMPLIANCE_REQUIREMENTS => {
             super::compliance_read::list_compliance_requirements(pool, arguments).await
+        }
+        // SECURITY: The policy authoring tools are global catalog writes and
+        // ignore `effective`. The Admin-only scope check above ran at
+        // admission; the write services repeat the token, scope and Admin
+        // checks inside their transaction.
+        CREATE_POLICY_DRAFT => {
+            super::policy_authoring::create_policy_draft(pool, caller, arguments).await
+        }
+        UPDATE_POLICY_DRAFT => {
+            super::policy_authoring::update_policy_draft(pool, caller, arguments).await
+        }
+        VALIDATE_POLICY_DRAFT => {
+            super::policy_authoring::validate_policy_draft(pool, arguments).await
+        }
+        PREVIEW_POLICY_IMPORT => {
+            super::policy_authoring::preview_policy_import(pool, arguments).await
+        }
+        IMPORT_POLICY_DRAFT => {
+            super::policy_authoring::import_policy_draft(pool, caller, arguments).await
         }
         _ => Err(ToolError::UnknownTool),
     }

@@ -1,7 +1,7 @@
 ---
 type: Security Model
 title: MCP server
-description: Describes the MCP endpoint (read tools and token-scoped write tools) at POST /mcp - enabling it, client configuration with a static access-token bearer header, protocol versions, stateless transport, limits, authentication failures, tools, unsupported features and security rules.
+description: Describes the MCP endpoint (read tools, token-scoped write tools and policy authoring tools) at POST /mcp - enabling it, client configuration with a static access-token bearer header, protocol versions, stateless transport, limits, authentication failures, tools, unsupported features and security rules.
 tags:
   - crystal-forge
   - security
@@ -18,6 +18,15 @@ sources:
   - id: compliance-read
     resource: "Crystal Forge repository file packages/default/crates/cf-server/src/mcp/compliance_read.rs at commit f4fcba6f"
     title: MCP compliance read tools
+  - id: policy-authoring
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/mcp/policy_authoring.rs at commit a7eddf68"
+    title: MCP policy authoring tools
+  - id: policy-authoring-service
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/services/policy_authoring.rs at commit a7eddf68"
+    title: Policy authoring service shared with the Admin browser handlers
+  - id: policy-revision-migration
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0344_policy_draft_revision_and_agent_attribution.sql at commit a7eddf68"
+    title: Draft revision and version-level agent attribution
   - id: compliance-catalog
     resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/compliance_catalog.rs at commit f4fcba6f"
     title: Compliance catalog queries
@@ -41,7 +50,9 @@ and calls four read tools. TASK-534.5 (milestone M4) adds three write tools and
 one scan read tool. A token can write only when its owner selected a write
 scope at creation; there is no server switch for writes. TASK-534.6 adds five
 read tools for the global compliance catalog; see
-[Compliance read tools](#compliance-read-tools).
+[Compliance read tools](#compliance-read-tools). TASK-534.7 adds five policy
+authoring tools that create, update, validate, preview and import untrusted
+policy drafts; see [Policy authoring tools](#policy-authoring-tools).
 
 This concept describes implemented code. It does not describe verified
 behavior: build and test results for the exact head are recorded in the task,
@@ -234,13 +245,15 @@ JSON object with `error` and `message`:
 | `invalid_arguments` | The arguments do not match the tool input schema. |
 | `forbidden` | The token or the owner lacks a required scope or role now. |
 | `not_found` | The resource does not exist or is not visible to the token. The two cases are indistinguishable. |
-| `internal_error` | The call failed or timed out. The server logs the detail with the token id only. |
+| `internal_error` | The call failed or timed out. The server logs the detail with the token id only. When the Nix syntax validator gave no verdict within its 2-second deadline, the message says so and asks for a retry; nothing was checked or written. |
 
 ## Tools
 
 Every call authorizes again. `call_tool` first rejects a tool whose scopes
 include an Admin-only scope when the owner is not Admin at this request's
-admission (`forbidden`). No current tool needs an Admin-only scope. It then
+admission (`forbidden`). `create_policy_draft`, `update_policy_draft`,
+`validate_policy_draft` (`policies:draft`) and `import_policy_draft`
+(`policies:import`) need an Admin-only scope. It then
 checks the tool's scopes and computes the effective environments as
 `CredentialIdentity::Restricted(grant).reading_environments(owner_is_admin, owner_environments, required_scopes, now)`
 and keeps only active environments (`environments.is_active` true; NULL is
@@ -319,8 +332,11 @@ token now: `draft_scope` (`policies:draft` or `bundles:draft`),
 draft scope, the owner is Admin, and the open draft was created by the owner.
 `can_derive_draft` is true only when the token holds the draft scope, the owner
 is Admin, no mutable draft is open, and a published version exists. The hints
-grant nothing. No draft tool exists in this release, and the draft scopes are
-unreleased, so a token issued through the service always reports `false`.
+grant nothing; the draft tools check the token, the owner and the draft again.
+The policy draft tools are in [Policy authoring tools](#policy-authoring-tools).
+No bundle draft tool exists in this release, so the bundle hints always report
+`false`. A policy version detail also returns `draft_revision` and, in
+`provenance`, `created_via_agent` and `created_access_token_name`.
 
 Untrusted text rule: names, descriptions, rationales, owner labels and policy
 `config` are returned as stored. `config` can contain Nix expressions. No tool
@@ -332,10 +348,10 @@ evaluates it. User display names are not returned; `created_by` is a user ID.
 | --- | --- | --- | --- | --- | --- |
 | `policies:read` | Selectable | Selectable | Selectable | Yes | `list_compliance_policies`, `get_compliance_policy`, `list_compliance_requirements` |
 | `bundles:read` | Selectable | Selectable | Selectable | Yes | `list_compliance_bundles`, `get_compliance_bundle` |
-| `policies:draft` | Requires Admin | Requires Admin | Not supported yet | No (TASK-534.7) | None |
-| `policies:import` | Requires Admin | Requires Admin | Not supported yet | No (TASK-534.7) | None |
+| `policies:draft` | Requires Admin | Requires Admin | Selectable | Yes (TASK-534.7) | `create_policy_draft`, `update_policy_draft`, `validate_policy_draft` |
+| `policies:import` | Requires Admin | Requires Admin | Selectable | Yes (TASK-534.7) | `import_policy_draft` |
 | `bundles:draft` | Requires Admin | Requires Admin | Not supported yet | No (TASK-534.8) | None |
-| `compliance:preview` | Not supported yet | Not supported yet | Not supported yet | No (TASK-534.8) | None |
+| `compliance:preview` | Selectable | Selectable | Selectable | Yes (TASK-534.7) | `preview_policy_import`; impact preview is TASK-534.8 |
 
 The read scopes are not preselected. An Admin-only scope is checked at
 creation, at rotation and on every tool call; it stops working when its owner
@@ -403,6 +419,159 @@ A write tool call that ends in `forbidden` or `not_found` writes one
 `mcp_write_denied` audit event with the tool name and the reason code. Tool
 arguments are never recorded.
 
+## Policy authoring tools
+
+TASK-534.7 adds five tools that propose security policy content. They write
+only untrusted drafts of the global policy catalog. They ignore the effective
+environments, like the compliance read tools. No tool trusts, publishes,
+assigns, enables, changes an enforcement mode or deletes; an Admin does those
+in the browser. XCCDF and STIG documents are not accepted through MCP.
+
+`policies:draft` and `policies:import` are Admin-only scopes: the owner must be
+Admin at token creation, at rotation, at each call's admission and again inside
+the write transaction. `compliance:preview` is open to every role and writes
+nothing. The browser routes `POST /api/v1/policies/:policy_id/drafts`,
+`POST /api/v1/policies/interchange/preview` and
+`POST /api/v1/policies/interchange/import` call the same service
+(`services::policy_authoring`) with the browser session as the actor; their
+role checks and response contracts did not change. Browser draft derivation
+now writes a `policy_draft_created` audit event.
+
+| Tool | Scope | Inputs | Output | Rules |
+| --- | --- | --- | --- | --- |
+| `create_policy_draft` | `policies:draft` | `mode: new_lineage` with `name` (1 to 255 bytes), `policy_type`, `config` (object), optional `description`, `execution_phase`, `enabled_by_default` (default `true`), `compliance_metadata` (object), `requirement_mappings`; or `mode: derive` with `policy_id`, optional `source_version_id` and `version` (label) | `mode`, `policy_id`, `version_id`, `version`, `draft_revision`, `derived_from_version_id`, `publication_state: draft`, `trust_state: untrusted`, `note` | `new_lineage` validates the definition first, rejects a used name (`name_conflict`) and creates the lineage disabled. `derive` needs a published version and no open draft; an open draft gives `draft_exists` with only that draft's version ID. `source_version_id`, when sent, must be the current published version (`source_version_changed`). |
+| `update_policy_draft` | `policies:draft` | `version_id`, `draft_revision` (both required); optional `description` (empty clears), `config`, `execution_phase`, `enabled_by_default`, `compliance_metadata`, `requirement_mappings` (complete set of manual mappings) | `policy_id`, `version_id`, `draft_revision`, `changed`, `changed_fields` | Only a mutable draft (`incomplete`, `draft`, `interim`) that is the lineage's current draft and whose `created_by` is the token owner. Published or deprecated: `immutable_version`. Another user's draft: `forbidden` "draft is owned by another user". Wrong revision: `stale_revision`. Values equal to the stored values: `changed: false`, no write, no audit event. Imported mappings stay unchanged and cannot be replaced (`mapping_conflict`). |
+| `validate_policy_draft` | `policies:draft` | Exactly one of `version_id` (stored version, any state) and `definition` (`policy_type`, `config`, optional `name`, `execution_phase`, `compliance_metadata`, `requirement_mappings`) | `valid`, `errors` and `warnings` (each `{code, field, message}`), `note: "Syntax validation does not prove that the check is effective."` | Writes nothing. Error codes: `builtin_policy_type`, `invalid_policy_type`, `invalid_config`, `invalid_execution_phase`, `invalid_compliance_metadata`, `invalid_mapping`, `duplicate_mapping`, `unknown_requirement`. Warnings: `unmapped`, `name_in_use`, `immutable_version`. |
+| `preview_policy_import` | `compliance:preview` | `document` (text), `format` (`json` or `toml`) | `source_sha256`, `policy_count`, `policies` (identity, `reconciliation_state`: `exact_match`, `new_lineage`, `new_version` or `identity_conflict`, local identities, `name_collision`, `blocking_conflicts`), `has_blocking_conflicts`, `blocking_conflicts`, `note` | Writes nothing and runs no evaluation, scan or deployment work. The result equals the browser preview without `filename`, plus a `note`. |
+| `import_policy_draft` | `policies:import` | `document`, `format`, `expected_source_sha256` (64 hex characters) | `source_sha256`, `created_policy_count`, `reused_policy_count`, `policies` (`lineage_id`, `version_id`, `reconciliation_action`, `created`, `publication_state`, `trust_state`, `enabled`, `draft_revision`), `publication_state: draft`, `trusted: false`, `enabled: false`, `note` | All or nothing. A different digest: `source_digest_mismatch`. A conflict or name collision: `import_conflicts` with the browser conflict objects. An exact match is reused without a change; new versions are untrusted drafts and new lineages are disabled. |
+
+The source digest is the SHA-256 of the UTF-8 bytes of `document`. A document
+without portable IDs gets deterministic IDs from that digest, so preview and
+import name the same identities. The request body limit (1 MiB) bounds the
+document. Other formats give `invalid_arguments`.
+
+Validation uses the server validators of the browser editor and import. A
+`custom_check` or composite expression is parsed by `nix-instantiate --parse`
+with a 2-second deadline. It is never evaluated. When the parser gives no
+verdict, the tool returns `internal_error` with a retry message, never
+`valid: true` and never `invalid_arguments`.
+
+### Authorization, locking and revision
+
+Every write runs in one transaction that first locks the owner row, the token
+row and the owner's roles `FOR SHARE`: the owner must be active and Admin, and
+the token must be live (not revoked, not expired), owned by the owner, of
+audience `mcp`, and hold the tool's scope. Then the write takes its domain
+locks: the lineage row `FOR UPDATE` and the version row for derivation and
+updates (the order of the browser draft code), the `policy-name:<name>`
+advisory lock for a new lineage, and the sorted `policy-lineage:`,
+`policy-version:` and `policy-name:` advisory locks for an import (the browser
+import keys). Two imports of the same document serialize; the second reuses
+what the first created.
+
+Migration `0344_policy_draft_revision_and_agent_attribution.sql` adds
+`draft_revision` (default 1) to `deployment_policy_versions`. A trigger
+increments it in every UPDATE that changes a mutable version, from the browser
+or from MCP; digest bookkeeping and attribution columns do not count. A
+published or deprecated version never changes. `get_compliance_policy` returns
+`draft_revision` for each version detail.
+
+### Policy attribution
+
+The token owner is the audit actor and `created_by`. Each write inserts one
+`admin_audit_events` row per change with `access_token_id` and the metadata
+`via: "mcp"`, `access_token_id` and an `access_token_name` snapshot (the
+[write tool format](#attribution)):
+
+| Action | Metadata |
+| --- | --- |
+| `policy_draft_created` | `operation` (`new_lineage` or `derive`), `lineage_id`, `version_id`, `version`, `draft_revision`, `derived_from_version_id` (derive) |
+| `policy_draft_updated` | `operation: update`, `lineage_id`, `version_id`, `previous_draft_revision`, `draft_revision`, `changed_fields` |
+| `policy_interchange_imported` | `lineage_id`, `version_id`, `source_digest`, `reconciliation_action`, `created`, `final_publication_state`, `final_trust_state`, `final_enabled`, `draft_revision` |
+
+Audit metadata never holds document text, configs or descriptions. A version
+created through MCP stores `created_via_agent = true`,
+`created_access_token_id` (`ON DELETE SET NULL`) and `created_access_token_name`
+(snapshot). Denied calls of `create_policy_draft`, `update_policy_draft` and
+`import_policy_draft` write `mcp_write_denied`, like the other write tools.
+
+### Import workflow
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Agent as Coding agent
+  participant MCP as POST /mcp
+  participant Service as policy_authoring service
+  participant DB as PostgreSQL
+  Agent->>MCP: preview_policy_import(document, format)
+  MCP->>Service: parse, validate, reconcile (read only)
+  Service->>DB: read matching versions and names
+  MCP-->>Agent: source_sha256, decisions, conflicts
+  Agent->>MCP: import_policy_draft(document, format, expected_source_sha256)
+  alt digest differs or document invalid
+    MCP-->>Agent: invalid_arguments, nothing written
+  else digest matches
+    MCP->>Service: parse and validate again
+    Service->>DB: BEGIN; lock owner, token, roles; advisory locks
+    Service->>DB: plan again under the locks
+    alt conflict or name collision
+      Service->>DB: ROLLBACK
+      MCP-->>Agent: invalid_arguments import_conflicts
+    else no conflict
+      Service->>DB: insert untrusted drafts, audit events; COMMIT
+      MCP-->>Agent: created and reused versions
+    end
+  end
+```
+
+### Examples
+
+Create a new lineage draft:
+
+```json
+{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {
+  "name": "create_policy_draft",
+  "arguments": {
+    "mode": "new_lineage",
+    "name": "ssh-root-login-disabled",
+    "description": "Proposed by the remediation agent",
+    "policy_type": "custom_check",
+    "config": {"mode": "all", "rules": [{"field_name": "rootLogin",
+      "expression": "config.services.openssh.settings.PermitRootLogin == \"no\"",
+      "strict": true}]},
+    "requirement_mappings": [{"requirement_version_id": "<from list_compliance_requirements>",
+      "relationship": "implements", "coverage": "full"}]
+  }}}
+```
+
+The result names `version_id` and `draft_revision`. Send that revision with the
+next `update_policy_draft`.
+
+Import a reviewed document:
+
+```json
+{"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {
+  "name": "import_policy_draft",
+  "arguments": {
+    "document": "{\"schema\": \"urn:crystal-forge:policy-set:1\", \"policies\": [...]}",
+    "format": "json",
+    "expected_source_sha256": "<source_sha256 from preview_policy_import>"
+  }}}
+```
+
+### Reviewing agent drafts
+
+Agent drafts appear in the Policies view like other drafts. The drawer shows
+"via agent token <name>" under the owner (or "Imported by") value, and each
+revision in the Revisions tab shows the same marker; "(deleted)" replaces the
+name when none was recorded. An Admin reviews the configuration and mappings,
+edits the draft in the browser editor if needed (this increments
+`draft_revision`, so the agent must read the draft again), and then trusts and
+publishes it. Trust, publication and assignment remain browser Admin actions.
+An agent can update only drafts that its owner created; to change another
+user's draft or a published version, it derives a new draft.
+
 ## Unsupported features
 
 - MCP OAuth authorization and protected resource metadata.
@@ -411,8 +580,8 @@ arguments are never recorded.
 - Resources, prompts, sampling, elicitation, completions and logging.
 - JSON-RPC batches.
 - `poams:close`, risk acceptance, waivers, finding links and reopening.
-- Policy and bundle drafts, imports and impact preview (TASK-534.7,
-  TASK-534.8). XCCDF and STIG import through MCP.
+- Bundle drafts and compliance impact preview (TASK-534.8). XCCDF and STIG
+  import through MCP.
 - Trust, publication, assignment, enforcement-mode changes and deletion of
   security content, for every token.
 - An idempotency key for `request_cve_scan`; repeated requests return the active scan of the target instead.

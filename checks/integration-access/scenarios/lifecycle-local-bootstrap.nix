@@ -214,7 +214,10 @@ in
       # Scope lists are the approved catalogue as the Operator sees it: the three
       # TASK-534.3 read scopes are selectable and preselected; TASK-534.5 write
       # scopes and TASK-534.6 compliance read scopes are selectable and not
-      # preselected; TASK-534.6 authoring scopes are listed "Requires Admin";
+      # preselected; TASK-534.6 authoring scopes are listed "Requires Admin"
+      # (an Operator never holds them, even after TASK-534.7 released the
+      # policy authoring scopes for Admin owners); TASK-534.7 released
+      # compliance:preview for every role, selectable and not preselected;
       # unreleased scopes are listed "Not supported yet".
       # Environment names are lowercase because the Admin user PATCH matches
       # memberships by exact lowercased name.
@@ -229,10 +232,11 @@ in
         readScopes = ["cves:read" "poams:read" "provenance:read"];
         # TASK-534.5 released the write scopes for Operator and Admin owners.
         writeScopes = ["scans:request" "poams:write" "poams:verify"];
-        # TASK-534.6 compliance scopes.
-        optionalReadScopes = ["policies:read" "bundles:read"];
+        # TASK-534.6 compliance read scopes and the TASK-534.7 compliance:preview
+        # scope: selectable by every role, never preselected, no write.
+        optionalReadScopes = ["policies:read" "bundles:read" "compliance:preview"];
         adminOnlyScopes = ["policies:draft" "policies:import" "bundles:draft"];
-        unavailableScopes = ["poams:close" "compliance:preview"];
+        unavailableScopes = ["poams:close"];
       };
 
       # Authored request payloads for the admin-only operations. Each denied

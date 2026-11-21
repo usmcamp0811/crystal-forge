@@ -12,6 +12,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
@@ -28,10 +29,16 @@ use crate::handlers::api::auth_session::RequireCsrf;
 use crate::models::deployment_policies::validate_policy_type_config;
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
-    validate_policy_type_config_async,
 };
 use crate::queries::deployment_policies;
 use crate::queries::deployment_policies::PolicyDeleteOutcome;
+// The config validators and the policy type allowlist live in the policy
+// authoring service, which the MCP policy tools share (TASK-534.7).
+use crate::services::policy_authoring::{
+    SUPPORTED_POLICY_TYPES, validate_manual_mappings, validate_policy_config_async,
+};
+#[cfg(test)]
+use crate::services::policy_authoring::{policy_validation_status, validate_policy_config_fields};
 
 // =============================================================================
 // Response Models
@@ -75,239 +82,6 @@ fn default_limit() -> i64 {
     100
 }
 
-fn normalize_required_packages(packages: &[Value]) -> Result<Vec<String>, (StatusCode, String)> {
-    let mut normalized = packages
-        .iter()
-        .map(|entry| {
-            entry
-                .as_str()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(ToOwned::to_owned)
-                .ok_or((
-                    StatusCode::BAD_REQUEST,
-                    "config.packages must contain only non-empty strings".to_string(),
-                ))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if let Some(invalid) = normalized.iter().find(|pname| {
-        !pname
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphanumeric())
-            || !pname.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.' | b'_')
-            })
-    }) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "config.packages entry {invalid:?} is not a package pname; checks apply only to direct config.environment.systemPackages entries"
-            ),
-        ));
-    }
-    normalized.sort();
-    normalized.dedup();
-    if normalized.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "require_packages policy requires at least one package".to_string(),
-        ));
-    }
-    Ok(normalized)
-}
-
-fn validate_policy_config_fields(
-    policy_type: &str,
-    config: &Value,
-) -> Result<Value, (StatusCode, String)> {
-    if config.is_null() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Policy config cannot be null".to_string(),
-        ));
-    }
-
-    let obj = config.as_object().ok_or((
-        StatusCode::BAD_REQUEST,
-        "Policy config must be a JSON object".to_string(),
-    ))?;
-
-    if policy_type != "custom_check"
-        && let Some(strict) = obj.get("strict")
-    {
-        if !strict.is_boolean() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "config.strict must be a boolean when provided".to_string(),
-            ));
-        }
-    }
-
-    let mut validated_config = config.clone();
-
-    match policy_type {
-        "require_cf_agent" => {
-            if let Some(false) = obj.get("strict").and_then(|v| v.as_bool()) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "require_cf_agent policy must enforce config.strict = true".to_string(),
-                ));
-            }
-        }
-        "require_packages" => {
-            let packages = obj.get("packages").and_then(|v| v.as_array()).ok_or((
-                StatusCode::BAD_REQUEST,
-                "require_packages policy requires config.packages as a non-empty array".to_string(),
-            ))?;
-
-            if packages.is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "require_packages policy requires at least one package".to_string(),
-                ));
-            }
-
-            let normalized_packages = normalize_required_packages(packages)?;
-            if let Some(config_obj) = validated_config.as_object_mut() {
-                config_obj.insert(
-                    "packages".to_string(),
-                    Value::Array(normalized_packages.into_iter().map(Value::String).collect()),
-                );
-            }
-        }
-        "custom_check" => {
-            validated_config = crate::models::custom_check::validate_and_normalize_config(
-                config,
-                crate::models::custom_check::ExpressionBinding::Compatible,
-                false,
-            )
-            .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
-        }
-        "require_cve_check" => {
-            // Validate by attempting deserialization into CveCheckConfig
-            serde_json::from_value::<crate::models::deployment_policies::CveCheckConfig>(
-                config.clone(),
-            )
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid require_cve_check config: {}", e),
-                )
-            })?;
-
-            // Validate when_no_scan string value if present
-            if let Some(wns) = obj.get("when_no_scan").and_then(|v| v.as_str()) {
-                if wns != "block" && wns != "skip" {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        "config.when_no_scan must be \"block\" or \"skip\"".to_string(),
-                    ));
-                }
-            }
-        }
-        "time_window" => {
-            // Validate by attempting deserialization
-            let parsed = serde_json::from_value::<
-                crate::models::deployment_policies::TimeWindowConfig,
-            >(config.clone())
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid time_window config: {}", e),
-                )
-            })?;
-            crate::services::time_window_policy::validate_config(&parsed).map_err(|message| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid time_window config: {message}"),
-                )
-            })?;
-
-            // Validate action value
-            if let Some(action) = obj.get("action").and_then(|v| v.as_str()) {
-                if action != "block" && action != "warn" {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        "config.action must be \"block\" or \"warn\"".to_string(),
-                    ));
-                }
-            }
-        }
-        "require_approvals" => {
-            // Validate by attempting deserialization
-            serde_json::from_value::<crate::models::deployment_policies::ApprovalConfig>(
-                config.clone(),
-            )
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid require_approvals config: {}", e),
-                )
-            })?;
-
-            // Validate count > 0
-            if let Some(count) = obj.get("count").and_then(|v| v.as_u64()) {
-                if count == 0 {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        "config.count must be greater than 0".to_string(),
-                    ));
-                }
-            }
-        }
-        "canary_rollout" => {
-            // Validate by attempting deserialization
-            serde_json::from_value::<crate::models::deployment_policies::CanaryConfig>(
-                config.clone(),
-            )
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid canary_rollout config: {}", e),
-                )
-            })?;
-
-            // Validate percentage is between 1-100
-            if let Some(pct) = obj.get("percentage").and_then(|v| v.as_u64()) {
-                if pct == 0 || pct > 100 {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        "config.percentage must be between 1 and 100".to_string(),
-                    ));
-                }
-            }
-        }
-        "cve_threshold" => {
-            // Validate by attempting deserialization
-            serde_json::from_value::<crate::models::deployment_policies::CveThresholdConfig>(
-                config.clone(),
-            )
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid cve_threshold config: {}", e),
-                )
-            })?;
-
-            // Validate no_scan_behavior
-            if let Some(nsb) = obj.get("no_scan_behavior").and_then(|v| v.as_str()) {
-                if nsb != "block" && nsb != "skip" && nsb != "warn" {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        "config.no_scan_behavior must be \"block\", \"skip\", or \"warn\""
-                            .to_string(),
-                    ));
-                }
-            }
-        }
-        "composite" => {}
-        _ => {}
-    }
-
-    Ok(validated_config)
-}
-
 #[cfg(test)]
 fn validate_policy_config(
     policy_type: &str,
@@ -317,29 +91,6 @@ fn validate_policy_config(
     validate_policy_type_config(policy_type, &validated_config)
         .map_err(|message| (policy_validation_status(&message), message))?;
     Ok(validated_config)
-}
-
-async fn validate_policy_config_async(
-    policy_type: &str,
-    config: &Value,
-) -> Result<Value, (StatusCode, String)> {
-    let validated_config = validate_policy_config_fields(policy_type, config)?;
-    validate_policy_type_config_async(policy_type, &validated_config)
-        .await
-        .map_err(|message| (policy_validation_status(&message), message))?;
-    Ok(validated_config)
-}
-
-/// Returns 503 when the Nix parser gave no verdict and 400 otherwise.
-///
-/// An unavailable parser says nothing about the submitted policy, so the
-/// client must retry instead of editing a valid expression.
-fn policy_validation_status(message: &str) -> StatusCode {
-    if crate::models::deployment_policies::is_syntax_validation_unavailable(message) {
-        StatusCode::SERVICE_UNAVAILABLE
-    } else {
-        StatusCode::BAD_REQUEST
-    }
 }
 
 impl PaginationParams {
@@ -646,16 +397,7 @@ pub async fn create_deployment_policy(
     reject_builtin_policy_type(&request.policy_type)?;
 
     // Validate policy_type
-    let valid_types = [
-        "require_packages",
-        "custom_check",
-        "require_cve_check",
-        "time_window",
-        "require_approvals",
-        "canary_rollout",
-        "cve_threshold",
-        "composite",
-    ];
+    let valid_types = SUPPORTED_POLICY_TYPES;
     if !valid_types.contains(&request.policy_type.as_str()) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -698,38 +440,8 @@ pub async fn create_deployment_policy(
         normalise_cci_ids(&request.cci_ids)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid cci_ids: {e}")))?;
     }
-    for mapping in &request.requirement_mappings {
-        if !matches!(
-            mapping.relationship.as_str(),
-            "implements" | "supports" | "provides_evidence_for"
-        ) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Invalid mapping relationship".to_string(),
-            ));
-        }
-        if !matches!(mapping.coverage.as_str(), "full" | "partial") {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Invalid mapping coverage".to_string(),
-            ));
-        }
-        if mapping.provenance != "manual" {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Create-policy mappings must use manual provenance".to_string(),
-            ));
-        }
-    }
-    let mut requirement_ids = HashSet::new();
-    for mapping in &request.requirement_mappings {
-        if !requirement_ids.insert(mapping.requirement_version_id) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "A requirement version may only be mapped once".to_string(),
-            ));
-        }
-    }
+    validate_manual_mappings(&request.requirement_mappings)
+        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
 
     // Check for duplicate policy semantics (same type + same config).
     // Note: two policies with the same config but different SRG/CCI mappings
@@ -879,16 +591,7 @@ pub async fn update_deployment_policy(
 
     // Validate policy_type if provided
     if let Some(ref policy_type) = request.policy_type {
-        let valid_types = [
-            "require_packages",
-            "custom_check",
-            "require_cve_check",
-            "time_window",
-            "require_approvals",
-            "canary_rollout",
-            "cve_threshold",
-            "composite",
-        ];
+        let valid_types = SUPPORTED_POLICY_TYPES;
         if !valid_types.contains(&policy_type.as_str()) {
             return Err((
                 StatusCode::BAD_REQUEST,
