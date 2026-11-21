@@ -18,6 +18,7 @@ use axum::{Router, extract::DefaultBodyLimit, routing::post};
 use chrono::{Duration, Utc};
 use crystal_forge::api::models::{CreateAccessTokenRequest, UpdateComplianceBundleRequest};
 use crystal_forge::auth::authorization::RestrictedGrant;
+use crystal_forge::compliance::digest::refresh_policy_mapping_digest;
 use crystal_forge::handlers::agent_request::CFState;
 use crystal_forge::mcp;
 use crystal_forge::mcp::tools::{ToolCaller, ToolError, call_tool};
@@ -286,6 +287,11 @@ async fn draft_policy(pool: &PgPool, name: &str) -> (Uuid, Uuid) {
 async fn published_policy(pool: &PgPool, name: &str) -> (Uuid, Uuid) {
     let (policy_id, version_id) = draft_policy(pool, name).await;
     let mut tx = pool.begin().await.expect("begin publish");
+    // Publication computes the mapping digest first. An accepted version that
+    // keeps the `pending` sentinel would only accept a digest backfill later.
+    refresh_policy_mapping_digest(&mut tx, version_id)
+        .await
+        .expect("mapping digest");
     sqlx::query("UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1")
         .bind(policy_id)
         .execute(&mut *tx)
