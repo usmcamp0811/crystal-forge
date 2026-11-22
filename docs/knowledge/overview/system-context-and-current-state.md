@@ -27,7 +27,7 @@ sources:
 Crystal Forge is a distributed monitoring, build coordination, and compliance
 tooling system for NixOS fleets. Its goal is auditability and control of fleet
 configuration, including in regulated environments. The server crate is
-version 0.3.0.
+version 0.4.0.
 
 ## Upstream dependencies
 

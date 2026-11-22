@@ -1,7 +1,7 @@
 ---
 type: Concept
 title: Project introduction and key features
-description: States what Crystal Forge is, its v0.3.0 status, the key features by area (monitoring, build coordination, deployment, authentication), and short data model and security model summaries; open it for the feature-level pitch before the detailed concepts.
+description: States what Crystal Forge is, its v0.4.0 status, the key features by area (monitoring, build coordination, deployment, authentication), and short data model and security model summaries; open it for the feature-level pitch before the detailed concepts.
 tags:
   - crystal-forge
   - overview
@@ -19,7 +19,7 @@ sources:
 
 # Project introduction and key features
 
-> **Status:** partial. This concept holds the `What is Crystal Forge?`, `Key Features`, `Data Model`, and `Security Model` sections of the repository `README.md`. The feature list was written for v0.3.0. The STIG count and the `Security Model` bullets are corrected below. The deployment policy names and the cache types were not re-checked in this pass.
+> **Status:** partial. This concept holds the `What is Crystal Forge?`, `Key Features`, `Data Model`, and `Security Model` sections of the repository `README.md`. The feature list was written for v0.3.0 and extended for v0.4.0 from the v0.4.0 changelog (TASK-540). The STIG module count, deployment policy names, and deployment strategy names were rechecked against the code at commit dd5ff524. The STIG count and the `Security Model` bullets are corrected below. The deployment policy names and the cache types were not re-checked in this pass.
 
 > **Status:** historical. The original `README.md` header at commit 3b23d36f used the logo path shown below. That path (`../docs/cf-logo-transparent.png`) was stale because the logo is at `docs/cf-logo-transparent.png`. The migrated `README.md` uses `./docs/cf-logo-transparent.png`.
 >
@@ -31,7 +31,7 @@ sources:
 
 Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-built for NixOS fleets. It provides cryptographically-verified system state tracking, automated build coordination, CVE scanning, and policy-based deployment management—built toward the goal of auditability and control in regulated environments.
 
-**Current Status**: v0.3.0 — The core backend is solid and the web UI covers the main workflows, but the UI still has rough edges and a number of planned features aren't implemented yet. Aimed at homelabbers and NixOS enthusiasts who want to run it and help shape it; the compliance and regulated-environment story is still in progress.
+**Current Status**: v0.4.0 — The core backend is solid. The web UI covers the main workflows and follows the updated design in its main views. Some rough edges remain and a number of planned features are not implemented yet. Aimed at homelabbers and NixOS enthusiasts who want to run it and help shape it; the compliance and regulated-environment story is still in progress.
 
 ## Key Features
 
@@ -43,6 +43,8 @@ Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-
 - **Intelligent heartbeats**: Distinguish between liveness signals and actual state changes
 - **Agent health monitoring**: Track agent connectivity and state reporting frequency
 - **STIG Compliance Modules**: Declarative security controls. The flake exports 25 control modules and four presets (`high`, `medium`, `low`, `off`). See [STIG modules](../compliance/stig-modules.md).
+- **Compliance interchange and versioning**: CF-XCCDF interchange, versioned compliance content, and cross-framework reusable requirements. See [CF-XCCDF interchange operator guide](../compliance/cf-xccdf-interchange-operator-guide.md).
+- **Generated NixOS modules**: `cf-nixos-module` generates standalone NixOS modules from exported policies and bundles. See [NixOS module generation](../compliance/nixos-module-generation.md).
 
 ### Build Coordination
 
@@ -52,6 +54,8 @@ Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-
 - **CVE scanning**: Automated vulnerability assessment with vulnix integration
 - **Resource isolation**: SystemD-scoped builds with configurable memory and CPU limits
 - **Build queue management**: Track in-progress and completed builds with status visibility
+- **Niks3 caches**: Public and private Niks3 caches. See [Niks3 cache](../caches/niks3-cache.md).
+- **CVE scan loop**: A server-side loop runs periodic rescans, and a fleet rescan queues scans on demand.
 
 ### Deployment Management
 
@@ -69,6 +73,7 @@ Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-
 - **Dev mode**: Bypass authentication for local development
 - **RBAC**: Admin, Operator, Viewer roles with permission guards
 - **Session security**: HttpOnly secure cookies, CSRF protection, JIT provisioning
+- **Access tokens**: Signed-in users create their own tokens. An optional read-only MCP endpoint admits them. See [Owner access token service](../security/access-token-service.md) and [MCP server](../security/mcp-server.md).
 
 ## Data Model
 
@@ -96,6 +101,7 @@ Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-
 
 - [Crystal Forge system overview](system-overview.md)
 - [Ecosystem architecture summary](../architecture/ecosystem-architecture-summary.md)
+- [Crystal Forge v0.4.0 release notes](release-notes-v0-4-0.md)
 - [Crystal Forge v0.3.0 release notes](release-notes-v0-3-0.md)
 - [Release roadmap and milestones](release-roadmap-and-milestones.md)
 - [Core entities and relationships](../data-model/core-entities-and-relationships.md)

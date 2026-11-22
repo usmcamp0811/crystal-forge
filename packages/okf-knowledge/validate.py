@@ -448,7 +448,7 @@ def check_manifest(report: Report, bundle: Path, repo_root: Path) -> None:
     # Files explicitly kept outside the bundle (per okf-conventions.md)
     ROOT_KEPT = {
         "AGENTS.md", "CLAUDE.md", "CLA.md", "README.md",
-        "CONTRIBUTING.md", "FRONTEND_TODO.md", "ROADMAP.md", "TESTING.md",
+        "CONTRIBUTING.md", "CHANGELOG.md", "FRONTEND_TODO.md", "ROADMAP.md", "TESTING.md",
     }
     for root, dirs, files in os.walk(repo_root):
         rel_root = Path(root).relative_to(repo_root)

@@ -14,11 +14,12 @@ state tracking, automated build coordination, CVE scanning, and policy-based
 deployment management, built toward the goal of auditability and control in
 regulated environments.
 
-**Current status**: v0.3.0. The core backend is solid and the web UI covers the
-main workflows, but the UI still has rough edges and a number of planned
-features are not implemented yet. Crystal Forge is aimed at homelabbers and
-NixOS enthusiasts who want to run it and help shape it. The compliance and
-regulated-environment story is still in progress.
+**Current status**: v0.4.0. The core backend is solid. The web UI covers the
+main workflows and follows the updated design in its main views. Some rough
+edges remain and a number of planned features are not implemented yet. Crystal
+Forge is aimed at homelabbers and NixOS enthusiasts who want to run it and help
+shape it. The compliance and regulated-environment story is still in progress.
+See the [changelog](./CHANGELOG.md) for what changed since v0.3.1.
 
 ![Dashboard](./docs/screenshots/06-dashboard.png)
 
@@ -27,15 +28,18 @@ regulated-environment story is still in progress.
 - **System monitoring**: Ed25519-signed agent reports, system fingerprinting,
   drift detection, and heartbeat tracking.
 - **Build coordination**: Automatic NixOS evaluation from Git commits,
-  parallel builds with resource limits, and binary cache push (S3, Attic, or
-  standard Nix caches).
-- **CVE scanning**: Automated vulnerability assessment with vulnix.
+  parallel builds with resource limits, and binary cache push (S3, Attic,
+  Niks3, or standard Nix caches).
+- **CVE scanning**: Automated vulnerability assessment with vulnix, periodic
+  rescans, and fleet rescans.
 - **Deployment management**: Per-system deployment policies and strategies,
   fleet tracking, and generation verification.
-- **Compliance**: Declarative STIG modules for NixOS, compliance bundles, and
-  POA&M tracking.
+- **Compliance**: Declarative STIG modules for NixOS, compliance bundles,
+  CF-XCCDF interchange with versioned content, POA&M tracking, and standalone
+  NixOS modules generated from exported policies.
 - **Web UI and access control**: A Dioxus dashboard with OIDC, local, or dev
-  authentication and Admin, Operator, and Viewer roles.
+  authentication, Admin, Operator, and Viewer roles, and owner access tokens
+  with an optional read-only MCP endpoint.
 
 ## Documentation
 
@@ -57,6 +61,7 @@ bundle in [docs/knowledge/](./docs/knowledge/). Start at the
 | NixOS module example | [NixOS module configuration quick start](./docs/knowledge/operations/nixos-module-configuration.md) |
 | Sign-in configuration | [Authentication modes and OIDC configuration examples](./docs/knowledge/operations/authentication-modes-and-oidc-configuration.md) |
 | Local development and tests | [Development environment commands](./docs/knowledge/operations/development-environment-commands.md) |
+| What changed in v0.4.0 | [Crystal Forge v0.4.0 release notes](./docs/knowledge/overview/release-notes-v0-4-0.md) and the [changelog](./CHANGELOG.md) |
 | v0.3.0 release notes | [Crystal Forge v0.3.0 release notes](./docs/knowledge/overview/release-notes-v0-3-0.md) |
 | Release plan | [Release roadmap and active milestones](./docs/knowledge/overview/release-roadmap-and-milestones.md) |
 

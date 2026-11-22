@@ -2,9 +2,10 @@
 
 `version-transition` implements the owner-approved TASK-490.23 D2 procedure.
 The predecessor is tag `v0.3.1`, commit
-`f9dd6b9c79530d3f911203645207bf6251552aba`. The release's Cargo manifest says
-`0.3.0`. The scenario records both identities and checks running executables
-against the genuine package paths. A version string alone is insufficient.
+`f9dd6b9c79530d3f911203645207bf6251552aba`. The predecessor's Cargo manifest
+says `0.3.0`, so its manifest version does not identify it. The scenario
+records both identities and checks running executables against the genuine
+package paths. A version string alone is insufficient.
 
 ## Preparation and execution
 
