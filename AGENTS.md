@@ -121,7 +121,7 @@ Before the first implementation write:
 1. Resolve the user-requested task and read its acceptance criteria, non-goals, dependencies, risk, and verification plan.
 2. Confirm it is sprint-ready, in `To Do`, and has no active lock.
 3. Discover the integration worktrees and verify `main` and `dev` are clean.
-4. Create a task branch and worktree from the designated integration branch, normally `dev`.
+4. Create a task branch and worktree from the designated integration branch, normally `dev`. For a slice of a stacked delivery, use the predecessor slice's branch instead; see "Stacked merge requests".
 5. Verify the new worktree, branch, base, and status.
 6. Move the task to `In Progress` and add its lock.
 7. State a concise preflight containing the task, worktree, branch/base, intended scope, and verification plan.
@@ -534,6 +534,22 @@ Before opening an MR:
 Then open the MR, move the task to `Review`, add the MR link to the task, and remove the lock or mark it as awaiting review according to Backlog.md conventions.
 
 After the MR is merged, remove the task worktree, prune stale worktree metadata if necessary, and move the task to `Done`. Do not report the task as complete merely because implementation was pushed.
+
+### Stacked merge requests
+
+Split large work into a stack of small, dependent MRs. A large task is a parent task with milestones, or work that would put several independently reviewable changes into one MR. Examples are a schema and service layer, a UI on top of that service, and a protocol endpoint on top of both. One MR MUST NOT carry more than one reviewable slice.
+
+- **One slice per task.** Each slice is its own child backlog task (for example `TASK-534.3`, `TASK-534.4`) with its own acceptance criteria, worktree, branch, and MR. Create the child task before starting the slice.
+- **Branch from the predecessor.** Create the slice branch from the head of the predecessor slice's branch, not from `dev`. The first slice branches from `dev`.
+- **Target the predecessor.** Open each slice MR against the predecessor's branch, so the diff shows only that slice. Only the bottom MR targets `dev`. Open slice MRs as Draft.
+- **State the stack.** Each MR description names its position, its predecessor MR, and the retarget rule: "Stacked on !N; retarget to `dev` after !N merges."
+- **Verify each slice at its own head.** Record results per slice in that slice's task. Run every affected test target in full, not a single selected test; a selection can hide failures that CI finds in the rest of the target.
+- **Keep the stack current.** After a change to a lower slice, rebase each slice above it in order and push with `--force-with-lease` pinned to the previous remote head. Never force-push without a lease. Check that the dependent's diff against the old head contains only the intended change.
+- **Merge from the bottom.** Merge the bottom MR first. Then retarget the next MR to `dev`, rebase it onto `dev`, and verify it again before merge. Do not merge a slice whose predecessor is not merged.
+- **Migrations.** Number each slice's migrations after the predecessor's migrations. Never renumber, rename, or edit a migration after it is committed, even in an unmerged slice: slices are deployed to the dev server, and a changed migration can break that database. Before you add a migration, choose the next number after the highest number in `dev`, in every open MR, and in every active worktree, so that numbers do not collide. If a collision happens anyway, stop and ask the user. Numbering continues upward until a future 1.0.0 release consolidates the migrations.
+- **Follow-up work.** Record review findings that a slice does not fix as Backlog tasks, and reference them in the slice's known limits instead of growing the slice.
+
+Ask the user before starting a stack deeper than three unmerged MRs.
 
 ## Reporting
 
