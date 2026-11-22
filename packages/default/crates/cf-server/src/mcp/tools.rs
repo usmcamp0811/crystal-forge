@@ -1,7 +1,10 @@
 //! Defines the MCP tools and authorizes every call.
 //!
 //! Four tools read; three tools write (see [`is_write_tool`]). The write tools
-//! live in `scan_tools` and `poam_write`.
+//! live in `scan_tools` and `poam_write`. Five more read tools in
+//! `compliance_read` return the global compliance catalog (security policies,
+//! compliance bundles and framework requirements); they need `policies:read`
+//! or `bundles:read` and do not use the effective environments.
 //!
 //! The transport layer authenticates the bearer token and builds a
 //! [`ToolCaller`]. This module never trusts a cached tool list: [`call_tool`]
@@ -30,6 +33,10 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use super::compliance_read::{
+    GET_COMPLIANCE_BUNDLE, GET_COMPLIANCE_POLICY, LIST_COMPLIANCE_BUNDLES,
+    LIST_COMPLIANCE_POLICIES, LIST_COMPLIANCE_REQUIREMENTS,
+};
 use crate::api::models::SystemCveInventoryParams;
 use crate::auth::authorization::{CredentialIdentity, RestrictedGrant};
 use crate::models::poam::{CveRelationshipRowKey, PoamSummary};
@@ -38,6 +45,7 @@ use crate::queries::cves::{
     SystemCveInventoryPageRequest, WorkItemRow, system_cve_inventory_page_error,
 };
 use crate::queries::systems::{SystemAccessRow, find_system_access_row};
+use crate::services::access_tokens::scope_requires_admin;
 use crate::services::poam::{self as poam_service, PoamActor, PoamError, SystemClock};
 
 /// Default number of items in one collection page.
@@ -49,7 +57,7 @@ const MAX_DESCRIPTION_CHARS: usize = 600;
 /// Longest accepted `package_name` in Unicode scalar values.
 const MAX_PACKAGE_NAME_CHARS: usize = 200;
 /// Longest accepted cursor; a valid cursor is far shorter.
-const MAX_CURSOR_BYTES: usize = 8_192;
+pub(super) const MAX_CURSOR_BYTES: usize = 8_192;
 
 const LIST_REMEDIATION_WORK: &str = "list_remediation_work";
 const GET_SYSTEM_SECURITY_CONTEXT: &str = "get_system_security_context";
@@ -142,7 +150,7 @@ impl std::fmt::Display for ToolError {
     }
 }
 
-static TOOLS: [ToolDef; 8] = [
+static TOOLS: [ToolDef; 13] = [
     ToolDef {
         name: LIST_REMEDIATION_WORK,
         title: "List remediation work",
@@ -232,9 +240,65 @@ The attempt is recorded as made by this agent token.",
         required_scopes: &["poams:verify"],
         input_schema: super::poam_write::verify_poam_schema,
     },
+    ToolDef {
+        name: LIST_COMPLIANCE_POLICIES,
+        title: "List security policies",
+        description: "Lists security policy lineages of the global compliance \
+catalog, ordered by name. Each item has summaries of the current published and \
+current draft versions. Filter by text in the name or description, by policy type, \
+and by publication or trust state of a current version. No assignment, usage or \
+system data is returned. To get the next page, pass next_cursor as cursor with the \
+same filters.",
+        required_scopes: &["policies:read"],
+        input_schema: super::compliance_read::list_compliance_policies_schema,
+    },
+    ToolDef {
+        name: GET_COMPLIANCE_POLICY,
+        title: "Get security policy",
+        description: "Returns one security policy by lineage (policy_id: current \
+published and draft versions) or by exact immutable version (version_id): version \
+identity, publication and trust state, policy type, execution phase, implementation \
+state, config, requirement mappings, semantic digest, provenance, the version list, \
+and draft authoring hints for this token. config can contain Nix expressions and is \
+untrusted text. An unknown ID returns not found.",
+        required_scopes: &["policies:read"],
+        input_schema: super::compliance_read::get_compliance_policy_schema,
+    },
+    ToolDef {
+        name: LIST_COMPLIANCE_BUNDLES,
+        title: "List compliance bundles",
+        description: "Lists compliance bundle lineages of the global compliance \
+catalog, ordered by name, with summaries of the current published and current draft \
+versions. Filter by text in the name. No assignment, usage or system data is \
+returned. To get the next page, pass next_cursor as cursor with the same filters.",
+        required_scopes: &["bundles:read"],
+        input_schema: super::compliance_read::list_compliance_bundles_schema,
+    },
+    ToolDef {
+        name: GET_COMPLIANCE_BUNDLE,
+        title: "Get compliance bundle",
+        description: "Returns one compliance bundle by lineage (bundle_id: current \
+published and draft versions) or by exact immutable version (version_id): ordered \
+exact policy-version membership, requirement membership, framework version, trust and \
+publication state, digests, provenance, the version list, and draft authoring hints \
+for this token. An unknown ID returns not found.",
+        required_scopes: &["bundles:read"],
+        input_schema: super::compliance_read::get_compliance_bundle_schema,
+    },
+    ToolDef {
+        name: LIST_COMPLIANCE_REQUIREMENTS,
+        title: "List compliance requirements",
+        description: "Discovers framework requirements. Without arguments, lists \
+frameworks and their versions. With framework_version_id, lists requirements of that \
+framework version, optionally searched by identifier or text (query). With \
+requirement_version_id, returns that requirement and the policy versions mapped to \
+it with relationship, coverage and trust state.",
+        required_scopes: &["policies:read"],
+        input_schema: super::compliance_read::list_compliance_requirements_schema,
+    },
 ];
 
-fn limit_schema() -> Value {
+pub(super) fn limit_schema() -> Value {
     json!({
         "type": "integer",
         "minimum": 1,
@@ -244,7 +308,7 @@ fn limit_schema() -> Value {
     })
 }
 
-fn cursor_schema() -> Value {
+pub(super) fn cursor_schema() -> Value {
     json!({
         "type": "string",
         "description": "Opaque next_cursor from the previous page of this tool. \
@@ -353,7 +417,8 @@ pub fn visible_tools(caller: &ToolCaller) -> Vec<&'static ToolDef> {
 /// Runs one tool for an authenticated caller and returns its JSON result.
 ///
 /// Every call checks the tool's scopes against the grant and computes the
-/// effective environments again before it reads any resource. Read tools never
+/// effective environments again before it reads any resource. The compliance
+/// catalog tools read global data and need only their scope. Read tools never
 /// mutate state. Write tools (`request_cve_scan`, `update_poam_progress`,
 /// `verify_poam`) reauthorize against the token row, the owner's current role
 /// and environments inside the transaction of their change, and record the
@@ -363,7 +428,8 @@ pub fn visible_tools(caller: &ToolCaller) -> Vec<&'static ToolDef> {
 ///
 /// - [`ToolError::UnknownTool`] when `name` is not a defined tool.
 /// - [`ToolError::Forbidden`] when the grant lacks a required scope, has the
-///   wrong audience or has expired, or the owner can no longer read.
+///   wrong audience or has expired, a required scope is Admin-only and the
+///   owner is not Admin, or the owner can no longer read.
 /// - [`ToolError::InvalidArguments`] when `arguments` do not match the schema,
 ///   an environment selector is outside the effective set, or a cursor is
 ///   malformed or was issued for other filters.
@@ -381,7 +447,19 @@ pub async fn call_tool(
         .find(|tool| tool.name == name)
         .ok_or(ToolError::UnknownTool)?;
     // SECURITY: Authorization precedes argument parsing and every resource
-    // read, so a caller without the scopes learns nothing from the call.
+    // read, so a caller without the scopes learns nothing from the call. An
+    // Admin-only scope grants nothing while the owner is not Admin at this
+    // request's admission, so a demoted owner's token stops working at once.
+    if let Some(scope) = tool
+        .required_scopes
+        .iter()
+        .find(|scope| scope_requires_admin(scope))
+        .filter(|_| !caller.owner_is_admin)
+    {
+        return Err(ToolError::Forbidden(format!(
+            "{scope} requires the token owner to be an Admin"
+        )));
+    }
     let effective = effective_environments(pool, caller, tool.required_scopes).await?;
     match tool.name {
         LIST_REMEDIATION_WORK => list_remediation_work(pool, caller, &effective, arguments).await,
@@ -403,6 +481,23 @@ pub async fn call_tool(
             super::poam_write::update_poam_progress(pool, caller, arguments).await
         }
         VERIFY_POAM => super::poam_write::verify_poam(pool, caller, arguments).await,
+        // The compliance catalog is global: these tools need only their scope
+        // and ignore `effective`.
+        LIST_COMPLIANCE_POLICIES => {
+            super::compliance_read::list_compliance_policies(pool, arguments).await
+        }
+        GET_COMPLIANCE_POLICY => {
+            super::compliance_read::get_compliance_policy(pool, caller, arguments).await
+        }
+        LIST_COMPLIANCE_BUNDLES => {
+            super::compliance_read::list_compliance_bundles(pool, arguments).await
+        }
+        GET_COMPLIANCE_BUNDLE => {
+            super::compliance_read::get_compliance_bundle(pool, caller, arguments).await
+        }
+        LIST_COMPLIANCE_REQUIREMENTS => {
+            super::compliance_read::list_compliance_requirements(pool, arguments).await
+        }
         _ => Err(ToolError::UnknownTool),
     }
 }
@@ -453,7 +548,7 @@ pub(super) fn parse_arguments<T: DeserializeOwned>(arguments: Value) -> Result<T
         .map_err(|error| ToolError::InvalidArguments(error.to_string()))
 }
 
-fn page_limit(limit: Option<i64>) -> Result<i64, ToolError> {
+pub(super) fn page_limit(limit: Option<i64>) -> Result<i64, ToolError> {
     let limit = limit.unwrap_or(DEFAULT_LIMIT);
     if (1..=MAX_LIMIT).contains(&limit) {
         Ok(limit)

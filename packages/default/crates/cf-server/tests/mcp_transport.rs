@@ -523,7 +523,17 @@ async fn tools_list_shows_only_tools_allowed_by_token_scopes(pool: PgPool) {
         .await;
     assert!(tool_names(&reply).is_empty());
 
-    let all = issue_token(&pool, &["cves:read", "poams:read", "provenance:read"]).await;
+    let all = issue_token(
+        &pool,
+        &[
+            "cves:read",
+            "poams:read",
+            "provenance:read",
+            "policies:read",
+            "bundles:read",
+        ],
+    )
+    .await;
     let reply = server.rpc(&all.secret, "tools/list", json!({})).await;
     // Every read tool, and no write tool: write tools need a write scope.
     let expected: BTreeSet<String> = mcp::MCP_TOOL_NAMES
@@ -531,7 +541,7 @@ async fn tools_list_shows_only_tools_allowed_by_token_scopes(pool: PgPool) {
         .filter(|name| !mcp::tools::is_write_tool(name))
         .map(|name| (*name).to_owned())
         .collect();
-    assert_eq!(expected.len(), 5);
+    assert_eq!(expected.len(), 10);
     assert_eq!(tool_names(&reply), expected);
 }
 
@@ -590,7 +600,7 @@ async fn admin_status_reports_configuration_and_requires_admin(pool: PgPool) {
         body["phase"],
         "read and write (write tools require a token write scope)"
     );
-    assert_eq!(body["tools"].as_array().map(Vec::len), Some(8));
+    assert_eq!(body["tools"].as_array().map(Vec::len), Some(13));
     assert_eq!(body["access_tokens_enabled"], true);
     assert_eq!(body["max_token_lifetime_days"], 90);
     assert_eq!(body["active_token_count"], 1);

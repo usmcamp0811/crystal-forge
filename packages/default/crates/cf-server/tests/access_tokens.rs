@@ -981,6 +981,71 @@ async fn viewer_cannot_select_operator_scopes_or_unassigned_environments(pool: P
 }
 
 const WRITE_SCOPES: [&str; 3] = ["scans:request", "poams:write", "poams:verify"];
+const COMPLIANCE_READ_SCOPES: [&str; 2] = ["policies:read", "bundles:read"];
+const AUTHORING_SCOPES: [&str; 3] = ["policies:draft", "policies:import", "bundles:draft"];
+
+#[sqlx::test]
+async fn compliance_read_scopes_issue_to_viewers_and_authoring_scopes_need_admin(pool: PgPool) {
+    let api = start(&pool).await;
+    let env = environment(&pool, "compliance").await;
+    let viewer = member(&pool, AuthRole::Viewer, &[env]).await;
+    let operator = member(&pool, AuthRole::Operator, &[env]).await;
+    let admin_user = actor(&pool, AuthRole::Admin).await;
+
+    // The database accepts the new scope names: a Viewer token stores both
+    // compliance read scopes.
+    let created = api
+        .create(
+            &viewer,
+            &create_body("viewer compliance", &[env], &COMPLIANCE_READ_SCOPES, 30),
+        )
+        .await;
+    assert_eq!(created.status, 201, "{}", created.text);
+    let granted: Vec<String> = sqlx::query_scalar(
+        "SELECT scope FROM api_access_token_scopes s
+           JOIN api_access_tokens t ON t.id = s.token_id
+          WHERE t.name = 'viewer compliance' ORDER BY scope",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read stored scopes");
+    assert_eq!(granted, ["bundles:read", "policies:read"]);
+
+    // An authoring scope is refused with the role reason for non-Admins and
+    // with the release reason for an Admin; nothing is issued.
+    for scope in AUTHORING_SCOPES {
+        for (who, reason) in [
+            (&viewer, "Requires Admin"),
+            (&operator, "Requires Admin"),
+            (&admin_user, "Not supported yet"),
+        ] {
+            let denied = api
+                .create(
+                    who,
+                    &create_body(
+                        &format!("author {scope} {reason}"),
+                        &[env],
+                        &["policies:read", scope],
+                        30,
+                    ),
+                )
+                .await;
+            assert_field_error(&denied, "scopes");
+            let message = denied.body["details"]["fields"]["scopes"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(message.contains(reason), "{scope}: {message}");
+        }
+    }
+    let preview = api
+        .create(
+            &viewer,
+            &create_body("preview", &[env], &["compliance:preview"], 30),
+        )
+        .await;
+    assert_field_error(&preview, "scopes");
+    assert_eq!(token_count(&pool).await, 1);
+}
 
 async fn mark_production(pool: &PgPool, environment: Uuid) {
     sqlx::query("UPDATE environments SET is_production = TRUE WHERE id = $1")
@@ -2671,7 +2736,7 @@ async fn policy_reports_limits_selectable_environments_and_role_scopes(pool: PgP
     assert_eq!(body["lifetime_options_days"], json!([7, 30, 90]));
     assert_eq!(body["max_active_tokens"], 20);
     assert!(body["create_blocked"].is_null());
-    assert_eq!(body["scopes"].as_array().map(Vec::len), Some(7));
+    assert_eq!(body["scopes"].as_array().map(Vec::len), Some(13));
 
     // Viewer: only assigned active environments and the read scopes.
     assert_eq!(policy_environment_ids(&viewer_policy), [env_a.to_string()]);
@@ -2727,6 +2792,37 @@ async fn policy_reports_limits_selectable_environments_and_role_scopes(pool: PgP
         );
     }
     assert!(!admin_ids.contains(&inactive.to_string()));
+
+    // Compliance scopes (TASK-534.6). The read scopes are selectable by every
+    // role and never preselected. The authoring scopes report the role reason
+    // before the release reason, so only an Admin sees "Not supported yet".
+    for policy in [&viewer_policy, &operator_policy, &admin_policy] {
+        for scope in COMPLIANCE_READ_SCOPES {
+            let entry = policy_scope(policy, scope);
+            assert_eq!(entry["available"], true, "{scope}");
+            assert_eq!(entry["default_selected"], false, "{scope}");
+            assert!(entry["unavailable_reason"].is_null(), "{scope}");
+        }
+        let preview = policy_scope(policy, "compliance:preview");
+        assert_eq!(preview["available"], false);
+        assert_eq!(preview["unavailable_reason"], "Not supported yet");
+    }
+    for scope in AUTHORING_SCOPES {
+        for (policy, reason) in [
+            (&viewer_policy, "Requires Admin"),
+            (&operator_policy, "Requires Admin"),
+            (&admin_policy, "Not supported yet"),
+        ] {
+            let entry = policy_scope(policy, scope);
+            assert_eq!(entry["available"], false, "{scope}");
+            assert_eq!(entry["default_selected"], false, "{scope}");
+            assert_eq!(entry["unavailable_reason"], reason, "{scope}");
+        }
+    }
+    assert_eq!(
+        policy_scope(&operator_policy, "policies:read")["label"],
+        "Read security policies"
+    );
 
     // Local owners report no OIDC ownership and no entitlement window.
     assert_eq!(body["oidc_owned"], false);

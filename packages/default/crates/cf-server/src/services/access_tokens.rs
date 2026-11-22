@@ -188,6 +188,9 @@ struct ScopeSpec {
     label: &'static str,
     default_selected: bool,
     requires_operator: bool,
+    /// The owner must hold Admin to receive the scope and, at every call, to
+    /// use it. See [`scope_requires_admin`].
+    requires_admin: bool,
     released: bool,
 }
 
@@ -198,12 +201,19 @@ struct ScopeSpec {
 /// released for Operator and Admin owners (TASK-534.5). `poams:close` stays
 /// unreleased. Every scope that does not end in `:read` is a write scope; see
 /// [`is_write_scope`].
-const SCOPES: [ScopeSpec; 7] = [
+///
+/// The compliance scopes come from TASK-534.6. `policies:read` and
+/// `bundles:read` are released for every role. The authoring scopes
+/// `policies:draft`, `policies:import` and `bundles:draft` are Admin-only and
+/// unreleased until TASK-534.7 and TASK-534.8; `compliance:preview` is open to
+/// every role and unreleased until TASK-534.8.
+const SCOPES: [ScopeSpec; 13] = [
     ScopeSpec {
         scope: "cves:read",
         label: "Read CVEs and systems",
         default_selected: true,
         requires_operator: false,
+        requires_admin: false,
         released: true,
     },
     ScopeSpec {
@@ -211,6 +221,7 @@ const SCOPES: [ScopeSpec; 7] = [
         label: "Read POA&Ms",
         default_selected: true,
         requires_operator: false,
+        requires_admin: false,
         released: true,
     },
     ScopeSpec {
@@ -218,6 +229,7 @@ const SCOPES: [ScopeSpec; 7] = [
         label: "Read authorized provenance",
         default_selected: true,
         requires_operator: false,
+        requires_admin: false,
         released: true,
     },
     ScopeSpec {
@@ -225,6 +237,7 @@ const SCOPES: [ScopeSpec; 7] = [
         label: "Request CVE scans",
         default_selected: false,
         requires_operator: true,
+        requires_admin: false,
         released: true,
     },
     ScopeSpec {
@@ -232,6 +245,7 @@ const SCOPES: [ScopeSpec; 7] = [
         label: "Update POA&M progress",
         default_selected: false,
         requires_operator: true,
+        requires_admin: false,
         released: true,
     },
     ScopeSpec {
@@ -239,6 +253,7 @@ const SCOPES: [ScopeSpec; 7] = [
         label: "Verify POA&M evidence",
         default_selected: false,
         requires_operator: true,
+        requires_admin: false,
         released: true,
     },
     ScopeSpec {
@@ -246,12 +261,72 @@ const SCOPES: [ScopeSpec; 7] = [
         label: "Close POA&Ms",
         default_selected: false,
         requires_operator: true,
+        requires_admin: false,
+        released: false,
+    },
+    ScopeSpec {
+        scope: "policies:read",
+        label: "Read security policies",
+        default_selected: false,
+        requires_operator: false,
+        requires_admin: false,
+        released: true,
+    },
+    ScopeSpec {
+        scope: "policies:draft",
+        label: "Draft security policies",
+        default_selected: false,
+        requires_operator: false,
+        requires_admin: true,
+        released: false,
+    },
+    ScopeSpec {
+        scope: "policies:import",
+        label: "Import security policies",
+        default_selected: false,
+        requires_operator: false,
+        requires_admin: true,
+        released: false,
+    },
+    ScopeSpec {
+        scope: "bundles:read",
+        label: "Read compliance bundles",
+        default_selected: false,
+        requires_operator: false,
+        requires_admin: false,
+        released: true,
+    },
+    ScopeSpec {
+        scope: "bundles:draft",
+        label: "Draft compliance bundles",
+        default_selected: false,
+        requires_operator: false,
+        requires_admin: true,
+        released: false,
+    },
+    ScopeSpec {
+        scope: "compliance:preview",
+        label: "Preview compliance impact",
+        default_selected: false,
+        requires_operator: false,
+        requires_admin: false,
         released: false,
     },
 ];
 
 fn scope_spec(scope: &str) -> Option<&'static ScopeSpec> {
     SCOPES.iter().find(|spec| spec.scope == scope)
+}
+
+/// Reports whether a scope is usable only while the token owner holds Admin.
+///
+/// Issuing and rotation reject such a scope for a non-Admin owner. The MCP
+/// dispatcher also calls this function on every tool call, so a token keeps
+/// the stored scope after its owner loses Admin, but the scope grants nothing
+/// until the owner is Admin again. Unknown scopes return `false`; they are
+/// never granted.
+pub fn scope_requires_admin(scope: &str) -> bool {
+    scope_spec(scope).is_some_and(|spec| spec.requires_admin)
 }
 
 /// Reports whether a scope lets a token request a write. The web UI uses the
@@ -264,8 +339,15 @@ fn is_write_scope(scope: &str) -> bool {
 /// combined without `confirm_production_write: true`.
 const PRODUCTION_WRITE_MESSAGE: &str = "Confirm the production write access.";
 
-fn unavailable_reason(spec: &ScopeSpec, can_operate: bool) -> Option<&'static str> {
-    if spec.requires_operator && !can_operate {
+/// Returns why the owner cannot select a scope now, or `None` when it can.
+///
+/// The role reasons come before "Not supported yet", so a non-Admin owner sees
+/// "Requires Admin" for an unreleased Admin-only scope: releasing the scope
+/// later does not make it available to that owner.
+fn unavailable_reason(spec: &ScopeSpec, can_operate: bool, is_admin: bool) -> Option<&'static str> {
+    if spec.requires_admin && !is_admin {
+        Some("Requires Admin")
+    } else if spec.requires_operator && !can_operate {
         Some("Requires Operator")
     } else if !spec.released {
         Some("Not supported yet")
@@ -397,7 +479,7 @@ pub async fn policy(
     let scopes = SCOPES
         .iter()
         .map(|spec| {
-            let reason = unavailable_reason(spec, can_operate);
+            let reason = unavailable_reason(spec, can_operate, access.is_admin());
             AccessTokenPolicyScopeDto {
                 scope: spec.scope.to_owned(),
                 label: spec.label.to_owned(),
@@ -598,7 +680,7 @@ fn check_grant(
         .iter()
         .filter_map(|scope| match scope_spec(scope) {
             None => Some("unknown scope".to_owned()),
-            Some(spec) => unavailable_reason(spec, can_operate)
+            Some(spec) => unavailable_reason(spec, can_operate, access.is_admin())
                 .map(|reason| format!("{} is unavailable: {reason}", spec.scope)),
         })
         .collect();
@@ -1115,7 +1197,10 @@ pub async fn detail(
             .map(|scope| AccessTokenEffectiveScopeDto {
                 scope: scope.clone(),
                 permitted: owner_usable
-                    && scope_spec(scope).is_some_and(|spec| !spec.requires_operator || can_operate),
+                    && scope_spec(scope).is_some_and(|spec| {
+                        (!spec.requires_operator || can_operate)
+                            && (!spec.requires_admin || access.is_admin())
+                    }),
             })
             .collect(),
     };
@@ -1397,20 +1482,56 @@ mod tests {
 
     #[test]
     fn scope_availability_follows_role_and_release() {
-        let read = scope_spec("cves:read").unwrap();
-        assert_eq!(unavailable_reason(read, false), None);
+        for read in ["cves:read", "policies:read", "bundles:read"] {
+            let spec = scope_spec(read).unwrap();
+            assert_eq!(unavailable_reason(spec, false, false), None, "{read}");
+            assert!(!scope_requires_admin(read));
+        }
         for write in ["scans:request", "poams:write", "poams:verify"] {
             let spec = scope_spec(write).unwrap();
-            assert_eq!(unavailable_reason(spec, false), Some("Requires Operator"));
-            assert_eq!(unavailable_reason(spec, true), None, "{write}");
+            assert_eq!(
+                unavailable_reason(spec, false, false),
+                Some("Requires Operator")
+            );
+            assert_eq!(unavailable_reason(spec, true, false), None, "{write}");
             assert!(is_write_scope(write));
         }
         let close = scope_spec("poams:close").unwrap();
-        assert_eq!(unavailable_reason(close, false), Some("Requires Operator"));
-        assert_eq!(unavailable_reason(close, true), Some("Not supported yet"));
+        assert_eq!(
+            unavailable_reason(close, false, false),
+            Some("Requires Operator")
+        );
+        assert_eq!(
+            unavailable_reason(close, true, false),
+            Some("Not supported yet")
+        );
+        // Admin-only scopes report the role first, then the release state.
+        for authoring in ["policies:draft", "policies:import", "bundles:draft"] {
+            let spec = scope_spec(authoring).unwrap();
+            assert!(scope_requires_admin(authoring));
+            assert_eq!(
+                unavailable_reason(spec, false, false),
+                Some("Requires Admin")
+            );
+            assert_eq!(
+                unavailable_reason(spec, true, false),
+                Some("Requires Admin")
+            );
+            assert_eq!(
+                unavailable_reason(spec, true, true),
+                Some("Not supported yet")
+            );
+        }
+        let preview = scope_spec("compliance:preview").unwrap();
+        assert_eq!(
+            unavailable_reason(preview, false, false),
+            Some("Not supported yet")
+        );
+        assert!(!scope_requires_admin("compliance:preview"));
+        assert!(!scope_requires_admin("admin"));
         assert!(!is_write_scope("cves:read"));
         assert!(scope_spec("admin").is_none());
-        assert_eq!(SCOPES.len(), 7);
+        assert_eq!(SCOPES.len(), 13);
     }
 
     #[test]
@@ -1460,6 +1581,12 @@ mod tests {
         assert!(
             check_grant(&admin, &["poams:close".to_owned()], &rows, &[other])
                 .contains_key("scopes")
+        );
+        assert!(check_grant(&admin, &["policies:read".to_owned()], &rows, &[other]).is_empty());
+        let draft = vec!["policies:draft".to_owned()];
+        assert!(
+            check_grant(&operator, &draft, &rows, &[assigned])["scopes"]
+                .contains("policies:draft is unavailable: Requires Admin")
         );
     }
 }
