@@ -212,6 +212,7 @@ with case("access-token-policy-offers-operator-only-the-assigned-active-environm
                  "other active environments are not")
     offered = {s["scope"]: s for s in policy["scopes"]}
     expect_equal(sorted(offered), sorted(at_facts["readScopes"] + at_facts["writeScopes"]
+                                         + at_facts["optionalReadScopes"] + at_facts["adminOnlyScopes"]
                                          + at_facts["unavailableScopes"]),
                  "scope catalogue")
     for scope in at_facts["readScopes"]:
@@ -222,6 +223,15 @@ with case("access-token-policy-offers-operator-only-the-assigned-active-environm
         expect_equal({k: offered[scope][k] for k in ("available", "default_selected", "unavailable_reason")},
                      {"available": True, "default_selected": False, "unavailable_reason": None},
                      scope + " is selectable for an Operator but not preselected")
+    for scope in at_facts["optionalReadScopes"]:
+        expect_equal({k: offered[scope][k] for k in ("available", "default_selected", "unavailable_reason")},
+                     {"available": True, "default_selected": False, "unavailable_reason": None},
+                     scope + " is selectable but not preselected")
+    # The role reason precedes the release reason for Admin-only scopes.
+    for scope in at_facts["adminOnlyScopes"]:
+        expect_equal({k: offered[scope][k] for k in ("available", "default_selected", "unavailable_reason")},
+                     {"available": False, "default_selected": False, "unavailable_reason": "Requires Admin"},
+                     scope + " requires Admin")
     for scope in at_facts["unavailableScopes"]:
         expect_equal({k: offered[scope][k] for k in ("available", "default_selected", "unavailable_reason")},
                      {"available": False, "default_selected": False, "unavailable_reason": "Not supported yet"},
@@ -341,7 +351,7 @@ with case("access-token-rejects-unassigned-environment-missing-csrf-and-viewer-w
     status, policy = http(controller, "GET", "/api/v1/user/access-token-policy", session=at_jar("viewer"))
     expect_equal(status, 200, "Viewer reads the access-token policy")
     expect_equal([e["name"] for e in policy["environments"]], [at_facts["environment"]], "Viewer environments")
-    for scope in at_facts["writeScopes"] + at_facts["unavailableScopes"]:
+    for scope in at_facts["writeScopes"] + at_facts["adminOnlyScopes"] + at_facts["unavailableScopes"]:
         listed = [s for s in policy["scopes"] if s["scope"] == scope]
         expect_equal(len(listed), 1, scope + " is in the Viewer catalogue")
         expect_equal(listed[0]["available"], False, scope + " is unavailable to the Viewer")

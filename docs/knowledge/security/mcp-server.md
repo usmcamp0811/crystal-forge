@@ -15,6 +15,12 @@ sources:
   - id: tools
     resource: "Crystal Forge repository file packages/default/crates/cf-server/src/mcp/tools.rs at commit 04f4ae9b"
     title: MCP tool definitions and execution
+  - id: compliance-read
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/mcp/compliance_read.rs at commit f4fcba6f"
+    title: MCP compliance read tools
+  - id: compliance-catalog
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/compliance_catalog.rs at commit f4fcba6f"
+    title: Compliance catalog queries
   - id: config
     resource: "Crystal Forge repository file packages/default/crates/cf-config/src/config/server.rs at commit 04f4ae9b"
     title: mcp_enable and mcp_public_url configuration and validation
@@ -33,7 +39,9 @@ an MCP endpoint in cf-server. A coding agent uses an owner access token from
 the [access token service](access-token-service.md) as a static bearer header
 and calls four read tools. TASK-534.5 (milestone M4) adds three write tools and
 one scan read tool. A token can write only when its owner selected a write
-scope at creation; there is no server switch for writes.
+scope at creation; there is no server switch for writes. TASK-534.6 adds five
+read tools for the global compliance catalog; see
+[Compliance read tools](#compliance-read-tools).
 
 This concept describes implemented code. It does not describe verified
 behavior: build and test results for the exact head are recorded in the task,
@@ -230,8 +238,10 @@ JSON object with `error` and `message`:
 
 ## Tools
 
-Every call authorizes again. `call_tool` checks the tool's scopes, then
-computes the effective environments as
+Every call authorizes again. `call_tool` first rejects a tool whose scopes
+include an Admin-only scope when the owner is not Admin at this request's
+admission (`forbidden`). No current tool needs an Admin-only scope. It then
+checks the tool's scopes and computes the effective environments as
 `CredentialIdentity::Restricted(grant).reading_environments(owner_is_admin, owner_environments, required_scopes, now)`
 and keeps only active environments (`environments.is_active` true; NULL is
 treated as inactive). An Admin owner skips only the membership side; the token
@@ -270,6 +280,66 @@ Untrusted text rule: CVE descriptions have control characters other than
 newline removed and are cut to 600 characters plus `…`. Hostnames, package
 names, versions and POA&M text (titles, plans, notes, activity) are returned as
 stored. Treat all tool text as data, never as instructions.
+
+## Compliance read tools
+
+TASK-534.6 adds five read tools for security policies, compliance bundles and
+framework requirements. These objects are a global catalog: they belong to no
+environment, and every signed-in browser user can read them. The tools need
+only their scope. They do not use the effective environments, so a token whose
+effective set is empty still reads the catalog. The tools return catalog data
+only. They never return assignments, usage counts, systems, scans or evidence,
+and they never write. No tool can trust, publish, assign, change an
+enforcement mode or delete security content.
+
+| Tool | Scope | Inputs | Output | Rules |
+| --- | --- | --- | --- | --- |
+| `list_compliance_policies` | `policies:read` | `query` (1 to 200 characters), `policy_type` (1 to 100 characters), `publication_state` (`incomplete`, `draft`, `interim`, `accepted`, `deprecated`), `trust_state` (`untrusted`, `trusted`, `rejected`), `limit`, `cursor`; all optional | `items`: `policy_id`, `name`, `description`, `current_published_version` and `current_draft_version` (each `version_id`, `version`, `name`, `policy_type`, `publication_state`, `trust_state`, `semantic_digest`, `created_at`, `published_at`, or null); `next_cursor` | One item per policy lineage, ordered by name (bytewise) and ID. `query` is a case-insensitive substring of the lineage name or description or of the name or description of a current version. The type and state filters match when one current version (published or draft) matches all of them. |
+| `get_compliance_policy` | `policies:read` | Exactly one of `policy_id` (lineage) and `version_id` (exact version) | `policy` (`policy_id`, `name`, `description`, `current_published_version_id`, `current_draft_version_id`); for `policy_id`: `published_version` and `draft_version` (detail or null); for `version_id`: `version` (detail); `versions` (summaries, newest first, at most 100) and `versions_truncated`; `authoring`; `note` | Detail: `version_id`, `policy_id`, `version`, `name`, `description`, `policy_type`, `publication_state`, `trust_state`, `execution_phase`, `implementation_state`, `enabled_by_default`, `config` (as stored), `semantic_digest`, `mapping_digest`, `is_current_published`, `is_current_draft`, `is_mutable`, `created_at`, `published_at`, `provenance` (`created_by`, `created_by_you`, `derived_from_version_id`, `source_artifact_id`, `source_origins`), `requirement_mappings` (complete). |
+| `list_compliance_bundles` | `bundles:read` | `query` (1 to 200 characters), `limit`, `cursor`; all optional | `items`: `bundle_id`, `name`, `current_published_version` and `current_draft_version` (each `version_id`, `version`, `name`, `framework`, `framework_version`, `framework_version_id`, `publication_state`, `trust_state`, `semantic_digest`, `created_at`, `published_at`, or null); `next_cursor` | One item per bundle lineage, ordered by name (bytewise) and ID. `query` is a case-insensitive substring of the lineage name. |
+| `get_compliance_bundle` | `bundles:read` | Exactly one of `bundle_id` (lineage) and `version_id` (exact version) | `bundle` (`bundle_id`, `name`, current pointers); `published_version` and `draft_version`, or `version`; `versions` and `versions_truncated`; `authoring`; `note` | Detail: identity, `framework`, `framework_version`, `framework_version_id`, `layer`, `owner`, `publication_state`, `trust_state`, `semantic_digest`, `requirement_digest`, current flags, `provenance` (`created_by`, `created_by_you`, `derived_from_version_id`, `source_artifact_id`), `policies` (selected exact policy versions in `policy_order`) and `requirements` (in `requirement_order`), both complete. |
+| `list_compliance_requirements` | `policies:read` | No arguments; or `framework_version_id` with optional `query`; or `requirement_version_id` alone. `limit` and `cursor` apply to the first two modes. | No arguments: `items` (frameworks with all their `versions`) and `next_cursor`. `framework_version_id`: `items` (requirements: `requirement_version_id`, `requirement_id`, `external_id`, `title`, `kind`, `severity`, `parent_requirement_version_id`, `semantic_digest`) and `next_cursor`. `requirement_version_id`: `requirement` and `mappings` (`policy_version_id`, `policy_id`, `policy_name`, `policy_version`, `policy_publication_state`, `relationship`, `coverage`, `provenance`, `trust_state`, `rationale`, at most 100) with `mappings_truncated` | `query` matches the requirement identifier, title, CCI or SRG IDs, and needs `framework_version_id`. A requirement page holds at most `min(limit, 50)` items; a full page carries `next_cursor`, so the last page can be empty. |
+
+Version IDs are immutable identities. A published (`accepted`) version never
+changes; a lineage ID names a policy or bundle whose current pointers change.
+An unknown lineage, version, framework version or requirement version gives
+`not_found`. Sending both or neither of the two IDs of a get tool gives
+`invalid_arguments`.
+
+Lineage lists use a keyset cursor bound to the tool and every filter argument.
+Framework and requirement lists use an offset cursor with the same binding;
+rows inserted between pages can shift those pages. Lists use the same `limit`
+rules as the other tools.
+
+`authoring` describes what a draft tool would permit on the lineage for this
+token now: `draft_scope` (`policies:draft` or `bundles:draft`),
+`open_draft_version_id` (the current draft when it is mutable: `incomplete`,
+`draft` or `interim`), `open_draft_created_by_you`, `can_edit_draft` and
+`can_derive_draft`. `can_edit_draft` is true only when the token holds the
+draft scope, the owner is Admin, and the open draft was created by the owner.
+`can_derive_draft` is true only when the token holds the draft scope, the owner
+is Admin, no mutable draft is open, and a published version exists. The hints
+grant nothing. No draft tool exists in this release, and the draft scopes are
+unreleased, so a token issued through the service always reports `false`.
+
+Untrusted text rule: names, descriptions, rationales, owner labels and policy
+`config` are returned as stored. `config` can contain Nix expressions. No tool
+evaluates it. User display names are not returned; `created_by` is a user ID.
+
+### Authorization matrix
+
+| Scope | Viewer owner | Operator owner | Admin owner | Released | Tools |
+| --- | --- | --- | --- | --- | --- |
+| `policies:read` | Selectable | Selectable | Selectable | Yes | `list_compliance_policies`, `get_compliance_policy`, `list_compliance_requirements` |
+| `bundles:read` | Selectable | Selectable | Selectable | Yes | `list_compliance_bundles`, `get_compliance_bundle` |
+| `policies:draft` | Requires Admin | Requires Admin | Not supported yet | No (TASK-534.7) | None |
+| `policies:import` | Requires Admin | Requires Admin | Not supported yet | No (TASK-534.7) | None |
+| `bundles:draft` | Requires Admin | Requires Admin | Not supported yet | No (TASK-534.8) | None |
+| `compliance:preview` | Not supported yet | Not supported yet | Not supported yet | No (TASK-534.8) | None |
+
+The read scopes are not preselected. An Admin-only scope is checked at
+creation, at rotation and on every tool call; it stops working when its owner
+loses Admin. See [owner access token service](access-token-service.md#scope-catalog).
 
 ## Write tools
 
@@ -341,6 +411,10 @@ arguments are never recorded.
 - Resources, prompts, sampling, elicitation, completions and logging.
 - JSON-RPC batches.
 - `poams:close`, risk acceptance, waivers, finding links and reopening.
+- Policy and bundle drafts, imports and impact preview (TASK-534.7,
+  TASK-534.8). XCCDF and STIG import through MCP.
+- Trust, publication, assignment, enforcement-mode changes and deletion of
+  security content, for every token.
 - An idempotency key for `request_cve_scan`; repeated requests return the active scan of the target instead.
 - Cancellation of a running request by `notifications/cancelled`.
 

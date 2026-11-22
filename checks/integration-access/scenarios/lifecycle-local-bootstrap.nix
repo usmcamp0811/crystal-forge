@@ -211,8 +211,11 @@ in
       # Owner access-token lifecycle (fragments/access-tokens.{py,cjs}). Names
       # are authored inputs; the fragment creates both environments through the
       # Admin API and assigns only `environment` to the Operator and Viewer.
-      # Scope lists are the approved TASK-534.3 catalogue: the three read scopes
-      # are selectable and preselected, the other four are listed unavailable.
+      # Scope lists are the approved catalogue as the Operator sees it: the three
+      # TASK-534.3 read scopes are selectable and preselected; TASK-534.5 write
+      # scopes and TASK-534.6 compliance read scopes are selectable and not
+      # preselected; TASK-534.6 authoring scopes are listed "Requires Admin";
+      # unreleased scopes are listed "Not supported yet".
       # Environment names are lowercase because the Admin user PATCH matches
       # memberships by exact lowercased name.
       accessTokens = {
@@ -226,7 +229,10 @@ in
         readScopes = ["cves:read" "poams:read" "provenance:read"];
         # TASK-534.5 released the write scopes for Operator and Admin owners.
         writeScopes = ["scans:request" "poams:write" "poams:verify"];
-        unavailableScopes = ["poams:close"];
+        # TASK-534.6 compliance scopes.
+        optionalReadScopes = ["policies:read" "bundles:read"];
+        adminOnlyScopes = ["policies:draft" "policies:import" "bundles:draft"];
+        unavailableScopes = ["poams:close" "compliance:preview"];
       };
 
       # Authored request payloads for the admin-only operations. Each denied

@@ -1567,6 +1567,13 @@ mod tests {
             scope_unavailable_text(&policy.scopes[3]).as_deref(),
             Some("Not supported yet")
         );
+        // Role reasons from the server render the same way.
+        let mut admin_only = policy.scopes[3].clone();
+        admin_only.unavailable_reason = Some("Requires Admin".to_string());
+        assert_eq!(
+            scope_unavailable_text(&admin_only).as_deref(),
+            Some("Requires Admin")
+        );
         let mut without_reason = policy.scopes[3].clone();
         without_reason.unavailable_reason = None;
         assert_eq!(
