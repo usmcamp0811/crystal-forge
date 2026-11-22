@@ -536,6 +536,52 @@ pub(super) struct CreateForm {
     pub(super) environment_ids: Vec<Uuid>,
     /// Selected scopes.
     pub(super) scopes: Vec<String>,
+    /// State of the production write confirmation checkbox. It counts only
+    /// while [`production_write_selected`] is `true`.
+    pub(super) confirm_production: bool,
+}
+
+/// Returns the production write confirmation text for the current selection.
+///
+/// The text names the selected write capabilities by their policy labels and
+/// the selected production environments by name, both in policy order, so the
+/// owner confirms the exact grant. It extends the approved design sentence
+/// ("... write operations in production. ...") with these names. The text is
+/// shown only while [`production_write_selected`] is `true`; for another
+/// selection the lists can be empty.
+pub(super) fn production_write_confirmation_text(
+    form: &CreateForm,
+    policy: &AccessTokenPolicyDto,
+) -> String {
+    let capabilities: Vec<&str> = policy
+        .scopes
+        .iter()
+        .filter(|scope| !is_read_scope(&scope.scope) && form.scopes.contains(&scope.scope))
+        .map(|scope| scope.label.as_str())
+        .collect();
+    let environments: Vec<&str> = policy
+        .environments
+        .iter()
+        .filter(|env| env.is_production && form.environment_ids.contains(&env.id))
+        .map(|env| env.name.as_str())
+        .collect();
+    format!(
+        "I understand this token can request write operations ({}) in production \
+         environment(s) {}. Server authorization and approval workflows still apply.",
+        capabilities.join(", "),
+        environments.join(", ")
+    )
+}
+
+/// Returns whether the selection combines a write scope with a production
+/// environment. The dialog then shows the production write confirmation and
+/// requires it, as the server does.
+pub(super) fn production_write_selected(form: &CreateForm, policy: &AccessTokenPolicyDto) -> bool {
+    form.scopes.iter().any(|scope| !is_read_scope(scope))
+        && policy
+            .environments
+            .iter()
+            .any(|env| env.is_production && form.environment_ids.contains(&env.id))
 }
 
 /// Returns the form state at dialog open.
@@ -565,6 +611,7 @@ pub(super) fn initial_form(policy: &AccessTokenPolicyDto) -> CreateForm {
             .filter(|scope| scope.available && scope.default_selected)
             .map(|scope| scope.scope.clone())
             .collect(),
+        confirm_production: false,
     }
 }
 
@@ -587,6 +634,8 @@ pub(super) struct CreateErrors {
     pub(super) environments: Option<String>,
     /// Message for the scope group.
     pub(super) scopes: Option<String>,
+    /// Message for the production write confirmation.
+    pub(super) production: Option<String>,
     /// Server messages that name no field of this form.
     pub(super) general: Option<String>,
 }
@@ -659,6 +708,9 @@ pub(super) fn validate_create(
     }) {
         errors.scopes = Some("A selected capability is not available.".to_string());
     }
+    if production_write_selected(form, policy) && !form.confirm_production {
+        errors.production = Some("Confirm the production write access below.".to_string());
+    }
     errors
 }
 
@@ -675,6 +727,7 @@ pub(super) fn server_field_errors(fields: &BTreeMap<String, String>) -> CreateEr
             "expires_in_days" => errors.expires = Some(message.clone()),
             "environment_ids" => errors.environments = Some(message.clone()),
             "scopes" => errors.scopes = Some(message.clone()),
+            "confirm_production_write" => errors.production = Some(message.clone()),
             other => general.push(format!("{other}: {message}")),
         }
     }
@@ -686,6 +739,10 @@ pub(super) fn server_field_errors(fields: &BTreeMap<String, String>) -> CreateEr
 
 /// Builds the request body. Environments and scopes follow the policy order,
 /// so the body is stable for a given selection.
+///
+/// `confirm_production_write` is `true` only when the confirmation is shown
+/// and checked. A checkbox state left over from an earlier selection is not
+/// sent.
 pub(super) fn build_create_request(
     form: &CreateForm,
     policy: &AccessTokenPolicyDto,
@@ -706,6 +763,8 @@ pub(super) fn build_create_request(
             .filter(|offered| form.scopes.contains(&offered.scope))
             .map(|offered| offered.scope.clone())
             .collect(),
+        confirm_production_write: form.confirm_production
+            && production_write_selected(form, policy),
     }
 }
 
@@ -758,11 +817,13 @@ mod tests {
                     id: env_id(1),
                     name: "production".to_string(),
                     color: Some("#f87171".to_string()),
+                    is_production: true,
                 },
                 AccessTokenPolicyEnvironmentDto {
                     id: env_id(2),
                     name: "staging".to_string(),
                     color: None,
+                    is_production: false,
                 },
             ],
             scopes: vec![
@@ -800,6 +861,7 @@ mod tests {
             expires_in_days: 30,
             environment_ids: vec![env_id(2)],
             scopes: vec!["cves:read".to_string()],
+            confirm_production: false,
         }
     }
 
@@ -1344,8 +1406,16 @@ mod tests {
             ("scopes".to_string(), "Scope unavailable.".to_string()),
             ("expires_in_days".to_string(), "Too long.".to_string()),
             ("audience".to_string(), "Unsupported.".to_string()),
+            (
+                "confirm_production_write".to_string(),
+                "Confirm the production write access.".to_string(),
+            ),
         ]);
         let errors = server_field_errors(&fields);
+        assert_eq!(
+            errors.production.as_deref(),
+            Some("Confirm the production write access.")
+        );
         assert_eq!(errors.name.as_deref(), Some("Name is already in use."));
         assert_eq!(errors.environments.as_deref(), Some("Unknown environment."));
         assert_eq!(errors.scopes.as_deref(), Some("Scope unavailable."));
@@ -1366,6 +1436,107 @@ mod tests {
         assert_eq!(request.expires_in_days, 30);
         assert_eq!(request.environment_ids, vec![env_id(1), env_id(2)]);
         assert_eq!(request.scopes, vec!["cves:read", "poams:read"]);
+        assert!(!request.confirm_production_write);
+    }
+
+    /// Returns the fixture policy with `poams:write` available, as for an
+    /// Operator.
+    fn write_policy() -> AccessTokenPolicyDto {
+        let mut policy = policy();
+        policy.scopes[3].available = true;
+        policy.scopes[3].unavailable_reason = None;
+        policy
+    }
+
+    #[test]
+    fn production_write_needs_a_write_scope_and_a_production_environment() {
+        let policy = write_policy();
+        let mut form = valid_form();
+        form.scopes = vec!["cves:read".to_string(), "poams:write".to_string()];
+        // staging is not production.
+        assert!(!production_write_selected(&form, &policy));
+        form.environment_ids = vec![env_id(1)];
+        assert!(production_write_selected(&form, &policy));
+        form.scopes = vec!["cves:read".to_string()];
+        assert!(!production_write_selected(&form, &policy));
+    }
+
+    #[test]
+    fn production_write_requires_the_confirmation_and_sends_it() {
+        let policy = write_policy();
+        let mut form = valid_form();
+        form.environment_ids = vec![env_id(1), env_id(2)];
+        form.scopes = vec!["poams:write".to_string()];
+        let errors = validate_create(&form, &policy, &[]);
+        assert_eq!(
+            errors.production.as_deref(),
+            Some("Confirm the production write access below.")
+        );
+        assert!(errors.scopes.is_none());
+        assert!(!build_create_request(&form, &policy).confirm_production_write);
+
+        form.confirm_production = true;
+        assert!(validate_create(&form, &policy, &[]).is_empty());
+        assert!(build_create_request(&form, &policy).confirm_production_write);
+
+        // A confirmation left checked from an earlier selection is not sent.
+        form.environment_ids = vec![env_id(2)];
+        assert!(validate_create(&form, &policy, &[]).is_empty());
+        assert!(!build_create_request(&form, &policy).confirm_production_write);
+    }
+
+    /// Returns a policy with two production environments and both write
+    /// scopes available under their server labels.
+    fn labeled_write_policy() -> AccessTokenPolicyDto {
+        let mut policy = write_policy();
+        policy.environments[0].name = "LAN".to_string();
+        policy.environments.push(AccessTokenPolicyEnvironmentDto {
+            id: env_id(3),
+            name: "prod-east".to_string(),
+            color: None,
+            is_production: true,
+        });
+        policy.scopes[3].label = "Update POA&M progress".to_string();
+        policy.scopes.insert(
+            3,
+            AccessTokenPolicyScopeDto {
+                scope: "scans:request".to_string(),
+                label: "Request CVE scans".to_string(),
+                available: true,
+                default_selected: false,
+                unavailable_reason: None,
+            },
+        );
+        policy
+    }
+
+    #[test]
+    fn production_confirmation_names_one_environment_and_one_capability() {
+        let policy = labeled_write_policy();
+        let mut form = valid_form();
+        // The staging selection and the read scope are not named.
+        form.environment_ids = vec![env_id(2), env_id(1)];
+        form.scopes = vec!["cves:read".to_string(), "poams:write".to_string()];
+        assert!(production_write_selected(&form, &policy));
+        assert_eq!(
+            production_write_confirmation_text(&form, &policy),
+            "I understand this token can request write operations (Update POA&M progress) in \
+             production environment(s) LAN. Server authorization and approval workflows still apply."
+        );
+    }
+
+    #[test]
+    fn production_confirmation_names_every_environment_and_capability_in_policy_order() {
+        let policy = labeled_write_policy();
+        let mut form = valid_form();
+        form.environment_ids = vec![env_id(3), env_id(1)];
+        form.scopes = vec!["poams:write".to_string(), "scans:request".to_string()];
+        assert_eq!(
+            production_write_confirmation_text(&form, &policy),
+            "I understand this token can request write operations (Request CVE scans, Update \
+             POA&M progress) in production environment(s) LAN, prod-east. Server authorization \
+             and approval workflows still apply."
+        );
     }
 
     fn api_error(
@@ -1395,6 +1566,13 @@ mod tests {
         assert_eq!(
             scope_unavailable_text(&policy.scopes[3]).as_deref(),
             Some("Not supported yet")
+        );
+        // Role reasons from the server render the same way.
+        let mut admin_only = policy.scopes[3].clone();
+        admin_only.unavailable_reason = Some("Requires Admin".to_string());
+        assert_eq!(
+            scope_unavailable_text(&admin_only).as_deref(),
+            Some("Requires Admin")
         );
         let mut without_reason = policy.scopes[3].clone();
         without_reason.unavailable_reason = None;

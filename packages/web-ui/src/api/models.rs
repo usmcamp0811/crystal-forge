@@ -6648,6 +6648,11 @@ pub struct AccessTokenPolicyEnvironmentDto {
     /// whose stored value is not that form.
     #[serde(default)]
     pub color: Option<String>,
+    /// `true` for a production environment. A token that combines a write
+    /// scope with a production environment needs the production write
+    /// confirmation. `false` for a server that does not send the field.
+    #[serde(default)]
+    pub is_production: bool,
 }
 
 /// Scope offered by the create form.
@@ -6784,6 +6789,10 @@ pub struct CreateAccessTokenRequest {
     pub environment_ids: Vec<Uuid>,
     /// Requested scopes. Never empty.
     pub scopes: Vec<String>,
+    /// `true` when the owner confirmed that the token may request write
+    /// operations in a production environment. The server requires it for a
+    /// write scope combined with a production environment.
+    pub confirm_production_write: bool,
 }
 
 /// Response of token creation or rotation: the only carrier of the secret.
@@ -6848,13 +6857,14 @@ mod access_token_dto_tests {
             "max_lifetime_days": 90,
             "lifetime_options_days": [7, 30, 90],
             "max_active_tokens": 20,
-            "environments": [{"id": ENV_ID, "name": "staging", "color": "#f87171"}],
+            "environments": [{"id": ENV_ID, "name": "staging", "color": "#f87171",
+                              "is_production": true}],
             "scopes": [
                 {"scope": "cves:read", "label": "Read CVEs and systems",
                  "available": true, "default_selected": true, "unavailable_reason": null},
                 {"scope": "poams:write", "label": "Update POA&M progress",
                  "available": false, "default_selected": false,
-                 "unavailable_reason": "Not supported yet"}
+                 "unavailable_reason": "Requires Operator"}
             ],
             "create_blocked": {"code": "entitlements_stale", "message": "Sign in again."},
             "oidc_owned": true,
@@ -6862,13 +6872,14 @@ mod access_token_dto_tests {
         }))
         .expect("policy decodes");
         assert_eq!(policy.environments[0].color.as_deref(), Some("#f87171"));
+        assert!(policy.environments[0].is_production);
         assert!(policy.oidc_owned);
         assert_eq!(policy.entitlement_max_age_hours, Some(24));
         assert!(policy.enabled && !policy.mcp.enabled && policy.mcp.url.is_none());
         assert_eq!(policy.lifetime_options_days, vec![7, 30, 90]);
         assert_eq!(
             policy.scopes[1].unavailable_reason.as_deref(),
-            Some("Not supported yet")
+            Some("Requires Operator")
         );
         assert_eq!(
             policy.create_blocked.map(|blocked| blocked.code),
@@ -6891,6 +6902,7 @@ mod access_token_dto_tests {
         }))
         .expect("an older policy payload decodes");
         assert_eq!(policy.environments[0].color, None);
+        assert!(!policy.environments[0].is_production);
         assert!(!policy.oidc_owned);
         assert_eq!(policy.entitlement_max_age_hours, None);
         assert!(policy.create_blocked.is_none());
@@ -7050,6 +7062,20 @@ pub enum AuditAction {
     AccessTokenRotated,
     /// An owner revoked an access token.
     AccessTokenRevoked,
+    /// Authorization denied an MCP write tool call of an access token.
+    McpWriteDenied,
+    /// A note was added to a POA&M.
+    PoamNote,
+    /// A POA&M status changed.
+    PoamStatusChanged,
+    /// A milestone was added to a POA&M.
+    PoamMilestoneAdded,
+    /// A POA&M milestone changed.
+    PoamMilestoneUpdated,
+    /// A milestone was removed from a POA&M.
+    PoamMilestoneRemoved,
+    /// A POA&M verification attempt was recorded.
+    PoamVerificationAttempted,
     #[serde(other)]
     Unknown,
 }
@@ -7062,6 +7088,18 @@ pub struct AuditEvent {
     pub action: AuditAction,
     pub target: String,
     pub source: String,
+    /// Access token through which an agent acted. `None` for browser and
+    /// server actions, and for servers that do not send the field.
+    #[serde(default)]
+    pub access_token_id: Option<Uuid>,
+    /// `true` when an agent acted through an access token. The server keeps
+    /// it `true` after the token is deleted, when `access_token_id` is `None`.
+    #[serde(default)]
+    pub via_agent: bool,
+    /// Token name recorded for the action, or `None` when the server no
+    /// longer knows it.
+    #[serde(default)]
+    pub access_token_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -391,17 +391,26 @@ fn visible_tools_follow_granted_scopes() {
     };
     assert_eq!(
         names(CVES),
-        ["list_remediation_work", "get_system_security_context"]
+        [
+            "list_remediation_work",
+            "get_system_security_context",
+            "get_scan_result"
+        ]
     );
     assert_eq!(
         names(CVES_PROVENANCE),
         [
             "list_remediation_work",
             "get_system_security_context",
-            "get_remediation_context"
+            "get_remediation_context",
+            "get_scan_result"
         ]
     );
     assert_eq!(names(POAMS), ["get_poam_detail"]);
+    // Write tools appear only with their own write scope.
+    assert_eq!(names(&["scans:request"]), ["request_cve_scan"]);
+    assert_eq!(names(&["poams:write"]), ["update_poam_progress"]);
+    assert_eq!(names(&["poams:verify"]), ["verify_poam"]);
     assert!(names(&[]).is_empty());
 }
 

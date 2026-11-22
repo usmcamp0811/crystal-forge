@@ -111,6 +111,7 @@ async fn issue_token(pool: &PgPool, scopes: &[&str]) -> Token {
         expires_in_days: Some(30),
         environment_ids: Some(vec![env.to_string()]),
         scopes: Some(scopes.iter().map(|scope| (*scope).to_owned()).collect()),
+        confirm_production_write: None,
     };
     let settings = AccessTokenSettings::from_server_config(&enabled_config(), 86_400);
     let issued = service::create(pool, owner, &request, &settings)
@@ -501,6 +502,7 @@ async fn tools_list_shows_only_tools_allowed_by_token_scopes(pool: PgPool) {
     assert_eq!(
         tool_names(&reply),
         BTreeSet::from([
+            "get_scan_result".to_owned(),
             "get_system_security_context".to_owned(),
             "list_remediation_work".to_owned(),
         ])
@@ -521,12 +523,25 @@ async fn tools_list_shows_only_tools_allowed_by_token_scopes(pool: PgPool) {
         .await;
     assert!(tool_names(&reply).is_empty());
 
-    let all = issue_token(&pool, &["cves:read", "poams:read", "provenance:read"]).await;
+    let all = issue_token(
+        &pool,
+        &[
+            "cves:read",
+            "poams:read",
+            "provenance:read",
+            "policies:read",
+            "bundles:read",
+        ],
+    )
+    .await;
     let reply = server.rpc(&all.secret, "tools/list", json!({})).await;
+    // Every read tool, and no write tool: write tools need a write scope.
     let expected: BTreeSet<String> = mcp::MCP_TOOL_NAMES
         .iter()
+        .filter(|name| !mcp::tools::is_write_tool(name))
         .map(|name| (*name).to_owned())
         .collect();
+    assert_eq!(expected.len(), 10);
     assert_eq!(tool_names(&reply), expected);
 }
 
@@ -581,8 +596,11 @@ async fn admin_status_reports_configuration_and_requires_admin(pool: PgPool) {
     assert_eq!(body["enabled"], true);
     assert_eq!(body["public_url"], PUBLIC_URL);
     assert_eq!(body["protocol_versions"][0], "2025-11-25");
-    assert_eq!(body["phase"], "read-only");
-    assert_eq!(body["tools"].as_array().map(Vec::len), Some(4));
+    assert_eq!(
+        body["phase"],
+        "read and write (write tools require a token write scope)"
+    );
+    assert_eq!(body["tools"].as_array().map(Vec::len), Some(13));
     assert_eq!(body["access_tokens_enabled"], true);
     assert_eq!(body["max_token_lifetime_days"], 90);
     assert_eq!(body["active_token_count"], 1);
@@ -652,6 +670,7 @@ async fn slow_request_body_is_cut_off_by_the_request_deadline(pool: PgPool) {
     assert_eq!(
         tool_names(&listed),
         BTreeSet::from([
+            "get_scan_result".to_owned(),
             "get_system_security_context".to_owned(),
             "list_remediation_work".to_owned(),
         ])

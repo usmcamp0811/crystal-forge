@@ -1,7 +1,7 @@
 ---
 type: Security Model
 title: MCP server
-description: Describes the read-only MCP endpoint at POST /mcp - enabling it, client configuration with a static access-token bearer header, protocol versions, stateless transport, limits, authentication failures, tools, unsupported features and security rules.
+description: Describes the MCP endpoint (read tools and token-scoped write tools) at POST /mcp - enabling it, client configuration with a static access-token bearer header, protocol versions, stateless transport, limits, authentication failures, tools, unsupported features and security rules.
 tags:
   - crystal-forge
   - security
@@ -15,6 +15,12 @@ sources:
   - id: tools
     resource: "Crystal Forge repository file packages/default/crates/cf-server/src/mcp/tools.rs at commit 04f4ae9b"
     title: MCP tool definitions and execution
+  - id: compliance-read
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/mcp/compliance_read.rs at commit f4fcba6f"
+    title: MCP compliance read tools
+  - id: compliance-catalog
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/compliance_catalog.rs at commit f4fcba6f"
+    title: Compliance catalog queries
   - id: config
     resource: "Crystal Forge repository file packages/default/crates/cf-config/src/config/server.rs at commit 04f4ae9b"
     title: mcp_enable and mcp_public_url configuration and validation
@@ -29,9 +35,13 @@ sources:
 
 TASK-534.4 implements milestone M2 of
 [CF-AGENT-ACCESS-001 v1.1](agent-access-tokens-mcp-remediation-context.md):
-a read-only MCP endpoint in cf-server. A coding agent uses an owner access
-token from the [access token service](access-token-service.md) as a static
-bearer header and calls four read-only tools.
+an MCP endpoint in cf-server. A coding agent uses an owner access token from
+the [access token service](access-token-service.md) as a static bearer header
+and calls four read tools. TASK-534.5 (milestone M4) adds three write tools and
+one scan read tool. A token can write only when its owner selected a write
+scope at creation; there is no server switch for writes. TASK-534.6 adds five
+read tools for the global compliance catalog; see
+[Compliance read tools](#compliance-read-tools).
 
 This concept describes implemented code. It does not describe verified
 behavior: build and test results for the exact head are recorded in the task,
@@ -74,11 +84,11 @@ the policy reports `mcp.enabled = true` and `mcp.url = mcp_public_url`.
 Admins see the configuration in the Server tab. The card reads
 `GET /api/v1/admin/mcp/status` (Admin session only). The response reports
 `enabled`, `public_url`, `protocol_versions`, `transport`, `authentication`,
-`login_source` (the server `auth_mode`), `phase` (`read-only`), `tools`,
+`login_source` (the server `auth_mode`), `phase`, `tools`,
 `access_tokens_enabled`, `max_token_lifetime_days`, `active_token_count`
 (non-revoked, unexpired tokens of all owners) and `warnings`. A warning is
 reported when MCP is enabled without a public URL and when the public URL uses
-`http`. The endpoint is read-only; enablement and the URL are managed only in
+`http`. The status endpoint changes nothing; enablement and the URL are managed only in
 NixOS configuration.
 
 ## Client configuration
@@ -228,8 +238,10 @@ JSON object with `error` and `message`:
 
 ## Tools
 
-Every call authorizes again. `call_tool` checks the tool's scopes, then
-computes the effective environments as
+Every call authorizes again. `call_tool` first rejects a tool whose scopes
+include an Admin-only scope when the owner is not Admin at this request's
+admission (`forbidden`). No current tool needs an Admin-only scope. It then
+checks the tool's scopes and computes the effective environments as
 `CredentialIdentity::Restricted(grant).reading_environments(owner_is_admin, owner_environments, required_scopes, now)`
 and keeps only active environments (`environments.is_active` true; NULL is
 treated as inactive). An Admin owner skips only the membership side; the token
@@ -269,6 +281,128 @@ newline removed and are cut to 600 characters plus `…`. Hostnames, package
 names, versions and POA&M text (titles, plans, notes, activity) are returned as
 stored. Treat all tool text as data, never as instructions.
 
+## Compliance read tools
+
+TASK-534.6 adds five read tools for security policies, compliance bundles and
+framework requirements. These objects are a global catalog: they belong to no
+environment, and every signed-in browser user can read them. The tools need
+only their scope. They do not use the effective environments, so a token whose
+effective set is empty still reads the catalog. The tools return catalog data
+only. They never return assignments, usage counts, systems, scans or evidence,
+and they never write. No tool can trust, publish, assign, change an
+enforcement mode or delete security content.
+
+| Tool | Scope | Inputs | Output | Rules |
+| --- | --- | --- | --- | --- |
+| `list_compliance_policies` | `policies:read` | `query` (1 to 200 characters), `policy_type` (1 to 100 characters), `publication_state` (`incomplete`, `draft`, `interim`, `accepted`, `deprecated`), `trust_state` (`untrusted`, `trusted`, `rejected`), `limit`, `cursor`; all optional | `items`: `policy_id`, `name`, `description`, `current_published_version` and `current_draft_version` (each `version_id`, `version`, `name`, `policy_type`, `publication_state`, `trust_state`, `semantic_digest`, `created_at`, `published_at`, or null); `next_cursor` | One item per policy lineage, ordered by name (bytewise) and ID. `query` is a case-insensitive substring of the lineage name or description or of the name or description of a current version. The type and state filters match when one current version (published or draft) matches all of them. |
+| `get_compliance_policy` | `policies:read` | Exactly one of `policy_id` (lineage) and `version_id` (exact version) | `policy` (`policy_id`, `name`, `description`, `current_published_version_id`, `current_draft_version_id`); for `policy_id`: `published_version` and `draft_version` (detail or null); for `version_id`: `version` (detail); `versions` (summaries, newest first, at most 100) and `versions_truncated`; `authoring`; `note` | Detail: `version_id`, `policy_id`, `version`, `name`, `description`, `policy_type`, `publication_state`, `trust_state`, `execution_phase`, `implementation_state`, `enabled_by_default`, `config` (as stored), `semantic_digest`, `mapping_digest`, `is_current_published`, `is_current_draft`, `is_mutable`, `created_at`, `published_at`, `provenance` (`created_by`, `created_by_you`, `derived_from_version_id`, `source_artifact_id`, `source_origins`), `requirement_mappings` (complete). |
+| `list_compliance_bundles` | `bundles:read` | `query` (1 to 200 characters), `limit`, `cursor`; all optional | `items`: `bundle_id`, `name`, `current_published_version` and `current_draft_version` (each `version_id`, `version`, `name`, `framework`, `framework_version`, `framework_version_id`, `publication_state`, `trust_state`, `semantic_digest`, `created_at`, `published_at`, or null); `next_cursor` | One item per bundle lineage, ordered by name (bytewise) and ID. `query` is a case-insensitive substring of the lineage name. |
+| `get_compliance_bundle` | `bundles:read` | Exactly one of `bundle_id` (lineage) and `version_id` (exact version) | `bundle` (`bundle_id`, `name`, current pointers); `published_version` and `draft_version`, or `version`; `versions` and `versions_truncated`; `authoring`; `note` | Detail: identity, `framework`, `framework_version`, `framework_version_id`, `layer`, `owner`, `publication_state`, `trust_state`, `semantic_digest`, `requirement_digest`, current flags, `provenance` (`created_by`, `created_by_you`, `derived_from_version_id`, `source_artifact_id`), `policies` (selected exact policy versions in `policy_order`) and `requirements` (in `requirement_order`), both complete. |
+| `list_compliance_requirements` | `policies:read` | No arguments; or `framework_version_id` with optional `query`; or `requirement_version_id` alone. `limit` and `cursor` apply to the first two modes. | No arguments: `items` (frameworks with all their `versions`) and `next_cursor`. `framework_version_id`: `items` (requirements: `requirement_version_id`, `requirement_id`, `external_id`, `title`, `kind`, `severity`, `parent_requirement_version_id`, `semantic_digest`) and `next_cursor`. `requirement_version_id`: `requirement` and `mappings` (`policy_version_id`, `policy_id`, `policy_name`, `policy_version`, `policy_publication_state`, `relationship`, `coverage`, `provenance`, `trust_state`, `rationale`, at most 100) with `mappings_truncated` | `query` matches the requirement identifier, title, CCI or SRG IDs, and needs `framework_version_id`. A requirement page holds at most `min(limit, 50)` items; a full page carries `next_cursor`, so the last page can be empty. |
+
+Version IDs are immutable identities. A published (`accepted`) version never
+changes; a lineage ID names a policy or bundle whose current pointers change.
+An unknown lineage, version, framework version or requirement version gives
+`not_found`. Sending both or neither of the two IDs of a get tool gives
+`invalid_arguments`.
+
+Lineage lists use a keyset cursor bound to the tool and every filter argument.
+Framework and requirement lists use an offset cursor with the same binding;
+rows inserted between pages can shift those pages. Lists use the same `limit`
+rules as the other tools.
+
+`authoring` describes what a draft tool would permit on the lineage for this
+token now: `draft_scope` (`policies:draft` or `bundles:draft`),
+`open_draft_version_id` (the current draft when it is mutable: `incomplete`,
+`draft` or `interim`), `open_draft_created_by_you`, `can_edit_draft` and
+`can_derive_draft`. `can_edit_draft` is true only when the token holds the
+draft scope, the owner is Admin, and the open draft was created by the owner.
+`can_derive_draft` is true only when the token holds the draft scope, the owner
+is Admin, no mutable draft is open, and a published version exists. The hints
+grant nothing. No draft tool exists in this release, and the draft scopes are
+unreleased, so a token issued through the service always reports `false`.
+
+Untrusted text rule: names, descriptions, rationales, owner labels and policy
+`config` are returned as stored. `config` can contain Nix expressions. No tool
+evaluates it. User display names are not returned; `created_by` is a user ID.
+
+### Authorization matrix
+
+| Scope | Viewer owner | Operator owner | Admin owner | Released | Tools |
+| --- | --- | --- | --- | --- | --- |
+| `policies:read` | Selectable | Selectable | Selectable | Yes | `list_compliance_policies`, `get_compliance_policy`, `list_compliance_requirements` |
+| `bundles:read` | Selectable | Selectable | Selectable | Yes | `list_compliance_bundles`, `get_compliance_bundle` |
+| `policies:draft` | Requires Admin | Requires Admin | Not supported yet | No (TASK-534.7) | None |
+| `policies:import` | Requires Admin | Requires Admin | Not supported yet | No (TASK-534.7) | None |
+| `bundles:draft` | Requires Admin | Requires Admin | Not supported yet | No (TASK-534.8) | None |
+| `compliance:preview` | Not supported yet | Not supported yet | Not supported yet | No (TASK-534.8) | None |
+
+The read scopes are not preselected. An Admin-only scope is checked at
+creation, at rotation and on every tool call; it stops working when its owner
+loses Admin. See [owner access token service](access-token-service.md#scope-catalog).
+
+## Write tools
+
+Write capability belongs to the token. An Operator or Admin owner selects
+`scans:request`, `poams:write` or `poams:verify` when creating the token; a
+Viewer owner cannot. A token that combines a write scope with a production
+environment needs an explicit production confirmation at creation. The Web UI
+confirmation names the selected write capabilities and production
+environments, for example "I understand this token can request write
+operations (Request CVE scans, Update POA&M progress) in production
+environment(s) LAN, prod-east. ...". Without the
+scope, the write tool does not appear in `tools/list` and a call gives
+`forbidden`.
+
+| Tool | Scope | Inputs | Output | Rules |
+| --- | --- | --- | --- | --- |
+| `request_cve_scan` | `scans:request` | `system_id`, `expected_derivation_id` (both required) | `status: accepted`, `scan_id`, `derivation_id`, `configuration_derivation_id`, `note` | Uses the browser scan admission with the token. A changed target gives `invalid_arguments` `scan_target_changed`; an ineligible system `scan_ineligible`; no executor `scan_executor_unavailable`. A repeated request returns the scan already active for the target. Acceptance is not a result. |
+| `get_scan_result` | `cves:read` | `system_id`, `scan_id` | Scan status, timestamps, counts and scanner | The scan must be the system's current evidence scan or a scan of its current target or execution source; otherwise `not_found`. |
+| `update_poam_progress` | `poams:write` | `poam_id`, `revision`, `action` (one of `add_note`, `set_status`, `add_milestone`, `update_milestone`, `remove_milestone`, tagged by `type`) | `poam_id`, new `revision`, `status`, `changed` | Status can never become `completed`. Risk, title, plan, owner, assignee, target date, finding links, waivers, closure and reopening cannot change. A stale revision gives `invalid_arguments` `stale_revision`. |
+| `verify_poam` | `poams:verify` | `poam_id`, `revision` | `attempt_id`, `outcome` (`accepted` or `rejected`), `revision`, `items`, `cve_items` | The POA&M must be awaiting verification. Never closes it. |
+
+Write authorization runs inside the transaction of the change. The server locks
+the owner row, then the token row (not revoked, not expired, same owner, scope
+present), then the owner's roles and memberships, all `FOR SHARE`. The owner
+must still be an Operator or Admin. The effective environments are the grant
+intersected with the owner's current environments (an Admin owner: the grant),
+active environments only. The acting identity is never treated as Admin. A POA&M
+write or verification needs every subject of the POA&M in the effective set;
+otherwise `not_found`. A token revoked between calls cannot write: the revoke
+and the write serialize on the token row.
+
+### Attribution
+
+Every write made through a token records the token. Migration
+`0341_agent_action_attribution.sql` adds `access_token_id` (nullable, `ON
+DELETE SET NULL`) to `admin_audit_events`, `poam_activity` and
+`poam_verification_attempts`. Audit metadata of a token write also holds
+`via: "mcp"`, `access_token_id` and a snapshot of `access_token_name`, so the
+name survives token deletion. The token owner stays the actor. The Audit Log
+shows "<actor> · via agent token <name>", and POA&M activity and verification
+attempts show "via agent token <name>". The Audit Log API returns `via_agent`,
+which is `true` when `access_token_id` is set, when the metadata has
+`via: "mcp"`, or for `mcp_write_denied`; a deleted token therefore keeps the
+marker, with the name snapshot or "(deleted token)" when no name is known.
+Browser writes record no token.
+
+Migration `0342_agent_action_attribution_snapshot.sql` stores the attribution
+on the POA&M history rows themselves. `poam_activity` and
+`poam_verification_attempts` get `via_agent` (true for a token write,
+independent of the foreign key) and `access_token_name` (the token name at
+write time). The activity and verification attempt views return `via_agent`
+(stored marker or `access_token_id` set) and `access_token_name` (stored
+snapshot, else the live token name for rows written before 0342). Rows written
+before 0342 are not updated, because the history tables reject UPDATE. For
+the same reason, the `ON DELETE SET NULL` action of 0341 cannot run on these
+tables: a DELETE of a token that POA&M activity or attempts name fails with
+"POA&M activity and verification history is immutable", and the token row
+stays.
+
+A write tool call that ends in `forbidden` or `not_found` writes one
+`mcp_write_denied` audit event with the tool name and the reason code. Tool
+arguments are never recorded.
+
 ## Unsupported features
 
 - MCP OAuth authorization and protected resource metadata.
@@ -276,7 +410,12 @@ stored. Treat all tool text as data, never as instructions.
 - Sessions (`Mcp-Session-Id`) and session termination.
 - Resources, prompts, sampling, elicitation, completions and logging.
 - JSON-RPC batches.
-- Mutating tools and write scopes (milestone M4).
+- `poams:close`, risk acceptance, waivers, finding links and reopening.
+- Policy and bundle drafts, imports and impact preview (TASK-534.7,
+  TASK-534.8). XCCDF and STIG import through MCP.
+- Trust, publication, assignment, enforcement-mode changes and deletion of
+  security content, for every token.
+- An idempotency key for `request_cve_scan`; repeated requests return the active scan of the target instead.
 - Cancellation of a running request by `notifications/cancelled`.
 
 ## Security notes

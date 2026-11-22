@@ -7,7 +7,8 @@
 //
 // Requires facts: operator {username,password,roleWire}, accessTokens {environment,
 // otherEnvironment, operatorToken, browserToken, lifetimeDays, readScopes,
-// unavailableScopes}; receipts: authorization.operator.userId; the create phase
+// writeScopes, optionalReadScopes, adminOnlyScopes, unavailableScopes};
+// receipts: authorization.operator.userId; the create phase
 // needs the API-created Operator token to be the only existing row; rotate needs
 // accessTokens.browser.createdId; revoke needs accessTokens.browser.rotate.newId.
 //
@@ -192,13 +193,24 @@ async function createPhase(ctx) {
     for (const scope of t.readScopes) {
       await expect(dialog.getByRole("checkbox", { name: new RegExp(escapeRegExp(scope)) })).toBeChecked();
     }
-    for (const scope of t.unavailableScopes) {
+    // Write scopes and the compliance read scopes are selectable for an
+    // Operator but never preselected.
+    for (const scope of [...t.writeScopes, ...t.optionalReadScopes]) {
+      const box = dialog.getByRole("checkbox", { name: new RegExp(escapeRegExp(scope)) });
+      await expect(box).toBeEnabled();
+      await expect(box).not.toBeChecked();
+    }
+    for (const scope of [...t.adminOnlyScopes, ...t.unavailableScopes]) {
       const box = dialog.getByRole("checkbox", { name: new RegExp(escapeRegExp(scope)) });
       await expect(box).toBeDisabled();
       await expect(box).not.toBeChecked();
     }
-    // The tile shows only the reason, one per unreleased scope.
+    // Each unavailable tile shows only its reason: the role reason for an
+    // Admin-only scope, the release reason for an unreleased scope.
+    await expect(dialog.getByText("Requires Admin", { exact: true })).toHaveCount(t.adminOnlyScopes.length);
     await expect(dialog.getByText("Not supported yet", { exact: true })).toHaveCount(t.unavailableScopes.length);
+    // The capability help states that no capability trusts, publishes or assigns.
+    await expect(dialog.getByText(/no capability can trust, publish or assign security content/)).toBeVisible();
     await ctx.screenshot("access-token-create-modal");
 
     const [response] = await Promise.all([
@@ -237,7 +249,7 @@ async function createPhase(ctx) {
       // names a scope only when the role no longer permits it.
       for (const title of ["Granted at creation", "Effective now"]) {
         await expect(section(title).getByText(t.environment, { exact: true })).toBeVisible();
-        for (const scope of t.unavailableScopes) {
+        for (const scope of [...t.writeScopes, ...t.optionalReadScopes, ...t.adminOnlyScopes, ...t.unavailableScopes]) {
           await expect(section(title).getByText(scope, { exact: true })).toHaveCount(0);
         }
       }

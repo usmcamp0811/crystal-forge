@@ -906,6 +906,17 @@ pub struct VerificationAttemptView {
     pub attempted_by: Uuid,
     /// Records when verification ran.
     pub attempted_at: DateTime<Utc>,
+    /// Identifies the owner access token that requested verification, or
+    /// `None` for a browser session. `attempted_by` stays the human owner.
+    pub access_token_id: Option<Uuid>,
+    /// Gives the token name recorded with the attempt. Attempts recorded
+    /// before migration 0342 give the current name of `access_token_id`
+    /// instead. `None` means a browser session, or an older attempt whose
+    /// token row no longer exists.
+    pub access_token_name: Option<String>,
+    /// Reports whether an access token requested the attempt. It stays true
+    /// when `access_token_id` and `access_token_name` are `None`.
+    pub via_agent: bool,
     /// Reports the immutable per-finding observations in the attempt.
     pub items: Vec<VerificationItemView>,
     /// Reports immutable exact-CVE results without changing `items` semantics.
@@ -1040,6 +1051,17 @@ pub struct ActivityView {
     pub payload: serde_json::Value,
     /// Records when the activity occurred.
     pub created_at: DateTime<Utc>,
+    /// Identifies the owner access token that made the change, or `None` for
+    /// a browser session or server action. `actor_user_id` stays the owner.
+    pub access_token_id: Option<Uuid>,
+    /// Gives the token name recorded with the event. Events recorded before
+    /// migration 0342 give the current name of `access_token_id` instead.
+    /// `None` means no token, or an older event whose token row no longer
+    /// exists.
+    pub access_token_name: Option<String>,
+    /// Reports whether an access token made the change. It stays true when
+    /// `access_token_id` and `access_token_name` are `None`.
+    pub via_agent: bool,
 }
 
 /// Reports a POA&M with bounded evidence and activity histories.

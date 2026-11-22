@@ -81,6 +81,15 @@ pub struct AdminAuditEventRow {
     pub action: String,
     pub target: String,
     pub request_origin: Option<String>,
+    /// Access token through which an agent acted; `None` for browser and
+    /// server actions.
+    pub access_token_id: Option<Uuid>,
+    /// `true` when an agent acted through an access token. Stays `true` after
+    /// the token row is deleted and `access_token_id` becomes `NULL`.
+    pub via_agent: bool,
+    /// Token name snapshot from the event metadata, or the current token name
+    /// when the event has no snapshot.
+    pub access_token_name: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -359,11 +368,30 @@ pub async fn delete_oidc_mapping(
     Ok(row)
 }
 
+/// Returns the newest 300 admin audit events with their agent attribution.
+///
+/// The token name prefers the `access_token_name` snapshot that agent writes
+/// store in the metadata, so a renamed token still shows the name at the time
+/// of the action. Events without a snapshot fall back to the current name.
+///
+/// `via_agent` marks an event made through an access token. Deleting the
+/// token sets `access_token_id` to `NULL` (`ON DELETE SET NULL`), so the
+/// marker also reads the persistent metadata: `via = "mcp"` on token writes,
+/// and the `mcp_write_denied` action, whose metadata has no `via` key.
+///
+/// # Errors
+/// Returns database errors.
 pub async fn list_admin_audit_events(pool: &PgPool) -> Result<Vec<AdminAuditEventRow>> {
     let rows = sqlx::query_as::<_, AdminAuditEventRow>(
-        "SELECT created_at, actor_identifier, action, target, request_origin
-         FROM admin_audit_events
-         ORDER BY created_at DESC
+        "SELECT e.created_at, e.actor_identifier, e.action, e.target, e.request_origin,
+                e.access_token_id,
+                (e.access_token_id IS NOT NULL
+                 OR COALESCE(e.metadata ->> 'via', '') = 'mcp'
+                 OR e.action = 'mcp_write_denied') AS via_agent,
+                COALESCE(e.metadata ->> 'access_token_name', t.name) AS access_token_name
+         FROM admin_audit_events e
+         LEFT JOIN api_access_tokens t ON t.id = e.access_token_id
+         ORDER BY e.created_at DESC
          LIMIT 300",
     )
     .fetch_all(pool)
