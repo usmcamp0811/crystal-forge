@@ -1,10 +1,10 @@
 use crate::config::CrystalForgeConfig;
 use crate::queries::cve_scans::{
-    CreateCveScanOutcome, ScanTrigger, acknowledge_revoked_cve_scan_execution,
-    acquire_execution_lock, create_cve_scan_with_trigger, get_active_scan_for_derivation,
-    heartbeat_cve_scan_execution, mark_cve_scan_failed_by_id_for_execution,
-    mark_cve_scan_failed_for_execution, release_execution_lock_or_close,
-    save_scan_results_for_execution,
+    CreateCveScanOutcome, ScanRequestToken, ScanTrigger, SystemScanAdmission,
+    acknowledge_revoked_cve_scan_execution, acquire_execution_lock, admit_system_cve_scan,
+    create_cve_scan_with_trigger, get_active_scan_for_derivation, heartbeat_cve_scan_execution,
+    mark_cve_scan_failed_by_id_for_execution, mark_cve_scan_failed_for_execution,
+    release_execution_lock_or_close, save_scan_results_for_execution,
 };
 use crate::queries::derivations::get_derivation_by_id;
 use crate::vulnix::vulnix_runner::VulnixRunner;
@@ -157,6 +157,83 @@ where
         revocation_ack_gate,
     )
     .await
+}
+
+/// Reports why [`request_system_cve_scan`] produced no admission outcome.
+#[derive(Debug)]
+pub(crate) enum SystemScanRequestError {
+    /// Authorization, admission or audit persistence failed. Nothing was
+    /// committed.
+    Admission(anyhow::Error),
+    /// The admission committed, but its managed-local execution did not
+    /// start. The scan lifecycle records the failure.
+    Start(CveScanError),
+}
+
+/// Probes the local scanner, admits one system scan and starts its
+/// managed-local execution after commit.
+///
+/// This is the single implementation behind the browser request
+/// (`POST /systems/:id/cve-scan`) and the MCP `request_cve_scan` tool.
+/// Capability probing holds no database locks. Authorization, exact intent,
+/// admission and audit then share one writer transaction (see
+/// [`admit_system_cve_scan`]); local execution starts only after that
+/// transaction commits. `token` is `None` for a browser request and names the
+/// acting access token for an agent request.
+///
+/// The returned [`SystemScanAdmission::Admitted`] value always has
+/// `immediate: None`, because this function already started the execution
+/// that the claim described.
+///
+/// # Errors
+/// - [`SystemScanRequestError::Admission`] when the admission transaction
+///   fails.
+/// - [`SystemScanRequestError::Start`] when the committed scan cannot start.
+pub(crate) async fn request_system_cve_scan(
+    pool: &PgPool,
+    actor: Uuid,
+    system_id: Uuid,
+    expected: Option<i32>,
+    request_origin: Option<String>,
+    token: Option<&ScanRequestToken>,
+) -> Result<SystemScanAdmission, SystemScanRequestError> {
+    let local_available = VulnixRunner::check_vulnix_available().await;
+    let version = if local_available {
+        VulnixRunner::get_vulnix_version().await.ok()
+    } else {
+        None
+    };
+    let admission = admit_system_cve_scan(
+        pool,
+        actor,
+        system_id,
+        expected,
+        local_available,
+        version.clone(),
+        request_origin,
+        token,
+    )
+    .await
+    .map_err(SystemScanRequestError::Admission)?;
+    match admission {
+        SystemScanAdmission::Admitted {
+            scan_id,
+            target,
+            configuration_derivation_id,
+            immediate: Some(claim),
+        } => {
+            execute_admitted_immediate_scan(pool.clone(), claim, version)
+                .await
+                .map_err(SystemScanRequestError::Start)?;
+            Ok(SystemScanAdmission::Admitted {
+                scan_id,
+                target,
+                configuration_derivation_id,
+                immediate: None,
+            })
+        }
+        other => Ok(other),
+    }
 }
 
 /// Starts an already committed managed-local execution with existing fencing.

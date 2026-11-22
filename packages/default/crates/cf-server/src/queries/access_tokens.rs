@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use sqlx::{Executor, Postgres, Transaction};
+use sqlx::{Executor, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::models::auth_identity::AuthRole;
@@ -196,7 +196,7 @@ pub async fn lock_owner_row_tx(
 }
 
 /// Returns the active environments the owner may select as
-/// `(id, name, color)`, sorted by name.
+/// `(id, name, color, is_production)`, sorted by name.
 ///
 /// An Admin sees every active environment. Other roles see active
 /// environments they are assigned to. `color` is `None` unless the stored
@@ -208,13 +208,14 @@ pub async fn selectable_environments<'e, E>(
     executor: E,
     user_id: Uuid,
     is_admin: bool,
-) -> Result<Vec<(Uuid, String, Option<String>)>>
+) -> Result<Vec<(Uuid, String, Option<String>, bool)>>
 where
     E: Executor<'e, Database = Postgres>,
 {
-    Ok(sqlx::query_as::<_, (Uuid, String, Option<String>)>(
+    Ok(sqlx::query_as::<_, (Uuid, String, Option<String>, bool)>(
         "SELECT e.id, e.name,
-                CASE WHEN e.color_hex ~ '^#[0-9A-Fa-f]{6}$' THEN e.color_hex::text END
+                CASE WHEN e.color_hex ~ '^#[0-9A-Fa-f]{6}$' THEN e.color_hex::text END,
+                e.is_production
          FROM environments e
          WHERE COALESCE(e.is_active, false)
            AND ($2 OR EXISTS (SELECT 1 FROM user_environment_memberships m
@@ -244,6 +245,25 @@ pub async fn lock_environments_tx(
     )
     .bind(ids)
     .fetch_all(&mut **tx)
+    .await?)
+}
+
+/// Reports whether any of the named environments has `is_production`.
+///
+/// Call it after [`lock_environments_tx`] so the flag cannot change before the
+/// transaction ends. Missing ids do not count.
+///
+/// # Errors
+/// Returns database errors.
+pub async fn any_production_environment_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    ids: &[Uuid],
+) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM environments WHERE id = ANY($1) AND is_production)",
+    )
+    .bind(ids)
+    .fetch_one(&mut **tx)
     .await?)
 }
 
@@ -770,4 +790,45 @@ where
     )
     .fetch_one(executor)
     .await?)
+}
+
+/// Records one MCP write tool call that authorization denied.
+///
+/// Writes an `mcp_write_denied` admin audit event with the owner as actor,
+/// `target` set to the public token id in simple (32 hex) form, and
+/// `access_token_id` set. The metadata holds `tool`, `reason` and a snapshot
+/// of the token name as `access_token_name`.
+///
+/// SECURITY: `tool` and `reason` MUST be fixed server-side strings: the tool
+/// name and a reason code. The caller MUST NOT pass tool arguments or other
+/// client text, because the Audit Log shows the metadata to administrators.
+///
+/// # Errors
+/// Returns database errors, including a foreign-key violation when the owner
+/// or the token row no longer exists.
+pub async fn insert_mcp_write_denied(
+    pool: &PgPool,
+    owner_user_id: Uuid,
+    token_id: Uuid,
+    tool: &str,
+    reason: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO admin_audit_events
+             (actor_user_id, actor_identifier, action, target, access_token_id, metadata)
+         VALUES ($1, COALESCE((SELECT email FROM users WHERE id = $1), $1::text),
+                 'mcp_write_denied', $2, $3,
+                 jsonb_build_object(
+                     'tool', $4::text, 'reason', $5::text,
+                     'access_token_name',
+                     (SELECT name FROM api_access_tokens WHERE id = $3)))",
+    )
+    .bind(owner_user_id)
+    .bind(token_id.simple().to_string())
+    .bind(token_id)
+    .bind(tool)
+    .bind(reason)
+    .execute(pool)
+    .await?;
+    Ok(())
 }

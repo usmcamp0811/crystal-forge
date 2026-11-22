@@ -186,6 +186,7 @@ async fn scan_admitted(pool: &PgPool, f: &Fixture, static_destination: Option<&s
         None,
         None,
         static_destination,
+        None,
     )
     .await
     .unwrap();

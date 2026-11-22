@@ -2248,24 +2248,15 @@ pub async fn trigger_system_cve_scan(
         return response;
     }
 
-    // Capability probing holds no database locks. Authorization, exact intent,
-    // admission and audit then share one writer transaction; local execution
-    // starts only after that transaction commits.
-    let local_available =
-        crate::vulnix::vulnix_runner::VulnixRunner::check_vulnix_available().await;
-    let version = if local_available {
-        crate::vulnix::vulnix_runner::VulnixRunner::get_vulnix_version()
-            .await
-            .ok()
-    } else {
-        None
-    };
+    // The shared service probes the scanner without locks, admits and audits
+    // in one writer transaction, and starts local execution after commit.
     use crate::queries::cve_scans::SystemScanAdmission;
-    let (scan_id, target, configuration_derivation_id, immediate) = match crate::queries::cve_scans::admit_system_cve_scan(
-        &pool, user_id, system_id, intent.expected_derivation_id, local_available, version.clone(),
-        extract_request_origin(&headers),
+    use crate::services::cve_scans::{SystemScanRequestError, request_system_cve_scan};
+    let (scan_id, target, configuration_derivation_id) = match request_system_cve_scan(
+        &pool, user_id, system_id, intent.expected_derivation_id,
+        extract_request_origin(&headers), None,
     ).await {
-        Ok(SystemScanAdmission::Admitted { scan_id, target, configuration_derivation_id, immediate }) => (scan_id, target, configuration_derivation_id, immediate),
+        Ok(SystemScanAdmission::Admitted { scan_id, target, configuration_derivation_id, .. }) => (scan_id, target, configuration_derivation_id),
         Ok(SystemScanAdmission::NotFound) => return not_found(),
         Ok(SystemScanAdmission::Unavailable { scan_id, derivation_id, configuration_derivation_id }) => return (
             StatusCode::CONFLICT,
@@ -2282,16 +2273,9 @@ pub async fn trigger_system_cve_scan(
             StatusCode::CONFLICT,
             Json(ApiError { error: "scan_ineligible".into(), message, details: None }),
         ).into_response(),
-        Err(_) => return internal_error("Failed to admit system CVE scan"),
+        Err(SystemScanRequestError::Admission(_)) => return internal_error("Failed to admit system CVE scan"),
+        Err(SystemScanRequestError::Start(_)) => return internal_error("Failed to start admitted CVE scan"),
     };
-    if let Some(claim) = immediate {
-        if crate::services::cve_scans::execute_admitted_immediate_scan(pool.clone(), claim, version)
-            .await
-            .is_err()
-        {
-            return internal_error("Failed to start admitted CVE scan");
-        }
-    }
 
     (
         StatusCode::ACCEPTED,
@@ -3926,6 +3910,13 @@ fn action_to_str(action: AuditAction) -> &'static str {
         AuditAction::AccessTokenCreated => "access_token_created",
         AuditAction::AccessTokenRotated => "access_token_rotated",
         AuditAction::AccessTokenRevoked => "access_token_revoked",
+        AuditAction::McpWriteDenied => "mcp_write_denied",
+        AuditAction::PoamNote => "poam_note",
+        AuditAction::PoamStatusChanged => "poam_status_changed",
+        AuditAction::PoamMilestoneAdded => "poam_milestone_added",
+        AuditAction::PoamMilestoneUpdated => "poam_milestone_updated",
+        AuditAction::PoamMilestoneRemoved => "poam_milestone_removed",
+        AuditAction::PoamVerificationAttempted => "poam_verification_attempted",
     }
 }
 

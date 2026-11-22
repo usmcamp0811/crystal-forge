@@ -2,8 +2,9 @@
 //!
 //! These nonsecret values are domain authorization inputs, not proof of bearer
 //! authentication. No token storage, revocation validator, or MCP admission is
-//! implemented here. Restricted mutations remain disabled until transactional
-//! token-row validation and capability-specific release policy exist.
+//! implemented here. Restricted POA&M mutations validate the token row in
+//! their own transaction (`services::poam::restricted_progress` and
+//! `services::poam::restricted_verify`); a grant alone never authorizes one.
 
 use std::collections::BTreeSet;
 
