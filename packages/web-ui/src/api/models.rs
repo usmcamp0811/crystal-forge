@@ -3234,6 +3234,14 @@ pub struct ComplianceBundleVersionSummary {
     pub is_current_published: bool,
     #[serde(default)]
     pub is_current_draft: bool,
+    /// Reports that an owner access token created this version through MCP.
+    /// Absent in responses from servers before migration 0345.
+    #[serde(default)]
+    pub created_via_agent: bool,
+    /// Token name recorded when the version was created through MCP; `None`
+    /// when the server recorded no name.
+    #[serde(default)]
+    pub created_access_token_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3752,6 +3760,14 @@ pub struct DeploymentPolicyVersionSummary {
     /// Human-readable display name of the user who created this version (username or email)
     #[serde(default)]
     pub created_by_display: Option<String>,
+    /// Reports that an owner access token created this version through MCP.
+    /// Absent in responses from servers before migration 0344.
+    #[serde(default)]
+    pub created_via_agent: bool,
+    /// Token name recorded when the version was created through MCP; `None`
+    /// when the server recorded no name.
+    #[serde(default)]
+    pub created_access_token_name: Option<String>,
     /// Evidence collection specifications for ATO audits
     #[serde(default)]
     pub evidence_specs: Vec<EvidenceSpec>,

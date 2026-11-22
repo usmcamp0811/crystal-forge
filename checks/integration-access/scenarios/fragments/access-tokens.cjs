@@ -193,8 +193,8 @@ async function createPhase(ctx) {
     for (const scope of t.readScopes) {
       await expect(dialog.getByRole("checkbox", { name: new RegExp(escapeRegExp(scope)) })).toBeChecked();
     }
-    // Write scopes and the compliance read scopes are selectable for an
-    // Operator but never preselected.
+    // Write scopes, the compliance read scopes and compliance:preview
+    // (TASK-534.7) are selectable for an Operator but never preselected.
     for (const scope of [...t.writeScopes, ...t.optionalReadScopes]) {
       const box = dialog.getByRole("checkbox", { name: new RegExp(escapeRegExp(scope)) });
       await expect(box).toBeEnabled();

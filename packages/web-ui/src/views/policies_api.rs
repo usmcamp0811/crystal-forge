@@ -285,6 +285,8 @@ mod tests {
                 rationale: None,
                 created_by: None,
                 created_by_display: None,
+                created_via_agent: false,
+                created_access_token_name: None,
                 evidence_specs: Vec::new(),
                 provenance: Vec::new(),
             }],
@@ -712,6 +714,8 @@ fn policy_record_to_definition_with_count(
             rationale: v.rationale,
             created_by: v.created_by,
             created_by_display: v.created_by_display,
+            created_via_agent: v.created_via_agent,
+            created_access_token_name: v.created_access_token_name,
             evidence_specs: v.evidence_specs,
             provenance: v.provenance,
         })

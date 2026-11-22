@@ -84,13 +84,20 @@ pub struct CatalogPolicyVersion {
     pub created_at: DateTime<Utc>,
     /// Publication time, if published.
     pub published_at: Option<DateTime<Utc>>,
+    /// Optimistic-concurrency counter of a mutable version (migration 0344).
+    /// It never changes after publication.
+    pub draft_revision: i64,
+    /// Reports that an owner access token created the version through MCP.
+    pub created_via_agent: bool,
+    /// Token name recorded at creation through MCP, if any.
+    pub created_access_token_name: Option<String>,
 }
 
 const POLICY_VERSION_COLUMNS: &str = "v.id, v.policy_id, v.version, v.name, v.description, \
      v.policy_type, v.publication_state, v.trust_state, v.implementation_state, \
      v.execution_phase, v.enabled_by_default, v.config, v.semantic_digest, v.mapping_digest, \
      v.source_artifact_id, v.derived_from_version_id, v.created_by, v.created_at, \
-     v.published_at";
+     v.published_at, v.draft_revision, v.created_via_agent, v.created_access_token_name";
 
 /// Filters of a policy lineage search. `None` applies no filter.
 #[derive(Debug, Clone, Copy, Default)]
@@ -277,13 +284,20 @@ pub struct CatalogBundleVersion {
     pub created_at: DateTime<Utc>,
     /// Publication time, if published.
     pub published_at: Option<DateTime<Utc>>,
+    /// Optimistic-concurrency counter of a mutable version (migration 0345).
+    /// It never changes after publication.
+    pub draft_revision: i64,
+    /// Reports that an owner access token created the version through MCP.
+    pub created_via_agent: bool,
+    /// Token name recorded at creation through MCP, if any.
+    pub created_access_token_name: Option<String>,
 }
 
 const BUNDLE_VERSION_COLUMNS: &str = "v.id, v.bundle_id, v.version, v.name, v.framework, \
      v.framework_version, v.framework_version_id, v.description, v.layer, v.owner, \
      v.publication_state, v.trust_state, v.semantic_digest, v.requirement_digest, \
      v.source_artifact_id, v.derived_from_version_id, v.created_by, v.created_at, \
-     v.published_at";
+     v.published_at, v.draft_revision, v.created_via_agent, v.created_access_token_name";
 
 /// Returns up to `limit` bundle lineages after `after`, in
 /// `(name COLLATE "C", id)` order. `query` is a case-insensitive substring of

@@ -98,6 +98,10 @@ pub struct PolicyRevisionSummary {
     pub created_by: Option<uuid::Uuid>,
     /// Human-readable display name of the user who created this version (username or email).
     pub created_by_display: Option<String>,
+    /// Reports that an owner access token created this revision through MCP.
+    pub created_via_agent: bool,
+    /// Token name recorded at creation through MCP, if any.
+    pub created_access_token_name: Option<String>,
     /// Evidence collection specifications for ATO audits.
     pub evidence_specs: Vec<crate::api::models::EvidenceSpec>,
     /// Authoritative imported-origin provenance for this exact revision.
