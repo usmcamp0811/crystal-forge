@@ -1,4 +1,5 @@
 pub mod acceptance_register;
+pub mod access_tokens;
 pub mod admin;
 pub mod auth_dev;
 pub mod auth_local;

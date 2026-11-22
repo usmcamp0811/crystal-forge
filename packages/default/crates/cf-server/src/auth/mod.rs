@@ -1,3 +1,4 @@
+pub mod access_token;
 pub mod authorization;
 pub mod dev_mode;
 pub mod extractors;

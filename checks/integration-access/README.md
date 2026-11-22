@@ -252,7 +252,26 @@ one controller VM/database:
    snapshot for cancel checks, the still-absent design identity `u3`, and restored
    installed configuration, including the disabled banner. `admin-forms.cjs`
    serves the seven registered phases; request/completion receipts select one
-   phase at a time, with SQL checks between phases.
+       phase at a time, with SQL checks between phases.
+6. `fragments/access-tokens.{py,cjs}` is the last fragment, composed after
+   `management-registration.py` (environment, preference, shell and registration
+   fragments sit between items 5 and 6 and are not listed). It uses the Admin,
+   Operator and Viewer jars and receipts, creates two environments through the
+   Admin API, and leaves the Operator and Viewer assigned to one of them. Its
+   Python cases cover policy, create, hash-only storage, denials, owner isolation,
+   bearer refusal and the Admin audit log. The CJS runs three registered phases
+   (`access-token-create`, `access-token-rotate`, `access-token-revoke`) as the
+   Operator in the real Profile UI, with SQL checks between phases.
+       **Implemented, not yet run.**
+
+    Design reference for the Access tokens card: the approved design is the
+    single HTML file `docs/design/CrystalForge/crystal-forge.html`
+    (`AccessTokensCard`, `CfatCreateModal`, `CfatReveal`, `CfatDetails` and
+    `CfatConfirm`, about lines 76440-77002). The scenario's screenshots are the
+    images for design comparison. Visual comparison status: screenshots
+    captured, side-by-side comparison done by the maintainer on the dev server,
+    no automated pixel baseline. The CJS asserts accessible names and
+    behavior only.
 
 Every browser run signs in independently using authored facts and verifies its
 identity against same-run receipts. Operator, Viewer and target identities and

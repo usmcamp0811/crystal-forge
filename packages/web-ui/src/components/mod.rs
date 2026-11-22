@@ -5,6 +5,7 @@
 //!
 //! # Organization
 //!
+//! - `access_tokens` - Owner access-token card of the Profile view
 //! - `charts` - Data visualization (donut charts, etc.)
 //! - `cve` - CVE vulnerability display components
 //! - `dashboard` - Dashboard panels (fleet health, build queue, etc.)
@@ -13,6 +14,7 @@
 //! - `filters` - Filter dropdowns, view toggles, filter bars
 //! - `forms` - Form components for data entry
 //! - `layout` - Application shell, cards, sidebar, topbar
+//! - `mcp_server_card` - Read-only MCP server status card of Admin → Server
 //! - `modals` - Dialog components
 //! - `notifications` - Toast notifications
 //! - `tables` - Sortable headers, table containers
@@ -23,6 +25,7 @@
 //! - `poam` - POA&M remediation workflow components
 
 // Domain-specific component modules
+pub mod access_tokens;
 pub mod builders;
 pub mod builds;
 pub mod charts;
@@ -37,6 +40,7 @@ pub mod filters;
 pub mod flake;
 pub mod forms;
 pub mod heartbeat_spinner;
+pub mod mcp_server_card;
 pub mod modals;
 pub mod notifications;
 pub mod onboarding;

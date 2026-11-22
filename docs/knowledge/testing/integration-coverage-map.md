@@ -34,6 +34,24 @@ The historical execution records below do not verify these new inputs.
 | `access.configuration`, assurance UI bindings | Same Assurance fragment and explicit `configuration-register`, `configuration-evidence`, `configuration-removed` browser registrations | Conditional enrollment/edit fields and mode confirmation; Systems mode filter; Overview, Deploy, Logs, Evidence history filters, Config, CVEs, Hardening and Compliance; exact artifact findings read-only, unavailable runtime/deploy/hardening states, scan request identity; dark/light tab captures and narrow unavailable state. | Browser execution **passed** at `5176d483` (dark and light, both modes). Captures are review candidates, not approved baselines; independent design reference/difference images are not produced. |
 | Deploy tab flake-position lane and target picker (TASK-525.1, design `bd8d068d`) | Delivery `delivery-lifecycle`, `fragments/activation.cjs`; Assurance `configuration-evidence` and `configuration-removed` in `fragments/configuration-assurance.cjs` | Deploy tab: lane card state, banner absent, `Deploy target` picker Commits tab, picker and lane share the selected commit, held nonterminal deployment drawn in the lane (`Deploying`/`Rolling back`, current stage `Applying`/`Reverting`). External/Reference overview: lane at the evidence artifact revision with the declared/tracked verb; removed configuration shows the unknown lane. The old `Select target`/`New commit` assertions are replaced under the approved design revision. | **Not run.** Pending exact-head execution of both owners. |
 
+### TASK-534.3 owner access-token lifecycle additions (implemented, not yet run)
+
+Authority: TASK-534.3 API contract and acceptance criteria 1-4, 6 and 7, and
+[CF-AGENT-ACCESS-001 v1.1](../security/agent-access-tokens-mcp-remediation-context.md).
+These additions extend the existing Access `lifecycle-local-bootstrap` scenario
+as its last fragment. They add no scenario, VM, harness, check owner or flake
+check, and no automated pixel baseline. The approved design is the single HTML
+file `docs/design/CrystalForge/crystal-forge.html` (`AccessTokensCard`,
+`CfatCreateModal`, `CfatReveal`, `CfatDetails` and `CfatConfirm`, about lines
+76440-77002). The scenario's screenshots are the images for design comparison.
+Visual comparison status: screenshots captured, side-by-side comparison done by
+the maintainer on the dev server, no automated pixel baseline.
+
+| Contract | Existing owner/scenario and fragment | Added mandatory proof | Status (exact commit) |
+| --- | --- | --- | --- |
+| `access.lifecycle` (owner access tokens) | Access `lifecycle-local-bootstrap`, `fragments/access-tokens.py` | Nine cases. The local Operator, assigned one active environment through the Admin API, previews a policy with only that environment, three selectable read scopes and four unavailable scopes. Create returns 201 with a `cfat_v1_` secret once. SQL shows one row, a 32-byte hash equal to the SHA-256 of the returned secret, and no plaintext in the token tables or the audit log. An unassigned or mixed environment, an unavailable scope and a missing CSRF header create nothing. A Viewer creates a read-only token but cannot select `scans:request`. List and detail carry no `token` field. Another user's session gets 404 for read, revoke and rotate. A bearer credential gets 401 with and without a cookie. The Admin audit log lists the created, rotated and revoked events. | **Implemented, not yet run.** No farm result exists for this revision. |
+| `access.lifecycle` (owner access tokens in Profile) | Access `lifecycle-local-bootstrap`, `fragments/access-tokens.cjs`, registered as `access-token-create`, `access-token-rotate` and `access-token-revoke` | A real Operator browser (no Admin link) opens the Access tokens card, creates a token for its environment with the default read scopes, sees the one-time reveal with Done disabled until the acknowledgement, and records only a SHA-256 fingerprint of the secret. The secret is absent from page text, storage, cookies and URL after Done and after reload. Details show granted and effective access. Rotate shows the old row Revoked and a new reveal. Revoke of the replacement shows Revoked. Python compares each recorded fingerprint with the stored hash and checks audit rows between phases. The spec asserts `Cache-Control: no-store` on the create, rotate and revoke responses. | **Implemented, not yet run.** Not covered: OIDC owners, the disabled-feature state, loading and error states, the 20-token and hourly-rate limits, expiry, and the narrow-viewport card layout. |
+
 Lower-level evidence is separate from these integration gates. The isolated
 state-machine workflow (`devScripts.state-machine-test`) passed end to end at
 `b032bd6a`. `required_inventory_exact_owner_success_and_conflict`, which an

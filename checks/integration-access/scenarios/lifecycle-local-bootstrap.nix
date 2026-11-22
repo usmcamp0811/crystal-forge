@@ -23,6 +23,17 @@
 #   Authority: the approved design's role catalogue (Admin: "Manage users &
 #   OIDC", "Edit server config") and its Server Management page ("Admin-only").
 #   Not covered here: cross-environment scope and closed registration.
+# Appended owner access-token cases (last fragment): the local Operator, assigned
+#   exactly one active environment through the Admin API, previews policy,
+#   creates a read-only token and sees only the hash persisted; denials create
+#   nothing; another user's session cannot read or change the token; a bearer
+#   credential is refused by the management API. A real Operator browser then
+#   creates, reveals once, rotates and revokes a token from Profile, and SQL
+#   proves the displayed secret is the stored credential by SHA-256 only.
+#   Authority: TASK-534.3 acceptance criteria 1-4, 6 and 7. The approved design for
+#   this card is docs/design/CrystalForge/crystal-forge.html
+#   (AccessTokensCard and its dialogs). The screenshots are the images for the
+#   maintainer's side-by-side comparison; there is no automated pixel baseline.
 # Appended Admin forms: creation, edit, cancel, disable/login
 #   rejection, retry settings and classification save/reload. Each browser
 #   phase returns to SQL verification before the next mutation. Environment
@@ -197,6 +208,25 @@ in
         };
       };
 
+      # Owner access-token lifecycle (fragments/access-tokens.{py,cjs}). Names
+      # are authored inputs; the fragment creates both environments through the
+      # Admin API and assigns only `environment` to the Operator and Viewer.
+      # Scope lists are the approved TASK-534.3 catalogue: the three read scopes
+      # are selectable and preselected, the other four are listed unavailable.
+      # Environment names are lowercase because the Admin user PATCH matches
+      # memberships by exact lowercased name.
+      accessTokens = {
+        environment = "cf-it-token-env";
+        otherEnvironment = "cf-it-token-other";
+        operatorToken = "cf-it-operator-api-token";
+        viewerToken = "cf-it-viewer-api-token";
+        deniedToken = "cf-it-denied-token";
+        browserToken = "cf-it-browser-token";
+        lifetimeDays = 30;
+        readScopes = ["cves:read" "poams:read" "provenance:read"];
+        unavailableScopes = ["scans:request" "poams:write" "poams:verify" "poams:close"];
+      };
+
       # Authored request payloads for the admin-only operations. Each denied
       # request uses a payload that the Admin control case first proves is
       # accepted, so a 403 can only be caused by the actor's role.
@@ -264,6 +294,8 @@ in
       + builtins.readFile ./fragments/shell-navigation.py
       + "\n"
       + builtins.readFile ./fragments/management-registration.py
+      + "\n"
+      + builtins.readFile ./fragments/access-tokens.py
     );
     browserSpecs = {
       bootstrap-sign-in = ./lifecycle-local-bootstrap.cjs;
@@ -304,6 +336,15 @@ in
       preferences-notification-save-failure = ./fragments/preferences.cjs;
       preferences-notification-loading = ./fragments/preferences.cjs;
       preferences-verify-b = ./fragments/preferences.cjs;
+      # One spec file, three fresh browser contexts. Python verifies SQL after
+      # each phase: create, then rotate (old revoked, replacement active), then
+      # revoke of the replacement.
+      access-token-create = ./fragments/access-tokens.cjs;
+      access-token-rotate = ./fragments/access-tokens.cjs;
+      access-token-revoke = ./fragments/access-tokens.cjs;
     };
-    timeout = 900;
+    # TASK-534.3: 900 s was exceeded on a loaded farm run (the existing cases alone
+    # took about 870 s; an unloaded run took 610 s). The access-token fragment adds
+    # nine cases and three browser launches.
+    timeout = 1500;
   }

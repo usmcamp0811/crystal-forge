@@ -16,6 +16,7 @@ use crate::api::models::{
     OidcGroupMapping, Role, ServerRuntimeInfoResponse, UpdateAutomaticRetryPolicyRequest,
     UpdateClassificationBannerRequest,
 };
+use crate::components::mcp_server_card::McpServerCard;
 use crate::components::onboarding::CoachController;
 use crate::components::{Icon, IconName};
 use crate::state::app_state::AppState;
@@ -1903,6 +1904,9 @@ fn ServerTab(
                 }
             }
 
+            // MCP server status card (full width, read-only)
+            McpServerCard {}
+
             // Agent heartbeat config card
             HeartbeatConfigCard {
                 environments,
@@ -2742,6 +2746,9 @@ fn get_audit_action_color(
         | AuditAction::SystemCreated
         | AuditAction::SystemUpdated
         | AuditAction::PolicyEdit
+        | AuditAction::AccessTokenCreated
+        | AuditAction::AccessTokenRotated
+        | AuditAction::AccessTokenRevoked
         | AuditAction::CveAccept => ("#f87171", "chip-critical", "security"),
         AuditAction::SystemDeployRequested
         | AuditAction::SystemDeploy
@@ -2792,6 +2799,9 @@ fn format_action_label(action: &crate::api::models::AuditAction) -> String {
         AuditAction::BuildComplete => "build.complete".to_string(),
         AuditAction::AuthLogin => "auth.login".to_string(),
         AuditAction::AuthLoginDenied => "auth.login_denied".to_string(),
+        AuditAction::AccessTokenCreated => "access_token.create".to_string(),
+        AuditAction::AccessTokenRotated => "access_token.rotate".to_string(),
+        AuditAction::AccessTokenRevoked => "access_token.revoke".to_string(),
         AuditAction::Unknown => "unknown".to_string(),
     }
 }
