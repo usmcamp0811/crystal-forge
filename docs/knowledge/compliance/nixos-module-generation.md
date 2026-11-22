@@ -235,7 +235,7 @@ data only — never Nix source.
 ```json
 {
   "format_version": "2",
-  "generator": "cf-nixos-module 0.3.0",
+  "generator": "cf-nixos-module 0.4.0",
   "baseline": "production-baseline",
   "bundles": [ { "bundle_id": "...", "bundle_version_id": "...", "semantic_digest": "..." } ],
   "policies": [

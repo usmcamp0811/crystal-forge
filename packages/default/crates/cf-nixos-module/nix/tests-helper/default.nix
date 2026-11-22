@@ -240,7 +240,7 @@
     (evalWith {
       manifest = manifestFromJSON ''
         {
-          "generator": "cf-nixos-module 0.3.0",
+          "generator": "cf-nixos-module 0.4.0",
           "format_version": "2",
           "policies": [
             {"name":"p","policy_version_id":"22222222-0000-0000-0000-0000000000a1",
@@ -266,7 +266,7 @@
     assert' ((builtins.head summary.bundles).bundleVersionId == "bbbb")
     "summary must expose bundle version provenance";
   t20 =
-    assert' (summary.generator == "cf-nixos-module 0.3.0")
+    assert' (summary.generator == "cf-nixos-module 0.4.0")
     "summary must expose the generator identity";
 
   # ── 7. No per-policy enable switches exist ─────────────────────────────────

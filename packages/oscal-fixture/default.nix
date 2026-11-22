@@ -1,7 +1,7 @@
 { lib, pkgs, ... }:
 pkgs.rustPlatform.buildRustPackage {
   pname = "crystal-forge-oscal-fixture";
-  version = "0.3.0";
+  version = "0.4.0";
 
   src = ./.;
 

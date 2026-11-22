@@ -1,6 +1,6 @@
 [package]
 name = "crystal-forge-oscal-fixture"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 
 # Native-only binary that generates a deterministic OSCAL 1.1.2
