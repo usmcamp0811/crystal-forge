@@ -983,8 +983,6 @@ async fn viewer_cannot_select_operator_scopes_or_unassigned_environments(pool: P
 const WRITE_SCOPES: [&str; 3] = ["scans:request", "poams:write", "poams:verify"];
 const COMPLIANCE_READ_SCOPES: [&str; 2] = ["policies:read", "bundles:read"];
 const AUTHORING_SCOPES: [&str; 3] = ["policies:draft", "policies:import", "bundles:draft"];
-/// Authoring scopes that TASK-534.7 released for Admin owners.
-const RELEASED_AUTHORING_SCOPES: [&str; 2] = ["policies:draft", "policies:import"];
 
 #[sqlx::test]
 async fn compliance_read_scopes_issue_to_viewers_and_authoring_scopes_need_admin(pool: PgPool) {
@@ -1014,8 +1012,8 @@ async fn compliance_read_scopes_issue_to_viewers_and_authoring_scopes_need_admin
     assert_eq!(granted, ["bundles:read", "policies:read"]);
 
     // An authoring scope is refused with the role reason for non-Admins; an
-    // Admin receives the scopes that TASK-534.7 released, and bundles:draft
-    // keeps the release reason. A refusal issues nothing.
+    // Admin receives every authoring scope (TASK-534.7 released the policy
+    // scopes, TASK-534.8 released bundles:draft). A refusal issues nothing.
     for scope in AUTHORING_SCOPES {
         for (who, reason) in [(&viewer, "Requires Admin"), (&operator, "Requires Admin")] {
             let denied = api
@@ -1036,22 +1034,7 @@ async fn compliance_read_scopes_issue_to_viewers_and_authoring_scopes_need_admin
             assert!(message.contains(reason), "{scope}: {message}");
         }
     }
-    let bundles = api
-        .create(
-            &admin_user,
-            &create_body("author bundles", &[env], &["bundles:draft"], 30),
-        )
-        .await;
-    assert_field_error(&bundles, "scopes");
-    assert!(
-        bundles.body["details"]["fields"]["scopes"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Not supported yet"),
-        "{}",
-        bundles.text
-    );
-    for scope in RELEASED_AUTHORING_SCOPES {
+    for scope in AUTHORING_SCOPES {
         let created = api
             .create(
                 &admin_user,
@@ -1073,7 +1056,7 @@ async fn compliance_read_scopes_issue_to_viewers_and_authoring_scopes_need_admin
         )
         .await;
     assert_eq!(preview.status, 201, "{}", preview.text);
-    assert_eq!(token_count(&pool).await, 4);
+    assert_eq!(token_count(&pool).await, 5);
 }
 
 #[sqlx::test]
@@ -2861,11 +2844,10 @@ async fn policy_reports_limits_selectable_environments_and_role_scopes(pool: PgP
     }
     assert!(!admin_ids.contains(&inactive.to_string()));
 
-    // Compliance scopes (TASK-534.6, released for policies by TASK-534.7).
+    // Compliance scopes (TASK-534.6, released by TASK-534.7 and TASK-534.8).
     // The read scopes and compliance:preview are selectable by every role and
     // never preselected. The authoring scopes report the role reason to
-    // non-Admins; an Admin can select the policy authoring scopes, and only
-    // bundles:draft still reports "Not supported yet".
+    // non-Admins; an Admin can select every authoring scope.
     for policy in [&viewer_policy, &operator_policy, &admin_policy] {
         for scope in COMPLIANCE_READ_SCOPES
             .into_iter()
@@ -2885,15 +2867,12 @@ async fn policy_reports_limits_selectable_environments_and_role_scopes(pool: PgP
             assert_eq!(entry["unavailable_reason"], "Requires Admin", "{scope}");
         }
     }
-    for scope in RELEASED_AUTHORING_SCOPES {
+    for scope in AUTHORING_SCOPES {
         let entry = policy_scope(&admin_policy, scope);
         assert_eq!(entry["available"], true, "{scope}");
         assert_eq!(entry["default_selected"], false, "{scope}");
         assert!(entry["unavailable_reason"].is_null(), "{scope}");
     }
-    let bundle_draft = policy_scope(&admin_policy, "bundles:draft");
-    assert_eq!(bundle_draft["available"], false);
-    assert_eq!(bundle_draft["unavailable_reason"], "Not supported yet");
     assert_eq!(
         policy_scope(&operator_policy, "policies:read")["label"],
         "Read security policies"

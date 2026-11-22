@@ -3555,6 +3555,15 @@ pub struct ComplianceBundleVersionSummary {
     pub is_current_published: bool,
     #[serde(default)]
     pub is_current_draft: bool,
+    /// Reports that an owner access token created this version through MCP
+    /// (migration 0345). `created_by` is then the token owner.
+    #[serde(default)]
+    pub created_via_agent: bool,
+    /// Gives the token name recorded when the version was created through MCP.
+    /// The name is a snapshot and stays after the token is deleted; it is
+    /// `None` for browser-created versions.
+    #[serde(default)]
+    pub created_access_token_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -7,7 +7,11 @@
 //! or `bundles:read` and do not use the effective environments. The five
 //! policy authoring tools in `policy_authoring` (TASK-534.7) create, update,
 //! validate, preview and import policy drafts of the same global catalog;
-//! three of them write. They also ignore the effective environments.
+//! three of them write. They also ignore the effective environments. The
+//! three bundle tools in `bundle_authoring` (TASK-534.8) create and update
+//! bundle drafts (two writes that ignore the effective environments) and
+//! preview the impact of a candidate bundle version on a system or
+//! environment, which reads only the effective environments.
 //!
 //! The transport layer authenticates the bearer token and builds a
 //! [`ToolCaller`]. This module never trusts a cached tool list: [`call_tool`]
@@ -36,6 +40,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use super::bundle_authoring::{CREATE_BUNDLE_DRAFT, PREVIEW_BUNDLE_IMPACT, UPDATE_BUNDLE_DRAFT};
 use super::compliance_read::{
     GET_COMPLIANCE_BUNDLE, GET_COMPLIANCE_POLICY, LIST_COMPLIANCE_BUNDLES,
     LIST_COMPLIANCE_POLICIES, LIST_COMPLIANCE_REQUIREMENTS,
@@ -78,8 +83,9 @@ const VERIFY_POAM: &str = "verify_poam";
 /// Returns whether a tool changes state. The transport audits a denied call of
 /// such a tool as `mcp_write_denied`.
 ///
-/// `validate_policy_draft` and `preview_policy_import` write nothing and are
-/// not write tools, although `validate_policy_draft` needs `policies:draft`.
+/// `validate_policy_draft`, `preview_policy_import` and `preview_bundle_impact`
+/// write nothing and are not write tools, although `validate_policy_draft`
+/// needs `policies:draft`.
 pub fn is_write_tool(name: &str) -> bool {
     matches!(
         name,
@@ -89,6 +95,8 @@ pub fn is_write_tool(name: &str) -> bool {
             | CREATE_POLICY_DRAFT
             | UPDATE_POLICY_DRAFT
             | IMPORT_POLICY_DRAFT
+            | CREATE_BUNDLE_DRAFT
+            | UPDATE_BUNDLE_DRAFT
     )
 }
 
@@ -173,7 +181,7 @@ impl std::fmt::Display for ToolError {
     }
 }
 
-static TOOLS: [ToolDef; 18] = [
+static TOOLS: [ToolDef; 21] = [
     ToolDef {
         name: LIST_REMEDIATION_WORK,
         title: "List remediation work",
@@ -375,6 +383,45 @@ owner. Recorded in the audit log with the source digest as made by this agent to
         required_scopes: &["policies:import"],
         input_schema: super::policy_authoring::import_policy_draft_schema,
     },
+    ToolDef {
+        name: CREATE_BUNDLE_DRAFT,
+        title: "Create compliance bundle draft",
+        description: "Creates an untrusted draft compliance bundle version owned by this \
+token's owner. mode new_lineage creates a new bundle lineage with an initial draft from name, \
+description, framework, framework_version and an optional ordered list of exact \
+policy_version_ids. mode derive creates a draft from the current published version of \
+bundle_id and keeps its exact membership. Returns bundle_id, version_id, version, \
+draft_revision and warnings for draft or untrusted members. Never trusts, publishes or \
+assigns. Requires an Admin token owner. Recorded in the audit log as made by this agent \
+token.",
+        required_scopes: &["bundles:draft"],
+        input_schema: super::bundle_authoring::create_bundle_draft_schema,
+    },
+    ToolDef {
+        name: UPDATE_BUNDLE_DRAFT,
+        title: "Update compliance bundle draft",
+        description: "Changes a mutable bundle draft that this token's owner created, at its \
+current draft_revision: description, framework, framework_version and the complete ordered \
+membership as exact policy_version_ids (never lineage IDs; at most one version per lineage). \
+A stale revision is rejected with stale_revision; values equal to the stored values change \
+nothing. Published versions and other users' drafts cannot change. Requires an Admin token \
+owner. Recorded in the audit log as made by this agent token.",
+        required_scopes: &["bundles:draft"],
+        input_schema: super::bundle_authoring::update_bundle_draft_schema,
+    },
+    ToolDef {
+        name: PREVIEW_BUNDLE_IMPACT,
+        title: "Preview compliance bundle impact",
+        description: "Compares the effective policies of one system, or of up to 100 \
+systems of one environment, now and with a candidate bundle version (it may be a draft) \
+assigned in enforcement_mode enforce or report_only. Returns added, removed and changed \
+policies by lineage and exact version, resolver conflicts, draft or untrusted members, \
+requirement coverage, facts and requires_evaluation. The target must be in this token's \
+environments; any other target is not found. Writes, assigns and schedules nothing and never \
+reports pass or fail.",
+        required_scopes: &["compliance:preview"],
+        input_schema: super::bundle_authoring::preview_bundle_impact_schema,
+    },
 ];
 
 pub(super) fn limit_schema() -> Value {
@@ -500,11 +547,13 @@ pub fn visible_tools(caller: &ToolCaller) -> Vec<&'static ToolDef> {
 /// catalog tools read global data and need only their scope. Read tools never
 /// mutate state. Write tools (`request_cve_scan`, `update_poam_progress`,
 /// `verify_poam`, `create_policy_draft`, `update_policy_draft`,
-/// `import_policy_draft`) reauthorize against the token row and the owner's
-/// current role (and, for POA&M and scan tools, environments) inside the
-/// transaction of their change, and record the token as the acting
-/// credential. No tool runs Nix commands or evaluates Nix; policy validation
-/// only parses expressions.
+/// `import_policy_draft`, `create_bundle_draft`, `update_bundle_draft`)
+/// reauthorize against the token row and the owner's current role (and, for
+/// POA&M and scan tools, environments) inside the transaction of their
+/// change, and record the token as the acting credential.
+/// `preview_bundle_impact` reads only targets in the effective environments.
+/// No tool runs Nix commands or evaluates Nix; policy validation only parses
+/// expressions.
 ///
 /// # Errors
 ///
@@ -599,6 +648,19 @@ pub async fn call_tool(
         }
         IMPORT_POLICY_DRAFT => {
             super::policy_authoring::import_policy_draft(pool, caller, arguments).await
+        }
+        // SECURITY: Bundle drafts are global catalog writes like policy
+        // drafts; the write services repeat the token, scope and Admin checks
+        // inside their transaction. The impact preview reads systems and is
+        // limited to `effective`.
+        CREATE_BUNDLE_DRAFT => {
+            super::bundle_authoring::create_bundle_draft(pool, caller, arguments).await
+        }
+        UPDATE_BUNDLE_DRAFT => {
+            super::bundle_authoring::update_bundle_draft(pool, caller, arguments).await
+        }
+        PREVIEW_BUNDLE_IMPACT => {
+            super::bundle_authoring::preview_bundle_impact(pool, &effective, arguments).await
         }
         _ => Err(ToolError::UnknownTool),
     }

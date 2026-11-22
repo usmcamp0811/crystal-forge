@@ -6,6 +6,7 @@
 
 pub mod access_tokens;
 pub mod approval_policy;
+pub mod bundle_authoring;
 pub mod canary_rollout;
 pub mod composite_enforcement;
 pub mod config_inspections;

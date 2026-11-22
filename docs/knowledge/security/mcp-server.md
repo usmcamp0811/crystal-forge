@@ -1,7 +1,7 @@
 ---
 type: Security Model
 title: MCP server
-description: Describes the MCP endpoint (read tools, token-scoped write tools and policy authoring tools) at POST /mcp - enabling it, client configuration with a static access-token bearer header, protocol versions, stateless transport, limits, authentication failures, tools, unsupported features and security rules.
+description: Describes the MCP endpoint (read tools, token-scoped write tools, policy authoring tools, bundle drafts and impact preview) at POST /mcp - enabling it, client configuration with a static access-token bearer header, protocol versions, stateless transport, limits, authentication failures, tools, unsupported features and security rules.
 tags:
   - crystal-forge
   - security
@@ -27,6 +27,18 @@ sources:
   - id: policy-revision-migration
     resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0344_policy_draft_revision_and_agent_attribution.sql at commit a7eddf68"
     title: Draft revision and version-level agent attribution
+  - id: bundle-authoring
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/mcp/bundle_authoring.rs at commit ed3ea1bb"
+    title: MCP bundle draft and impact preview tools
+  - id: bundle-authoring-service
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/services/bundle_authoring.rs at commit ed3ea1bb"
+    title: Bundle draft and candidate impact preview service
+  - id: bundle-revision-migration
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0345_bundle_draft_revision_and_agent_attribution.sql at commit ed3ea1bb"
+    title: Bundle draft revision and version-level agent attribution
+  - id: resolver
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/src/compliance/resolver.rs at commit ed3ea1bb"
+    title: Effective-policy resolver with the candidate preview mode
   - id: compliance-catalog
     resource: "Crystal Forge repository file packages/default/crates/cf-server/src/queries/compliance_catalog.rs at commit f4fcba6f"
     title: Compliance catalog queries
@@ -53,6 +65,10 @@ read tools for the global compliance catalog; see
 [Compliance read tools](#compliance-read-tools). TASK-534.7 adds five policy
 authoring tools that create, update, validate, preview and import untrusted
 policy drafts; see [Policy authoring tools](#policy-authoring-tools).
+TASK-534.8 adds two tools that create and update untrusted compliance bundle
+drafts from exact policy version IDs, and one tool that previews the effect of
+a candidate bundle version on a system or environment; see
+[Bundle authoring and impact preview](#bundle-authoring-and-impact-preview).
 
 This concept describes implemented code. It does not describe verified
 behavior: build and test results for the exact head are recorded in the task,
@@ -252,8 +268,9 @@ JSON object with `error` and `message`:
 Every call authorizes again. `call_tool` first rejects a tool whose scopes
 include an Admin-only scope when the owner is not Admin at this request's
 admission (`forbidden`). `create_policy_draft`, `update_policy_draft`,
-`validate_policy_draft` (`policies:draft`) and `import_policy_draft`
-(`policies:import`) need an Admin-only scope. It then
+`validate_policy_draft` (`policies:draft`), `import_policy_draft`
+(`policies:import`), `create_bundle_draft` and `update_bundle_draft`
+(`bundles:draft`) need an Admin-only scope. It then
 checks the tool's scopes and computes the effective environments as
 `CredentialIdentity::Restricted(grant).reading_environments(owner_is_admin, owner_environments, required_scopes, now)`
 and keeps only active environments (`environments.is_active` true; NULL is
@@ -310,7 +327,7 @@ enforcement mode or delete security content.
 | `list_compliance_policies` | `policies:read` | `query` (1 to 200 characters), `policy_type` (1 to 100 characters), `publication_state` (`incomplete`, `draft`, `interim`, `accepted`, `deprecated`), `trust_state` (`untrusted`, `trusted`, `rejected`), `limit`, `cursor`; all optional | `items`: `policy_id`, `name`, `description`, `current_published_version` and `current_draft_version` (each `version_id`, `version`, `name`, `policy_type`, `publication_state`, `trust_state`, `semantic_digest`, `created_at`, `published_at`, or null); `next_cursor` | One item per policy lineage, ordered by name (bytewise) and ID. `query` is a case-insensitive substring of the lineage name or description or of the name or description of a current version. The type and state filters match when one current version (published or draft) matches all of them. |
 | `get_compliance_policy` | `policies:read` | Exactly one of `policy_id` (lineage) and `version_id` (exact version) | `policy` (`policy_id`, `name`, `description`, `current_published_version_id`, `current_draft_version_id`); for `policy_id`: `published_version` and `draft_version` (detail or null); for `version_id`: `version` (detail); `versions` (summaries, newest first, at most 100) and `versions_truncated`; `authoring`; `note` | Detail: `version_id`, `policy_id`, `version`, `name`, `description`, `policy_type`, `publication_state`, `trust_state`, `execution_phase`, `implementation_state`, `enabled_by_default`, `config` (as stored), `semantic_digest`, `mapping_digest`, `is_current_published`, `is_current_draft`, `is_mutable`, `created_at`, `published_at`, `provenance` (`created_by`, `created_by_you`, `derived_from_version_id`, `source_artifact_id`, `source_origins`), `requirement_mappings` (complete). |
 | `list_compliance_bundles` | `bundles:read` | `query` (1 to 200 characters), `limit`, `cursor`; all optional | `items`: `bundle_id`, `name`, `current_published_version` and `current_draft_version` (each `version_id`, `version`, `name`, `framework`, `framework_version`, `framework_version_id`, `publication_state`, `trust_state`, `semantic_digest`, `created_at`, `published_at`, or null); `next_cursor` | One item per bundle lineage, ordered by name (bytewise) and ID. `query` is a case-insensitive substring of the lineage name. |
-| `get_compliance_bundle` | `bundles:read` | Exactly one of `bundle_id` (lineage) and `version_id` (exact version) | `bundle` (`bundle_id`, `name`, current pointers); `published_version` and `draft_version`, or `version`; `versions` and `versions_truncated`; `authoring`; `note` | Detail: identity, `framework`, `framework_version`, `framework_version_id`, `layer`, `owner`, `publication_state`, `trust_state`, `semantic_digest`, `requirement_digest`, current flags, `provenance` (`created_by`, `created_by_you`, `derived_from_version_id`, `source_artifact_id`), `policies` (selected exact policy versions in `policy_order`) and `requirements` (in `requirement_order`), both complete. |
+| `get_compliance_bundle` | `bundles:read` | Exactly one of `bundle_id` (lineage) and `version_id` (exact version) | `bundle` (`bundle_id`, `name`, current pointers); `published_version` and `draft_version`, or `version`; `versions` and `versions_truncated`; `authoring`; `note` | Detail: identity, `framework`, `framework_version`, `framework_version_id`, `layer`, `owner`, `publication_state`, `trust_state`, `semantic_digest`, `requirement_digest`, current flags, `draft_revision`, `provenance` (`created_by`, `created_by_you`, `created_via_agent`, `created_access_token_name`, `derived_from_version_id`, `source_artifact_id`), `policies` (selected exact policy versions in `policy_order`) and `requirements` (in `requirement_order`), both complete. |
 | `list_compliance_requirements` | `policies:read` | No arguments; or `framework_version_id` with optional `query`; or `requirement_version_id` alone. `limit` and `cursor` apply to the first two modes. | No arguments: `items` (frameworks with all their `versions`) and `next_cursor`. `framework_version_id`: `items` (requirements: `requirement_version_id`, `requirement_id`, `external_id`, `title`, `kind`, `severity`, `parent_requirement_version_id`, `semantic_digest`) and `next_cursor`. `requirement_version_id`: `requirement` and `mappings` (`policy_version_id`, `policy_id`, `policy_name`, `policy_version`, `policy_publication_state`, `relationship`, `coverage`, `provenance`, `trust_state`, `rationale`, at most 100) with `mappings_truncated` | `query` matches the requirement identifier, title, CCI or SRG IDs, and needs `framework_version_id`. A requirement page holds at most `min(limit, 50)` items; a full page carries `next_cursor`, so the last page can be empty. |
 
 Version IDs are immutable identities. A published (`accepted`) version never
@@ -333,9 +350,10 @@ draft scope, the owner is Admin, and the open draft was created by the owner.
 `can_derive_draft` is true only when the token holds the draft scope, the owner
 is Admin, no mutable draft is open, and a published version exists. The hints
 grant nothing; the draft tools check the token, the owner and the draft again.
-The policy draft tools are in [Policy authoring tools](#policy-authoring-tools).
-No bundle draft tool exists in this release, so the bundle hints always report
-`false`. A policy version detail also returns `draft_revision` and, in
+The policy draft tools are in [Policy authoring tools](#policy-authoring-tools),
+the bundle draft tools in
+[Bundle authoring and impact preview](#bundle-authoring-and-impact-preview).
+A policy or bundle version detail also returns `draft_revision` and, in
 `provenance`, `created_via_agent` and `created_access_token_name`.
 
 Untrusted text rule: names, descriptions, rationales, owner labels and policy
@@ -350,8 +368,8 @@ evaluates it. User display names are not returned; `created_by` is a user ID.
 | `bundles:read` | Selectable | Selectable | Selectable | Yes | `list_compliance_bundles`, `get_compliance_bundle` |
 | `policies:draft` | Requires Admin | Requires Admin | Selectable | Yes (TASK-534.7) | `create_policy_draft`, `update_policy_draft`, `validate_policy_draft` |
 | `policies:import` | Requires Admin | Requires Admin | Selectable | Yes (TASK-534.7) | `import_policy_draft` |
-| `bundles:draft` | Requires Admin | Requires Admin | Not supported yet | No (TASK-534.8) | None |
-| `compliance:preview` | Selectable | Selectable | Selectable | Yes (TASK-534.7) | `preview_policy_import`; impact preview is TASK-534.8 |
+| `bundles:draft` | Requires Admin | Requires Admin | Selectable | Yes (TASK-534.8) | `create_bundle_draft`, `update_bundle_draft` |
+| `compliance:preview` | Selectable | Selectable | Selectable | Yes (TASK-534.7) | `preview_policy_import`, `preview_bundle_impact` (TASK-534.8) |
 
 The read scopes are not preselected. An Admin-only scope is checked at
 creation, at rotation and on every tool call; it stops working when its owner
@@ -420,6 +438,11 @@ A write tool call that ends in `forbidden` or `not_found` writes one
 arguments are never recorded.
 
 ## Policy authoring tools
+
+A substantive MCP edit to a policy or bundle draft clears the version's trust
+decision and reviewer metadata in the same transaction. A no-op preserves the
+review and the draft revision. Review the changed draft in the browser before
+trusting or publishing it.
 
 TASK-534.7 adds five tools that propose security policy content. They write
 only untrusted drafts of the global policy catalog. They ignore the effective
@@ -572,6 +595,202 @@ publishes it. Trust, publication and assignment remain browser Admin actions.
 An agent can update only drafts that its owner created; to change another
 user's draft or a published version, it derives a new draft.
 
+## Bundle authoring and impact preview
+
+TASK-534.8 adds three tools. `create_bundle_draft` and `update_bundle_draft`
+write untrusted compliance bundle drafts of the global catalog and ignore the
+effective environments. `preview_bundle_impact` reads systems and is limited to
+the effective environments. No tool trusts, publishes, assigns, changes an
+enforcement mode, deletes or schedules work.
+
+`bundles:draft` is an Admin-only scope, with the same checks as
+`policies:draft`: at token creation, at rotation, at each call's admission and
+inside the write transaction. `compliance:preview` is open to every role. The
+domain rules are in `services::bundle_authoring`. The browser bundle routes
+keep their lineage-based behavior and responses; `POST /api/v1/compliance/bundles`
+now records the creator as `created_by` of the initial draft, and browser bundle
+creation and updates now write `bundle_draft_created` and
+`bundle_draft_updated` audit events.
+
+| Tool | Scope | Inputs | Output | Rules |
+| --- | --- | --- | --- | --- |
+| `create_bundle_draft` | `bundles:draft` | `mode: new_lineage` with `name` (1 to 255 bytes), `framework`, optional `description`, `framework_version`, `policy_version_ids` (ordered exact policy version IDs, may be empty); or `mode: derive` with `bundle_id` | `mode`, `bundle_id`, `version_id`, `version`, `draft_revision`, `derived_from_version_id`, `changed`, `changed_fields`, `warnings`, `note` | `new_lineage` rejects a used name (`name_conflict`) and creates the lineage with an untrusted draft. `derive` needs a published version and no open draft (`draft_exists`, `no_published_version`); the draft keeps the published version's exact policy and requirement membership. |
+| `update_bundle_draft` | `bundles:draft` | `version_id`, `draft_revision` (both required); optional `description` (empty clears), `framework`, `framework_version` (empty clears), `policy_version_ids` (complete ordered membership) | Same as `create_bundle_draft` with `mode: update` | Only the lineage's current mutable draft whose `created_by` is the token owner. Published or deprecated: `immutable_version`. Another user's draft: `forbidden` "bundle draft is owned by another user". Wrong revision: `stale_revision`. Equal values: `changed: false`, no write, no audit event. |
+| `preview_bundle_impact` | `compliance:preview` | `bundle_version_id`, `enforcement_mode` (`enforce` or `report_only`), and exactly one of `system_id` and `environment_id` | `candidate`, `assignable_now`, `scope_type`, `scope_id`, `enforcement_mode`, `systems` (each `system_id`, `hostname`, `current`, `proposed`, `added`, `removed`, `changed`), `truncated`, `members`, `coverage`, `facts`, `requires_evaluation`, `warnings`, `note` | The target must be in the effective environments; another or unknown target, or an unknown bundle version, gives `not_found`. An environment preview covers at most 100 systems ordered by hostname and sets `truncated`. Writes nothing. |
+
+### Exact membership
+
+`policy_version_ids` names exact policy versions, never lineages. The server
+never replaces a requested version with a lineage's newest version. A list is
+rejected without a write when it repeats a version (`duplicate_policy_version`),
+names an unknown version (`unknown_policy_version`), holds two versions of one
+lineage (`duplicate_policy_lineage`), or holds a version that bundle
+publication can never accept (`member_never_publishable`: a deprecated version,
+or a published executable version that is not trusted). A draft member gives
+the warning `draft_member` and an untrusted executable member gives
+`untrusted_member`: the draft is saved, but an Admin must publish and trust
+those members before the bundle can be published.
+
+The browser editor keeps a lineage-level membership in
+`compliance_bundle_policies`. Its trigger `sync_bundle_version_membership`
+adds a lineage's current draft or published version to the current bundle
+draft and removes all versions of a removed lineage. The service writes the
+lineage rows first, so the trigger runs, and then replaces the draft's
+`compliance_bundle_version_policies` rows with the requested versions in
+order. Both tables therefore name the same lineages, and the version rows equal
+the request. The semantic digest is then recomputed from the stored rows.
+
+### Locking and revision
+
+A write locks the owner, token and role rows `FOR SHARE`, then the bundle
+lineage row and the bundle version row `FOR UPDATE`, then the requested policy
+versions `FOR SHARE` in ID order. Two updates of one draft with the same
+`draft_revision` serialize on the lineage row: exactly one succeeds, and the
+other gets `stale_revision`.
+
+Migration `0345_bundle_draft_revision_and_agent_attribution.sql` adds
+`draft_revision` (default 1) to `compliance_bundle_versions`. A BEFORE UPDATE
+trigger increments it when a mutable version changes (digest bookkeeping and
+attribution columns do not count). Membership changes in
+`compliance_bundle_version_policies` and `compliance_bundle_version_requirements`
+also increment the parent draft's counter, so browser edits, derivations and
+MCP writes all change the revision. Migration
+`0347_bundle_revision_statement_trigger.sql` replaces the row-level membership
+triggers of 0345 with statement-level AFTER INSERT, UPDATE and DELETE triggers
+that use transition tables. They increment the counter of each affected
+mutable version at most once per transaction, independent of the number of
+membership rows and of the per-lineage statements of
+`sync_bundle_version_membership`. A replacement of a large membership
+therefore adds a small, bounded number to `draft_revision`: one for the
+membership, plus one for each version-row UPDATE that changes a business
+column, such as a metadata change or a trust reset. A no-op update writes no
+row and keeps the revision. A published or deprecated version never changes.
+Migration 0345 also adds
+`created_via_agent`, `created_access_token_id` (`ON DELETE SET NULL`) and
+`created_access_token_name` to `compliance_bundle_versions`.
+
+### Candidate impact preview
+
+The preview runs the real resolver twice for each system of the target, in one
+`REPEATABLE READ, READ ONLY` transaction that is always rolled back:
+
+- `current`: the effective policies now
+  (`resolve_system_effective_policies_in_tx` for a system,
+  `resolve_systems_effective_policies_in_tx` for an environment).
+- `proposed`: the same resolution with one hypothetical assignment of the
+  candidate version at the target in `enforcement_mode`
+  (`resolve_system_effective_policies_with_candidate_in_tx`). An active
+  assignment of the same bundle lineage at the same target is left out,
+  because the real assignment would replace it.
+
+Only the candidate is resolved in candidate mode, which skips the admission
+checks for an `accepted`, `trusted` bundle version with a computed digest and
+for accepted, trusted members. Committed assignments keep every check, and no
+assignment, evaluation or deployment path uses candidate mode.
+
+`added`, `removed` and `changed` compare `current` and `proposed` by policy
+lineage; `changed` lists a different exact version or enforcement mode. When
+either side is a resolver conflict (`status: conflict` with `conflicts`), the
+three lists are empty. `members` lists every candidate member with its
+publication and trust state. `coverage` comes from the bundle requirement
+coverage query (counts and up to 100 requirements without full coverage). The
+query runs in the same `REPEATABLE READ, READ ONLY` transaction as the
+candidate read, the member read and the resolver passes, before the rollback.
+`candidate.draft_revision` is read in that snapshot too, so the members, the
+resolver results and the coverage all describe the candidate at that
+revision.
+
+`facts` holds deterministic counts: systems previewed, systems with changes or
+conflicts, added, removed and changed policies, draft and untrusted members.
+`requires_evaluation` lists what the preview cannot know: whether a system
+passes or fails the changed policies, whether an enforce-mode assignment would
+block a deployment, and whether evidence satisfies the mapped requirements.
+The preview never reports pass or fail.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Agent as Coding agent
+  participant MCP as POST /mcp
+  participant Service as bundle_authoring service
+  participant Resolver as Effective-policy resolver
+  participant DB as PostgreSQL
+  Agent->>MCP: preview_bundle_impact(bundle_version_id, system_id, enforcement_mode)
+  MCP->>MCP: check compliance:preview and the effective environments
+  MCP->>Service: preview for the effective environments
+  Service->>DB: BEGIN REPEATABLE READ READ ONLY
+  alt target outside the effective environments or unknown
+    Service->>DB: ROLLBACK
+    MCP-->>Agent: not_found
+  else target visible
+    Service->>Resolver: current effective policies
+    Service->>Resolver: proposed policies with the candidate assignment
+    Service->>DB: ROLLBACK
+    MCP-->>Agent: added, removed, changed, facts, requires_evaluation
+  end
+```
+
+### Bundle attribution
+
+| Action | Metadata |
+| --- | --- |
+| `bundle_draft_created` | `operation` (`new_lineage` or `derive`), `bundle_id`, `version_id`, `version`, `draft_revision`, `member_count` (new lineage), `derived_from_version_id` (derive) |
+| `bundle_draft_updated` | `operation: update`, `bundle_id`, `version_id`, `previous_draft_revision`, `draft_revision`, `changed_fields`, `member_count` (null when the membership was not sent) |
+
+The browser routes write the same actions with fewer fields:
+`bundle_draft_created` with `operation: new_lineage`, `bundle_id` and
+`version_id`, and `bundle_draft_updated` with `operation: browser_update`,
+`bundle_id` and `version_id`. They record no token.
+
+Token writes add `via: "mcp"`, `access_token_id` and the `access_token_name`
+snapshot, as for the other write tools. Audit metadata never holds
+descriptions. Denied calls of `create_bundle_draft` and `update_bundle_draft`
+write `mcp_write_denied`; `preview_bundle_impact` is not a write tool.
+
+### Bundle examples
+
+Assemble a bundle from exact versions (for example a policy draft that the
+agent created, an imported version and a published version):
+
+```json
+{"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {
+  "name": "create_bundle_draft",
+  "arguments": {
+    "mode": "new_lineage",
+    "name": "ssh-hardening-baseline",
+    "description": "Proposed by the remediation agent",
+    "framework": "NIST 800-53",
+    "framework_version": "rev5",
+    "policy_version_ids": ["<draft version_id>", "<imported version_id>",
+      "<published version_id>"]
+  }}}
+```
+
+The result names `version_id`, `draft_revision` and `warnings` for the draft
+members. Send that revision with the next `update_bundle_draft`.
+
+Preview the impact on one system in report-only mode:
+
+```json
+{"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {
+  "name": "preview_bundle_impact",
+  "arguments": {
+    "bundle_version_id": "<version_id from create_bundle_draft>",
+    "system_id": "<system from list_remediation_work>",
+    "enforcement_mode": "report_only"
+  }}}
+```
+
+### Reviewing agent bundle drafts
+
+Agent bundle drafts appear in the Compliance view like other bundle drafts.
+The bundle header shows "via agent token <name>" for the displayed version
+when a token created it, or "(deleted)" when no name was recorded. An Admin
+reviews the membership and the impact, trusts and publishes the member
+policies and the bundle, and assigns it, all in the browser. Trust,
+publication and assignment remain browser Admin actions. A browser edit of the
+draft increments `draft_revision`, so the agent must read the draft again.
+
 ## Unsupported features
 
 - MCP OAuth authorization and protected resource metadata.
@@ -580,8 +799,9 @@ user's draft or a published version, it derives a new draft.
 - Resources, prompts, sampling, elicitation, completions and logging.
 - JSON-RPC batches.
 - `poams:close`, risk acceptance, waivers, finding links and reopening.
-- Bundle drafts and compliance impact preview (TASK-534.8). XCCDF and STIG
-  import through MCP.
+- XCCDF and STIG import through MCP.
+- Renaming a bundle lineage, requirement membership and environment links of
+  a bundle draft through MCP; an Admin changes them in the browser.
 - Trust, publication, assignment, enforcement-mode changes and deletion of
   security content, for every token.
 - An idempotency key for `request_cve_scan`; repeated requests return the active scan of the target instead.

@@ -738,7 +738,7 @@ pub async fn create_compliance_bundle(
     headers: HeaderMap,
     Json(payload): Json<CreateComplianceBundleRequest>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -746,7 +746,7 @@ pub async fn create_compliance_bundle(
         return forbidden();
     }
 
-    match create_bundle_row(&pool, payload).await {
+    match create_bundle_row(&pool, payload, Some(user_id)).await {
         Ok(bundle) => (StatusCode::CREATED, Json(bundle)).into_response(),
         Err(err) if err.downcast_ref::<BundleValidationError>().is_some() => {
             bad_request(&err.to_string())
