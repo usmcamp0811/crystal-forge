@@ -3,10 +3,10 @@
 //! Each SQLx test owns an isolated database with the full production
 //! migrations. Most tests call `call_tool` directly with a caller built from
 //! the owner's current database state, the way `validate_presented_token`
-//! builds it for each request. A direct caller can hold `policies:draft`,
-//! which token creation refuses while the scope is unreleased; the authoring
-//! hint tests use that. The last test speaks HTTP to the real `/mcp` handler
-//! with a token issued by the access-token service.
+//! builds it for each request. A direct caller can hold `policies:draft` for
+//! any owner role, which token creation refuses for a non-Admin owner; the
+//! authoring hint tests use that. The last test speaks HTTP to the real
+//! `/mcp` handler with a token issued by the access-token service.
 //!
 //! Run with:
 //! `cargo test -p cf-server --test mcp_compliance_read -- --test-threads=1`
@@ -684,10 +684,10 @@ async fn bundle_reads_return_exact_ordered_membership(pool: PgPool) {
         policy_ids: vec![second_policy, first_policy],
         requirement_version_ids: vec![requirements[1], requirements[0]],
     };
-    let bundle = create_bundle(&pool, request(format!("{prefix}-a")))
+    let bundle = create_bundle(&pool, request(format!("{prefix}-a")), None)
         .await
         .expect("create bundle");
-    let other = create_bundle(&pool, request(format!("{prefix}-b")))
+    let other = create_bundle(&pool, request(format!("{prefix}-b")), None)
         .await
         .expect("create second bundle");
 

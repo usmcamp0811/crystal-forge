@@ -676,6 +676,8 @@ pub async fn fetch_policy_version_summaries(
         compliance_metadata: serde_json::Value,
         created_by: Option<Uuid>,
         created_by_display: Option<String>,
+        created_via_agent: bool,
+        created_access_token_name: Option<String>,
     }
 
     let rows = sqlx::query_as::<_, VersionRow>(
@@ -684,7 +686,8 @@ pub async fn fetch_policy_version_summaries(
                dpv.semantic_digest, dpv.created_at, dpv.published_at,
                dpv.derived_from_version_id, dpv.name, dpv.description, dpv.policy_type,
                dpv.config, dpv.enabled_by_default, dpv.compliance_metadata, dpv.created_by,
-               COALESCE(u.username, u.email) AS created_by_display
+               COALESCE(u.username, u.email) AS created_by_display,
+               dpv.created_via_agent, dpv.created_access_token_name
           FROM deployment_policy_versions dpv
           LEFT JOIN users u ON dpv.created_by = u.id
          WHERE dpv.policy_id = ANY($1)
@@ -750,6 +753,8 @@ pub async fn fetch_policy_version_summaries(
             rationale: rat,
             created_by: row.created_by,
             created_by_display: row.created_by_display,
+            created_via_agent: row.created_via_agent,
+            created_access_token_name: row.created_access_token_name,
             evidence_specs: decode_evidence_specs_strict(compliance_meta).with_context(|| {
                 format!(
                     "failed to decode evidence_specs for policy version {}",
@@ -820,7 +825,34 @@ pub async fn create_deployment_policy_with_mappings(
     }
 
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+    let policy = create_deployment_policy_with_mappings_in_tx(&mut tx, request, actor_id).await?;
+    tx.commit()
+        .await
+        .context("Failed to commit policy creation")?;
+    Ok(policy)
+}
 
+/// Creates a deployment policy lineage, its initial draft and its initial
+/// requirement mappings inside the caller's transaction.
+///
+/// [`create_deployment_policy_with_mappings`] and the MCP policy authoring
+/// service share this function. The caller MUST validate the policy type,
+/// the config and the mappings first; this function does not repeat that
+/// validation. The lineage trigger creates the draft version; this function
+/// attributes it to `actor_id`, writes its canonical digest and inserts the
+/// mappings. Nothing is visible to other transactions before the caller
+/// commits.
+///
+/// # Errors
+///
+/// Returns an error when the lineage insert (for example a duplicate name),
+/// the draft attribution, the digest write or a mapping insert fails. The
+/// caller's transaction is then unusable and must roll back.
+pub async fn create_deployment_policy_with_mappings_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    request: &CreateDeploymentPolicyRequest,
+    actor_id: Option<Uuid>,
+) -> Result<DeploymentPolicyRecord> {
     let policy = sqlx::query_as::<_, DeploymentPolicyRecord>(
         r#"
         INSERT INTO deployment_policies (name, description, policy_type, config, enabled)
@@ -833,7 +865,7 @@ pub async fn create_deployment_policy_with_mappings(
     .bind(&request.policy_type)
     .bind(&request.config)
     .bind(request.enabled.unwrap_or(true))
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .context("Failed to create deployment policy")?;
 
@@ -845,7 +877,7 @@ pub async fn create_deployment_policy_with_mappings(
         )
         .bind(policy.id)
         .bind(actor_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("Failed to attribute created policy draft")?;
         if result.rows_affected() != 1 {
@@ -904,7 +936,7 @@ pub async fn create_deployment_policy_with_mappings(
         opaque_xml_digest: None,
         enabled_by_default: Some(policy.enabled),
     };
-    write_policy_version_digest(&mut tx, policy.id, &canonical)
+    write_policy_version_digest(tx, policy.id, &canonical)
         .await
         .context("Failed to write policy version digest")?;
 
@@ -913,12 +945,12 @@ pub async fn create_deployment_policy_with_mappings(
             "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
         )
         .bind(policy.id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .context("Failed to resolve created policy draft")?;
         for mapping in &request.requirement_mappings {
             crate::queries::framework_requirements::insert_policy_mapping_in_tx(
-                &mut tx,
+                tx,
                 version_id,
                 mapping.requirement_version_id,
                 &mapping.relationship,
@@ -933,9 +965,6 @@ pub async fn create_deployment_policy_with_mappings(
         }
     }
 
-    tx.commit()
-        .await
-        .context("Failed to commit policy creation")?;
     Ok(policy)
 }
 
