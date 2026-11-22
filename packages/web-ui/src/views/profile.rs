@@ -10,6 +10,7 @@ use crate::api::models::{
     AuthMode, NotificationDeliveryChannel, NotificationPreferencesDto, Role,
     UpdateNotificationPreferences, UpdateUserPreferences, UserSessionDto,
 };
+use crate::components::access_tokens::AccessTokensCard;
 use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
 use crate::components::{Icon, IconName};
 use crate::routes::Route;
@@ -621,6 +622,14 @@ pub fn ProfileView() -> Element {
                         }
                     }
                 }
+
+                // Access tokens card. Every signed-in user sees it; the server
+                // decides what a user may grant. The key makes a sign-out or a
+                // user change remount the card, which drops all token state
+                // including a revealed secret.
+                if auth_user_id.is_some() {
+                    AccessTokensCard { key: "{auth_generation}" }
+                }
             }
         }
     }
@@ -844,6 +853,9 @@ fn reset_profile_account_state(
     mut sessions_error: Signal<Option<String>>,
     mut sessions_loading: Signal<bool>,
 ) {
+    // Access token state is local to `AccessTokensCard`. Clearing the auth
+    // context bumps the auth generation, which remounts or unmounts the card
+    // and drops its state, including any revealed secret.
     clear_authenticated_context(&mut app_state.write());
     notification_prefs.set(None);
     notification_error.set(None);

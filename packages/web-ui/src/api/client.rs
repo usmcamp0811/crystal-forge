@@ -2716,6 +2716,322 @@ pub async fn revoke_all_user_sessions() -> Result<(), ApiClientError> {
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Owner access tokens
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Error code of a server that disabled access tokens (HTTP 403).
+const ACCESS_TOKENS_DISABLED_CODE: &str = "access_tokens_disabled";
+
+/// Failure of an access-token API call.
+///
+/// The generic client reduces an error body to its message. The create form
+/// also needs the error code and the `details.fields` map of a
+/// `validation_failed` response, so these calls decode the error envelope
+/// here. The error never contains a request or response body, so it is safe
+/// to display and log.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccessTokenApiError {
+    /// HTTP status. `None` when no response arrived.
+    pub status: Option<u16>,
+    /// Machine-readable code of the error envelope, when the server sent one.
+    pub code: Option<String>,
+    /// Message to show to the user.
+    pub message: String,
+    /// Field-level messages of a `validation_failed` response, by field name.
+    pub fields: std::collections::BTreeMap<String, String>,
+    /// `true` when a 2xx response body could not be decoded.
+    pub unreadable: bool,
+}
+
+impl AccessTokenApiError {
+    /// Returns an error for a request that produced no usable response.
+    fn transport(message: impl Into<String>) -> Self {
+        Self {
+            status: None,
+            code: None,
+            message: message.into(),
+            fields: std::collections::BTreeMap::new(),
+            unreadable: false,
+        }
+    }
+
+    /// Returns whether a state-changing request may have succeeded anyway.
+    ///
+    /// This holds when no response arrived, when a success response could not
+    /// be decoded, and for 5xx responses, which a proxy can produce after the
+    /// server committed. A caller MUST NOT retry such a request automatically:
+    /// a repeated create or rotate would issue a second credential.
+    pub fn outcome_unknown(&self) -> bool {
+        self.unreadable || self.status.is_none_or(|status| status >= 500)
+    }
+
+    /// Returns whether the server disabled access tokens.
+    pub fn is_feature_disabled(&self) -> bool {
+        self.code.as_deref() == Some(ACCESS_TOKENS_DISABLED_CODE)
+    }
+}
+
+impl std::fmt::Display for AccessTokenApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<ApiClientError> for AccessTokenApiError {
+    fn from(error: ApiClientError) -> Self {
+        match error {
+            ApiClientError::Network(message) => {
+                Self::transport(format!("Network error: {message}"))
+            }
+            ApiClientError::Deserialize(message) => Self {
+                unreadable: true,
+                ..Self::transport(format!("Deserialization error: {message}"))
+            },
+            ApiClientError::Status { code, body } => Self {
+                status: Some(code),
+                message: body,
+                ..Self::transport(String::new())
+            },
+        }
+    }
+}
+
+/// Query of `GET /user/access-tokens`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AccessTokenListQuery {
+    /// Status filter. `None` lists every status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<&'static str>,
+    /// Case-insensitive name search. `None` or empty applies no search.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Page size. The server accepts 1 to 100.
+    pub limit: u32,
+    /// Number of tokens to skip.
+    pub offset: i64,
+}
+
+/// Fetches the token limits and selectable grants for the signed-in user.
+///
+/// # Errors
+///
+/// Returns [`AccessTokenApiError`] for transport, HTTP, or decoding failures.
+/// Code `access_tokens_disabled` reports a server that disabled tokens.
+pub async fn fetch_access_token_policy() -> Result<AccessTokenPolicyDto, AccessTokenApiError> {
+    let url = format!("{}/user/access-token-policy", base_url());
+    access_token_request("GET", &url, None::<&()>).await
+}
+
+/// Fetches one page of the signed-in user's tokens, newest first.
+///
+/// # Errors
+///
+/// Returns [`AccessTokenApiError`] for transport, HTTP, or decoding failures.
+pub async fn fetch_access_tokens(
+    query: &AccessTokenListQuery,
+) -> Result<AccessTokenListResponse, AccessTokenApiError> {
+    let encoded = serde_urlencoded::to_string(query)
+        .map_err(|error| AccessTokenApiError::transport(error.to_string()))?;
+    let url = format!("{}/user/access-tokens?{encoded}", base_url());
+    access_token_request("GET", &url, None::<&()>).await
+}
+
+/// Fetches one token with its effective access and recent events.
+///
+/// # Errors
+///
+/// Returns [`AccessTokenApiError`]; HTTP 404 also covers another user's token.
+pub async fn fetch_access_token(id: Uuid) -> Result<AccessTokenDetailDto, AccessTokenApiError> {
+    let url = format!("{}/user/access-tokens/{id}", base_url());
+    access_token_request("GET", &url, None::<&()>).await
+}
+
+/// Creates a token. The response carries the only copy of the secret.
+///
+/// # Errors
+///
+/// Returns [`AccessTokenApiError`]. Check
+/// [`AccessTokenApiError::outcome_unknown`] before telling the user that the
+/// token was not created, and never retry automatically.
+pub async fn create_access_token(
+    request: &CreateAccessTokenRequest,
+) -> Result<CreatedAccessTokenDto, AccessTokenApiError> {
+    let url = format!("{}/user/access-tokens", base_url());
+    access_token_request("POST", &url, Some(request)).await
+}
+
+/// Revokes a token. The server treats a repeated revocation as success.
+///
+/// # Errors
+///
+/// Returns [`AccessTokenApiError`] for transport, HTTP, or decoding failures.
+pub async fn revoke_access_token(id: Uuid) -> Result<AccessTokenDto, AccessTokenApiError> {
+    let url = format!("{}/user/access-tokens/{id}", base_url());
+    access_token_request("DELETE", &url, None::<&()>).await
+}
+
+/// Replaces a token with a new one of the same grant and revokes the old one.
+/// The response carries the only copy of the new secret.
+///
+/// # Errors
+///
+/// Returns [`AccessTokenApiError`]. HTTP 409 means the grant is no longer
+/// permitted and nothing changed. Check
+/// [`AccessTokenApiError::outcome_unknown`] before reporting failure.
+pub async fn rotate_access_token(id: Uuid) -> Result<CreatedAccessTokenDto, AccessTokenApiError> {
+    let url = format!("{}/user/access-tokens/{id}/rotate", base_url());
+    access_token_request("POST", &url, None::<&()>).await
+}
+
+/// Sends one access-token request. Mutations carry the CSRF token; reads do not.
+async fn access_token_request<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+    method: &str,
+    url: &str,
+    body: Option<&B>,
+) -> Result<T, AccessTokenApiError> {
+    let payload = body
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| AccessTokenApiError::transport(error.to_string()))?;
+    let response = if method == "GET" {
+        send_request(method, url, payload.as_deref()).await
+    } else {
+        send_request_with_csrf(method, url, payload.as_deref()).await
+    };
+    let (status, text) = response.map_err(AccessTokenApiError::from)?;
+    decode_access_token_response(status, &text)
+}
+
+/// Decodes an access-token response body.
+///
+/// SECURITY: a 2xx body of create or rotate holds the secret. The decode
+/// failure message is fixed text, because a serde error can quote the value
+/// that failed to parse.
+fn decode_access_token_response<T: serde::de::DeserializeOwned>(
+    status: u16,
+    body: &str,
+) -> Result<T, AccessTokenApiError> {
+    if (200..300).contains(&status) {
+        return serde_json::from_str(body).map_err(|_| AccessTokenApiError {
+            status: Some(status),
+            unreadable: true,
+            ..AccessTokenApiError::transport("The server response could not be read.")
+        });
+    }
+    let envelope = serde_json::from_str::<ApiError>(body).ok();
+    let fields: std::collections::BTreeMap<String, String> = envelope
+        .as_ref()
+        .and_then(|error| error.details.as_ref())
+        .and_then(|details| details.get("fields"))
+        .and_then(|fields| fields.as_object())
+        .map(|fields| {
+            fields
+                .iter()
+                .map(|(name, value)| {
+                    let text = value
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| value.to_string());
+                    (name.clone(), text)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Err(AccessTokenApiError {
+        status: Some(status),
+        code: envelope.as_ref().map(|error| error.error.clone()),
+        message: envelope
+            .map(|error| error.message)
+            .unwrap_or_else(|| decode_api_error_message(body)),
+        fields,
+        unreadable: false,
+    })
+}
+
+#[cfg(test)]
+mod access_token_client_tests {
+    use super::*;
+
+    #[test]
+    fn validation_error_exposes_code_and_field_messages() {
+        let body = serde_json::json!({
+            "error": "validation_failed",
+            "message": "Request is invalid.",
+            "details": {"fields": {"name": "Name is already in use.", "scopes": "Select a scope."}}
+        })
+        .to_string();
+        let error = decode_access_token_response::<AccessTokenDto>(400, &body)
+            .expect_err("400 is an error");
+        assert_eq!(error.status, Some(400));
+        assert_eq!(error.code.as_deref(), Some("validation_failed"));
+        assert_eq!(error.message, "Request is invalid.");
+        assert_eq!(
+            error.fields.get("name").map(String::as_str),
+            Some("Name is already in use.")
+        );
+        assert_eq!(error.fields.len(), 2);
+        assert!(!error.outcome_unknown());
+    }
+
+    #[test]
+    fn disabled_feature_and_null_details_decode() {
+        let body = r#"{"error":"access_tokens_disabled","message":"Disabled.","details":null}"#;
+        let error =
+            decode_access_token_response::<AccessTokenDto>(403, body).expect_err("403 is an error");
+        assert!(error.is_feature_disabled());
+        assert!(error.fields.is_empty());
+    }
+
+    #[test]
+    fn unstructured_error_body_falls_back_to_text() {
+        let error = decode_access_token_response::<AccessTokenDto>(502, "Bad Gateway")
+            .expect_err("502 is an error");
+        assert_eq!(error.message, "Bad Gateway");
+        assert!(error.outcome_unknown(), "5xx may follow a commit");
+    }
+
+    #[test]
+    fn unreadable_success_body_is_unknown_outcome_without_echoing_the_body() {
+        let body = r#"{"token":"cfat_v1_LEAKME","id":7}"#;
+        let error = decode_access_token_response::<CreatedAccessTokenDto>(201, body)
+            .expect_err("body does not match the DTO");
+        assert!(error.outcome_unknown());
+        assert!(!format!("{error:?}").contains("LEAKME"));
+    }
+
+    #[test]
+    fn transport_failure_is_unknown_outcome() {
+        let error = AccessTokenApiError::from(ApiClientError::Network("offline".into()));
+        assert_eq!(error.status, None);
+        assert!(error.outcome_unknown());
+    }
+
+    #[test]
+    fn list_query_encodes_filters_and_omits_empty_ones() {
+        let query = AccessTokenListQuery {
+            status: Some("active"),
+            q: Some("open code".to_string()),
+            limit: 25,
+            offset: 50,
+        };
+        assert_eq!(
+            serde_urlencoded::to_string(&query).expect("query encodes"),
+            "status=active&q=open+code&limit=25&offset=50"
+        );
+        let plain = AccessTokenListQuery {
+            status: None,
+            q: None,
+            limit: 25,
+            offset: 0,
+        };
+        assert_eq!(
+            serde_urlencoded::to_string(&plain).expect("query encodes"),
+            "limit=25&offset=0"
+        );
+    }
+}
+
 /// Development mode login.
 pub async fn dev_login(email: &str) -> Result<DevLoginResponse, ApiClientError> {
     let url = format!("{}/dev/login", auth_base_url());
@@ -2762,6 +3078,17 @@ pub async fn fetch_config_health() -> Result<ConfigHealthResponse, ApiClientErro
 /// Fetch real server/build/database runtime info (admin only).
 pub async fn fetch_admin_server_info() -> Result<ServerRuntimeInfoResponse, ApiClientError> {
     let url = format!("{}/admin/server-info", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetches the MCP server status (admin only). The request is read-only.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails, the server refuses it,
+/// or the response does not decode as [`McpServerStatusResponse`].
+pub async fn fetch_admin_mcp_status() -> Result<McpServerStatusResponse, ApiClientError> {
+    let url = format!("{}/admin/mcp/status", base_url());
     fetch_json(&url).await
 }
 

@@ -106,6 +106,34 @@ fn parse_entitlement_max_age_seconds(value: Option<&str>) -> anyhow::Result<NonZ
     )
 }
 
+fn entitlement_max_age_env() -> anyhow::Result<Option<String>> {
+    match std::env::var("CRYSTAL_FORGE_OIDC_ENTITLEMENT_MAX_AGE_SECONDS") {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("CRYSTAL_FORGE_OIDC_ENTITLEMENT_MAX_AGE_SECONDS must be Unicode")
+        }
+    }
+}
+
+/// Reads only the OIDC entitlement freshness bound, in seconds, from the
+/// environment.
+///
+/// Uses the same variable, range and default (86400) as
+/// [`OidcConfig::from_env`] but does not require the other OIDC variables.
+/// Callers that need the bound outside the OIDC login routes, such as access
+/// token eligibility checks, use this function.
+///
+/// # Errors
+/// Returns an error for malformed text, non-Unicode input or a value outside
+/// 1..=4294967295. Callers MUST fail closed on error.
+pub fn entitlement_max_age_seconds_from_env() -> anyhow::Result<u64> {
+    let max_age = entitlement_max_age_env()?;
+    Ok(u64::from(
+        parse_entitlement_max_age_seconds(max_age.as_deref())?.get(),
+    ))
+}
+
 fn default_email_claim() -> String {
     "email".to_string()
 }
@@ -185,13 +213,7 @@ impl OidcConfig {
     /// Returns an error for missing required variables or an entitlement maximum
     /// age outside 1..=4294967295 seconds, malformed text or non-Unicode input.
     pub fn from_env() -> anyhow::Result<Self> {
-        let max_age = match std::env::var("CRYSTAL_FORGE_OIDC_ENTITLEMENT_MAX_AGE_SECONDS") {
-            Ok(value) => Some(value),
-            Err(std::env::VarError::NotPresent) => None,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                anyhow::bail!("CRYSTAL_FORGE_OIDC_ENTITLEMENT_MAX_AGE_SECONDS must be Unicode")
-            }
-        };
+        let max_age = entitlement_max_age_env()?;
         let entitlement_max_age_seconds = parse_entitlement_max_age_seconds(max_age.as_deref())?;
         let issuer_url = std::env::var("CRYSTAL_FORGE_OIDC_ISSUER_URL")
             .map_err(|_| anyhow::anyhow!("CRYSTAL_FORGE_OIDC_ISSUER_URL not set"))?;

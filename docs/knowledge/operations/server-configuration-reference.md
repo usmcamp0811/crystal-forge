@@ -120,6 +120,35 @@ service limits. See [Adaptive recovery](../evaluation/bulk-evaluator-adaptive-re
 for sustained-pressure evidence, CPU-qualified idle waivers, one shared overall
 deadline, quarantine, and failure-only retention of verified partial outcomes.
 
+### Access tokens
+
+The `[server]` table holds the owner access-token policy. See
+[Access token service](../security/access-token-service.md) for behavior.
+
+| Key | Default | Rule |
+| --- | --- | --- |
+| `access_tokens_enable` | `true` | When `false`, create and rotate return `403 access_tokens_disabled` and the server does not admit a presented token. The policy endpoint (`enabled: false`), list, detail and revoke remain available. |
+| `access_tokens_default_lifetime_days` | `30` | Must satisfy `1 <= default <= max`. |
+| `access_tokens_max_lifetime_days` | `90` | Must satisfy `default <= max <= 90`. |
+
+Startup validation rejects any other combination. The NixOS module sets these
+keys from `services.crystal-forge.server.accessTokens.{enable,defaultLifetimeDays,maxLifetimeDays}`.
+
+### MCP endpoint
+
+The `[server]` table enables the read-only MCP endpoint. See
+[MCP server](../security/mcp-server.md) for behavior.
+
+| Key | Default | Rule |
+| --- | --- | --- |
+| `mcp_enable` | `false` | When `false`, `/mcp` returns 404 and the access-token policy reports `mcp.enabled = false`. When `true`, `access_tokens_enable` must also be `true`. |
+| `mcp_public_url` | unset | Optional absolute URL of the endpoint. It must use `https://`, or `http://` only for `localhost`, `127.0.0.1` or `::1`. No query, fragment, userinfo or surrounding whitespace. Its origin is the only `Origin` header value that `/mcp` accepts. The token reveal and the Admin Server tab show it; the server never derives it from request headers. |
+
+Startup validation rejects an invalid `mcp_public_url` (also when MCP is
+disabled) and `mcp_enable = true` with `access_tokens_enable = false`. The
+NixOS module sets these keys from
+`services.crystal-forge.server.mcp.{enable,publicUrl}`.
+
 ### Environment Variables
 
 - `CRYSTAL_FORGE_CONFIG` - Path to config file. Default `/var/lib/crystal_forge/config.toml`. The file is optional.

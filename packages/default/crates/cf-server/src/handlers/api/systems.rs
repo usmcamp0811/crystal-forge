@@ -3923,6 +3923,9 @@ fn action_to_str(action: AuditAction) -> &'static str {
         AuditAction::SystemUpdated => "system_updated",
         AuditAction::CveScanRequested => "cve_scan_requested",
         AuditAction::SessionInvalidated => "session_invalidated",
+        AuditAction::AccessTokenCreated => "access_token_created",
+        AuditAction::AccessTokenRotated => "access_token_rotated",
+        AuditAction::AccessTokenRevoked => "access_token_revoked",
     }
 }
 

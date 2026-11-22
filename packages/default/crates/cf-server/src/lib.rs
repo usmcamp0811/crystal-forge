@@ -17,6 +17,7 @@ pub mod flake;
 pub mod handlers;
 pub mod hardening;
 pub mod log;
+pub mod mcp;
 pub mod models;
 pub mod nixos_options_metadata;
 pub mod queries;
