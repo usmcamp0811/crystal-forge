@@ -22,14 +22,15 @@ use crate::api::client::{
 };
 use crate::api::models::{
     BundleCoverageReport, BundleCoverageRow, ComplianceBundleSummary,
-    ComplianceBundleSystemsResponse, ComplianceEvidenceResponse, ComplianceFrameworkSummary,
-    ComplianceFrameworkVersionSummary, CreateAssignmentRequest, CreateBundleDraftRequest,
-    CreateComplianceBundleRequest, DeploymentPolicySummary, EnvironmentSummary, ImportedBundlePlan,
-    ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
-    ImportedPolicyCustomization, PolicyValueOverride, PublishBundleVersionRequest,
-    RequirementCoverage, RequirementVersionSummary, TrustBundleVersionRequest,
-    UpdateAssignmentRequest, UpdateComplianceBundleRequest, XccdfDiagnostic, XccdfImportPlan,
-    XccdfImportResponse, XccdfPreviewResponse, XccdfRuleImportAction,
+    ComplianceBundleSystemsResponse, ComplianceBundleVersionSummary, ComplianceEvidenceResponse,
+    ComplianceFrameworkSummary, ComplianceFrameworkVersionSummary, CreateAssignmentRequest,
+    CreateBundleDraftRequest, CreateComplianceBundleRequest, DeploymentPolicySummary,
+    EnvironmentSummary, ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule,
+    ImportedEvidenceRequirement, ImportedPolicyCustomization, PolicyValueOverride,
+    PublishBundleVersionRequest, RequirementCoverage, RequirementVersionSummary,
+    TrustBundleVersionRequest, UpdateAssignmentRequest, UpdateComplianceBundleRequest,
+    XccdfDiagnostic, XccdfImportPlan, XccdfImportResponse, XccdfPreviewResponse,
+    XccdfRuleImportAction,
 };
 use crate::components::compliance::{
     BundleCatalog, BundleHeader, ComparisonOperator, EvidenceDrawer, ImportReview,
@@ -1094,6 +1095,7 @@ fn ComplianceCatalogView(
                                 div { style: "padding:14px 18px;", BundleHeader {
                                     bundle: bundle.clone(),
                                     selected_version: (*selected_bundle_version_id.read()).and_then(|id| bundle.versions.iter().find(|revision| revision.id == id).map(|revision| revision.version.clone())),
+                                    agent_attribution: bundle_version_agent_label(&bundle.versions, (*selected_bundle_version_id.read()).or(bundle.current_draft_version_id).or(bundle.current_published_version_id)),
                                     on_edit: move |_| show_edit_bundle.set(true),
                                     is_admin,
                                     cardless: true,
@@ -5953,9 +5955,76 @@ fn toggle_uuid(signal: &mut Signal<Vec<uuid::Uuid>>, id: uuid::Uuid) {
     signal.set(next);
 }
 
+/// Returns "via agent token <name>" for the bundle version `version_id` when
+/// an owner access token created it through MCP, or `None` for a
+/// browser-created or unknown version.
+///
+/// The bundle header passes the selected revision, else the current draft,
+/// else the current published version, the version that the header shows.
+fn bundle_version_agent_label(
+    versions: &[ComplianceBundleVersionSummary],
+    version_id: Option<uuid::Uuid>,
+) -> Option<String> {
+    let version = versions
+        .iter()
+        .find(|version| Some(version.id) == version_id)?;
+    crate::views::policies::agent_attribution_label(
+        version.created_via_agent,
+        version.created_access_token_name.as_deref(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundle_header_names_the_agent_token_of_the_shown_version() {
+        let version = |via_agent: bool, token: Option<&str>| -> ComplianceBundleVersionSummary {
+            serde_json::from_value(serde_json::json!({
+                "id": uuid::Uuid::new_v4(),
+                "bundle_id": uuid::Uuid::nil(),
+                "version": "0.1.0",
+                "publication_state": "draft",
+                "semantic_digest": "pending",
+                "created_at": "2026-11-21T00:00:00Z",
+                "control_count": 1,
+                "created_via_agent": via_agent,
+                "created_access_token_name": token,
+            }))
+            .expect("bundle version")
+        };
+        let agent = version(true, Some("bundle-bot"));
+        let deleted = version(true, None);
+        let browser = version(false, None);
+        let versions = vec![agent.clone(), deleted.clone(), browser.clone()];
+        assert_eq!(
+            bundle_version_agent_label(&versions, Some(agent.id)).as_deref(),
+            Some("via agent token bundle-bot")
+        );
+        assert_eq!(
+            bundle_version_agent_label(&versions, Some(deleted.id)).as_deref(),
+            Some("via agent token (deleted)")
+        );
+        assert_eq!(
+            bundle_version_agent_label(&versions, Some(browser.id)),
+            None
+        );
+        assert_eq!(bundle_version_agent_label(&versions, None), None);
+        // A server before migration 0345 sends neither field.
+        let legacy: ComplianceBundleVersionSummary = serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::nil(),
+            "bundle_id": uuid::Uuid::nil(),
+            "version": "1.0.0",
+            "publication_state": "accepted",
+            "semantic_digest": "abc",
+            "created_at": "2026-11-21T00:00:00Z",
+            "control_count": 0,
+        }))
+        .expect("legacy bundle version");
+        assert!(!legacy.created_via_agent);
+        assert!(legacy.created_access_token_name.is_none());
+    }
 
     #[test]
     fn compliance_route_target_round_trips_and_preserves_unrelated_query_values() {

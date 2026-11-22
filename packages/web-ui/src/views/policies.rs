@@ -1862,7 +1862,11 @@ fn mapping_relationship_label(relationship: &str) -> &str {
 ///
 /// The server records the token name when an owner access token creates the
 /// version through MCP. Without a recorded name the label says "(deleted)".
-fn agent_attribution_label(created_via_agent: bool, token_name: Option<&str>) -> Option<String> {
+/// The Compliance view uses the same label for bundle versions.
+pub(crate) fn agent_attribution_label(
+    created_via_agent: bool,
+    token_name: Option<&str>,
+) -> Option<String> {
     created_via_agent.then(
         || match token_name.map(str::trim).filter(|name| !name.is_empty()) {
             Some(name) => format!("via agent token {name}"),

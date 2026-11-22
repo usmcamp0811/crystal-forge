@@ -51,10 +51,6 @@ Not implemented in this slice:
   `confirm_production_write: true` in the create request (400
   `validation_failed`, field `confirm_production_write`, otherwise). Rotation
   keeps the original grant. See [MCP server](mcp-server.md#write-tools).
-- `bundles:draft`. TASK-534.6 registers it as unreleased. TASK-534.7
-  released `policies:draft` and `policies:import` for Admin owners and
-  `compliance:preview` for every role; see [Scope catalog](#scope-catalog)
-  and [MCP server](mcp-server.md#policy-authoring-tools).
 
 ## Contract
 
@@ -156,25 +152,30 @@ to add the six compliance scopes.
 | `policies:draft` | Draft security policies | Admin | Yes (TASK-534.7) | No |
 | `policies:import` | Import security policies | Admin | Yes (TASK-534.7) | No |
 | `bundles:read` | Read compliance bundles | Viewer | Yes | No |
-| `bundles:draft` | Draft compliance bundles | Admin | No (TASK-534.8) | No |
+| `bundles:draft` | Draft compliance bundles | Admin | Yes (TASK-534.8) | No |
 | `compliance:preview` | Preview compliance impact | Viewer | Yes (TASK-534.7) | No |
+
+Every compliance scope is released. The MCP tools of each scope are listed in
+the [authorization matrix](mcp-server.md#authorization-matrix); the bundle
+tools are in
+[Bundle authoring and impact preview](mcp-server.md#bundle-authoring-and-impact-preview).
 
 The policy reports one `unavailable_reason` per unavailable scope. The role
 reason comes first: "Requires Admin" for an Admin-only scope when the owner is
 not Admin, then "Requires Operator" for an Operator scope when the owner is a
 Viewer, then "Not supported yet" for an unreleased scope. An Operator therefore
-sees "Requires Admin" for `policies:draft` and `bundles:draft`; an Admin can
-select `policies:draft` and `policies:import` and sees "Not supported yet" only
-for `bundles:draft`. Create and rotation apply the same rule to the owner's current
+sees "Requires Admin" for `policies:draft`, `policies:import` and
+`bundles:draft`; an Admin can select all three and sees "Not supported yet"
+only for `poams:close`. Create and rotation apply the same rule to the owner's current
 role. Token detail reports an Admin-only scope as not permitted while the owner
 is not Admin.
 
 An Admin-only scope stops working when its owner loses Admin. The stored grant
 does not change, but every MCP tool call that needs the scope returns
 `forbidden` until the owner is Admin again (`scope_requires_admin`, checked by
-the MCP dispatcher on each call). The policy authoring writes check the owner's
-Admin role again inside their transaction, so a demotion that commits before the
-write also denies it.
+the MCP dispatcher on each call). The policy and bundle authoring writes check
+the owner's Admin role again inside their transaction, so a demotion that
+commits before the write also denies it.
 
 Every scope that does not end in `:read` counts as a write scope for the
 production confirmation and the "includes write" review text, except

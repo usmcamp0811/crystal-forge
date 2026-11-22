@@ -238,8 +238,9 @@ pub fn source_sha256(bytes: &[u8]) -> String {
 ///
 /// A browser actor passes without a query. For a token actor the owner must
 /// be active and hold Admin, and the token row must be live, owned by the
-/// owner, of audience `mcp`, and hold `scope`.
-async fn authorize_token_tx(
+/// owner, of audience `mcp`, and hold `scope`. The bundle authoring service
+/// (`services::bundle_authoring`) uses the same check with `bundles:draft`.
+pub(crate) async fn authorize_token_tx(
     tx: &mut Transaction<'_, Postgres>,
     actor: &AuthoringActor,
     scope: &'static str,
@@ -1552,6 +1553,19 @@ pub async fn update_policy_draft(
             .await
             .map_err(internal(DRAFT_UPDATE_FAILED))?;
     }
+
+    // SECURITY: A review covers the previous draft content, including its
+    // mappings. A substantive edit must require a new human trust decision.
+    sqlx::query(
+        "UPDATE deployment_policy_versions SET trust_state = 'untrusted', \
+         trusted_by = NULL, trusted_at = NULL, trust_review_note = NULL \
+         WHERE id = $1 AND (trust_state <> 'untrusted' OR trusted_by IS NOT NULL \
+             OR trusted_at IS NOT NULL OR trust_review_note IS NOT NULL)",
+    )
+    .bind(version_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal(DRAFT_UPDATE_FAILED))?;
 
     let revision = draft_revision(&mut tx, version_id)
         .await

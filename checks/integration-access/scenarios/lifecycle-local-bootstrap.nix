@@ -216,7 +216,8 @@ in
       # scopes and TASK-534.6 compliance read scopes are selectable and not
       # preselected; TASK-534.6 authoring scopes are listed "Requires Admin"
       # (an Operator never holds them, even after TASK-534.7 released the
-      # policy authoring scopes for Admin owners); TASK-534.7 released
+      # policy authoring scopes and TASK-534.8 released bundles:draft for
+      # Admin owners); TASK-534.7 released
       # compliance:preview for every role, selectable and not preselected;
       # unreleased scopes are listed "Not supported yet".
       # Environment names are lowercase because the Admin user PATCH matches
