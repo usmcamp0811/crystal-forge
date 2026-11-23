@@ -451,6 +451,7 @@ SQL
       flake_position_http \
       framework_version_id_lifecycle \
       hardening_admission_migration_upgrade \
+      legacy_grant_upgrade \
       management_mode_migration_upgrade \
       oidc_entitlements \
       policy_counts_defect \

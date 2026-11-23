@@ -415,3 +415,131 @@ The preview was refreshed to the rebased embedded build (output `l5r2k51li1nbzjr
 The GitLab pipeline for the exact head `a2a61991` (pipeline 3090604107) FAILED in `state-machine-tests`. This was a real defect in this MR, not a flake: `poam_workflows::migration_0279_to_0284_preserves_populated_retained_cve_poam` migrates only through 0278 and then called `sync_user_role`, which this MR changed to write the 0335 grant-source columns (`column "oidc_identity_id" does not exist`). The earlier farm regression harness ran only one test of the `poam_workflows` target, so the full target was never run before the MR was reported. The CI loop stops at the first failing target, so `risk_acceptance_0298_upgrade`, `task433_assignment_visibility`, `task433_csrf` and `time_window_policy_test` did not run in CI either. The pipeline for `d0dfcba1` also showed `integration-access` failing on the library test `discovery_scope_timeout_acknowledges_reap_before_next_admission` (not an authorization test; not investigated here).
 
 Fix `310e9e8c`: the 0278 fixture now writes the historical `user_role_assignments` row directly. No assertion changed. Farm results at `310e9e8c`: full `poam_workflows` target 133 passed, 0 failed, 0 ignored; the four targets CI never reached passed (7, 1, 4 and 4 tests). A new GitLab pipeline for the new head is not yet verified.
+
+## Legacy grant upgrade and recovery rehearsal
+
+A reviewer blocked MR !345 at `8a00e114` because the legacy grant classification
+and recovery procedure was not proven. The new PostgreSQL target
+`packages/default/crates/cf-server/tests/legacy_grant_upgrade.rs` rehearses it.
+Each test applies migrations through 0334, seeds a pre-0335 population with raw
+SQL, then applies 0335 and all later migrations unchanged. Migration 0335 is not
+edited. The population is: a local-only Admin with two memberships; an
+OIDC-linked Operator; an OIDC-linked Admin with null actor attribution; a user
+with two linked OIDC identities (different issuers); a disabled OIDC-linked
+user with grants; two OIDC group mappings; and one pre-upgrade browser session
+per user. The target is registered in `database-regressions.sh`. It was not
+compiled or run in this change (rustfmt check only).
+
+- `upgrade_preserves_effective_grants_and_browser_login`: row IDs, roles,
+  memberships, actor attribution and timestamps are unchanged for every user.
+  The browser session resolver (`handlers::api::rbac::authenticated_user_roles`,
+  the same `get_user_roles` lookup as the session guards) returns the same roles
+  before and after; the disabled user still cannot log in.
+- `upgrade_classifies_sources_and_denies_oidc_linked_freshness`: local-only
+  grants are `local_grant`; every OIDC-linked grant is
+  `legacy_ownership_unresolved`; every linked identity is `legacy_unresolved`
+  with no successful sync and fails `require_fresh_entitlements`. An OIDC
+  callback for the unresolved Admin returns `LegacyUnresolved` with valid or
+  missing groups, changes no grant or claim and stays not fresh. The disabled
+  user cannot reconcile.
+- `recovery_classifies_local_overrides_then_idp_sync_and_removal_touch_only_managed_grants`:
+  a PATCH without `edit_local_grants` is rejected (400, no write, no audit).
+  The real `PATCH /api/v1/admin/users/:id` handler (session cookie, CSRF,
+  `patch_admin_user`) with `edit_local_grants: true` classifies the Operator's
+  role and memberships as local, clears the unresolved flags, attributes them
+  to the actor and writes the three audit events. Classification alone leaves
+  the identity not fresh. `reconcile` with a reserved generation and mapped
+  groups then makes it fresh and adds IdP-owned Admin and memberships beside the
+  local override. Authoritative empty groups remove only the IdP contributions
+  (IdP Viewer remains, as documented); the local Operator and membership survive.
+  The unclassified OIDC Admin is unchanged throughout.
+- `two_identity_user_stays_blocked_after_classification`: reconciliation fails
+  before and after local classification for both identities; grants are not
+  replaced and neither identity becomes fresh. The browser session keeps the
+  local override.
+
+Not modelled: a real IdP or signed callback (the rehearsal calls `reconcile`
+directly; signed callbacks are covered in `oidc_entitlements::callback_http`);
+the backup/restore and local-auth console recovery steps of the operator
+procedure; the "classify as IdP-owned" path, which has no API by design; and
+the browser Users editor UI itself (only its PATCH contract). The production
+inventory and cutover remain manual operator steps.
+
+## Acceptance criteria evidence
+
+This maps each acceptance criterion to the tests that are meant to prove it. No
+criterion is ticked. Earlier recorded farm results apply only to their recorded
+revisions; none applies to the current head. Target files are under
+`packages/default/crates/cf-server/tests/` unless stated otherwise.
+
+1. **#1 grant survives refresh, no widening.**
+   Evidence: `poam_workflows::restricted_credential_refresh_preserves_grant_and_current_owner_intersection`;
+   unit tests `auth::authorization::tests::immutable_read_grant_intersects_current_owner_and_exact_requirements`
+   and `auth::authorization::tests::expiry_audience_and_each_required_scope_fail_closed`.
+   Gap: the grant is the in-memory `RestrictedGrant`; no token row or PAT exists.
+   Result: pending farm run of this head.
+2. **#2 promotion cannot expand; demotion/removal denies.**
+   Evidence: `poam_workflows::restricted_credential_refresh_preserves_grant_and_current_owner_intersection`
+   (Admin promotion, Viewer demotion, membership removal); `admin_source_grants`
+   `queued_patch_rejects_actor_demoted_while_waiting`,
+   `queued_patch_rejects_actor_session_invalidated_while_waiting`,
+   `queued_patch_rejects_actor_disabled_while_waiting`,
+   `queued_patch_rejects_session_logged_out_without_grant_lock`,
+   `queued_self_grant_is_rejected_after_actor_demotion`,
+   `queued_patch_applies_when_actor_remains_valid_admin`,
+   `patch_admin_user_requires_a_valid_session_of_a_current_admin`; Access
+   `lifecycle-local-bootstrap` cases `authorization-source-union-does-not-admit-operator-admin-mutations`,
+   `authorization-operator-and-viewer-user-patch-rejected` and
+   `authorization-operator-has-no-usable-admin-mutation-in-ui`.
+   Gap: the token request boundary is the service refresh; no bearer HTTP route exists.
+   Result: pending farm run of this head.
+3. **#3 managed reconciliation removes, applies, preserves local.**
+   Evidence: `oidc_entitlements` `fresh_sync_replaces_managed_roles_and_removes_memberships`,
+   `overlapping_sources_survive_independent_removals_and_preserve_actors`,
+   `mapped_environment_names_normalize_before_resolution`,
+   `concurrent_local_writer_and_reconciliation_preserve_both_sources`,
+   `other_linked_provider_blocks_replacement_of_its_managed_source`;
+   `admin_source_grants` `overlapping_managed_grants_survive_local_replacement`,
+   `concurrent_sync_and_admin_replacement_preserve_independent_sources`,
+   `authoritative_revocation_does_not_retain_the_final_managed_admin`,
+   `committed_managed_revocation_precedes_guarded_admin_mutations`,
+   `http_omitted_grants_preserve_unresolved_and_managed_sources`,
+   `http_clear_local_role_preserves_managed_and_unresolved_legacy_sources`;
+   `legacy_grant_upgrade::recovery_classifies_local_overrides_then_idp_sync_and_removal_touch_only_managed_grants`;
+   Access cases `authorization-admin-replacement-preserves-idp-and-classifies-explicit-category`,
+   `admin-source-unrelated-modal-save-preserves-idp-only-grants` and
+   `admin-source-idp-withdrawal-has-no-accidental-local-fallback`.
+   Result: pending farm run of this head.
+4. **#4 freshness only on atomic success; failures deny.**
+   Evidence: `oidc_entitlements` `fresh_sync_replaces_managed_roles_and_removes_memberships`,
+   `delayed_valid_and_invalid_evidence_cannot_overwrite_newer_success`,
+   `invalid_evidence_or_environment_rolls_back_without_advancing_success`,
+   `database_failure_preserves_grants_claims_and_success_time`,
+   `freshness_denies_nonvalid_states_inactive_users_and_stale_boundary`,
+   `multiple_linked_identities_deny_without_replacing_rights`,
+   `non_oidc_provider_cannot_reconcile_or_pass_freshness`,
+   `older_failure_cannot_invalidate_a_newer_attempt`,
+   `cancellation_leaves_durable_pending_and_denies_previous_freshness`,
+   `reconciliation_waits_for_admin_advisory_lock_before_user_lock`,
+   `populated_upgrade_preserves_legacy_grants_and_blocks_until_classified`,
+   `callback_http::callback_missing_and_malformed_groups_deny_managed_but_preserve_legacy`;
+   `legacy_grant_upgrade` `upgrade_classifies_sources_and_denies_oidc_linked_freshness`
+   and `two_identity_user_stays_blocked_after_classification`.
+   Gap: `require_fresh_entitlements` is not wired to PAT admission, so "denies
+   dependent access" is proven only as eligibility.
+   Result: pending farm run of this head.
+5. **#5 focused tests and Access scenario pass; commands recorded.**
+   Evidence: the `database-regressions.sh` targets `admin_source_grants`,
+   `legacy_grant_upgrade`, `oidc_entitlements` and `poam_workflows` (cross-environment
+   denial is in the restricted-credential case); the Access scenario through
+   `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`;
+   the core package through `nix build .#packages.x86_64-linux.default.cf-server-core-drv -L`.
+   Result: pending farm run of this head.
+6. **#6 contracts and OKF docs; documentation/SQLx validation.**
+   Evidence: `docs/knowledge/security/oidc-entitlement-ownership.md`,
+   `docs/knowledge/security/credential-grant-groundwork.md` and the rustdoc of
+   `queries::oidc_entitlements`, `queries::admin::patch_admin_user` and
+   `auth::authorization`; `nix build .#okf-knowledge -L`. The new rehearsal uses
+   runtime SQL only, so no SQLx offline metadata changes.
+   Gap: full v1.1 alignment is required before M0 is complete.
+   Result: pending farm run of this head.
