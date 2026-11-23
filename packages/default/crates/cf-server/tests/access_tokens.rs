@@ -980,7 +980,12 @@ async fn viewer_cannot_select_operator_scopes_or_unassigned_environments(pool: P
     assert_nothing_issued(&pool).await;
 }
 
-const WRITE_SCOPES: [&str; 3] = ["scans:request", "poams:write", "poams:verify"];
+const WRITE_SCOPES: [&str; 4] = [
+    "scans:request",
+    "poams:create",
+    "poams:write",
+    "poams:verify",
+];
 const COMPLIANCE_READ_SCOPES: [&str; 2] = ["policies:read", "bundles:read"];
 const AUTHORING_SCOPES: [&str; 3] = ["policies:draft", "policies:import", "bundles:draft"];
 
@@ -1163,7 +1168,7 @@ async fn operator_creates_each_write_scope_and_viewer_requires_operator(pool: Pg
             false
         );
     }
-    assert_eq!(token_count(&pool).await, 3);
+    assert_eq!(token_count(&pool).await, WRITE_SCOPES.len() as i64);
 }
 
 #[sqlx::test]
@@ -2787,7 +2792,7 @@ async fn policy_reports_limits_selectable_environments_and_role_scopes(pool: PgP
     assert_eq!(body["lifetime_options_days"], json!([7, 30, 90]));
     assert_eq!(body["max_active_tokens"], 20);
     assert!(body["create_blocked"].is_null());
-    assert_eq!(body["scopes"].as_array().map(Vec::len), Some(13));
+    assert_eq!(body["scopes"].as_array().map(Vec::len), Some(14));
 
     // Viewer: only assigned active environments and the read scopes.
     assert_eq!(policy_environment_ids(&viewer_policy), [env_a.to_string()]);
@@ -2797,12 +2802,7 @@ async fn policy_reports_limits_selectable_environments_and_role_scopes(pool: PgP
         assert_eq!(entry["default_selected"], true, "{scope}");
         assert!(entry["unavailable_reason"].is_null());
     }
-    for scope in [
-        "scans:request",
-        "poams:write",
-        "poams:verify",
-        "poams:close",
-    ] {
+    for scope in WRITE_SCOPES.into_iter().chain(["poams:close"]) {
         let entry = policy_scope(&viewer_policy, scope);
         assert_eq!(entry["available"], false, "{scope}");
         assert_eq!(entry["default_selected"], false, "{scope}");
@@ -2815,7 +2815,7 @@ async fn policy_reports_limits_selectable_environments_and_role_scopes(pool: PgP
     let mut expected = vec![env_a.to_string(), env_b.to_string()];
     expected.sort();
     assert_eq!(policy_environment_ids(&operator_policy), expected);
-    for scope in ["scans:request", "poams:write", "poams:verify"] {
+    for scope in WRITE_SCOPES {
         let entry = policy_scope(&operator_policy, scope);
         assert_eq!(entry["available"], true, "{scope}");
         assert_eq!(entry["default_selected"], false, "{scope}");
@@ -2824,7 +2824,7 @@ async fn policy_reports_limits_selectable_environments_and_role_scopes(pool: PgP
     let close = policy_scope(&operator_policy, "poams:close");
     assert_eq!(close["available"], false);
     assert_eq!(close["unavailable_reason"], "Not supported yet");
-    for scope in ["scans:request", "poams:write", "poams:verify"] {
+    for scope in WRITE_SCOPES {
         assert_eq!(
             policy_scope(&viewer_policy, scope)["unavailable_reason"],
             "Requires Operator",

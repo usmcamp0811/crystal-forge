@@ -51,6 +51,7 @@ const ALL_WRITE: &[&str] = &[
     "cves:read",
     "poams:read",
     "scans:request",
+    "poams:create",
     "poams:write",
     "poams:verify",
 ];
@@ -583,10 +584,12 @@ async fn tools_list_shows_write_tools_only_with_write_scopes(pool: PgPool) {
     let (owner, _) = user(&pool, AuthRole::Operator, &[env]).await;
     let server = start(&pool).await;
     let read_tools = BTreeSet::from([
+        "find_systems".to_owned(),
         "get_poam_detail".to_owned(),
         "get_scan_result".to_owned(),
         "get_system_security_context".to_owned(),
         "list_remediation_work".to_owned(),
+        "list_scan_findings".to_owned(),
     ]);
 
     let read_only = issue(&pool, owner, READ, &[env]).await;
@@ -596,7 +599,15 @@ async fn tools_list_shows_write_tools_only_with_write_scopes(pool: PgPool) {
     let writer = issue(&pool, owner, ALL_WRITE, &[env]).await;
     let listed = tool_names(&server.rpc(&writer, "tools/list", json!({})).await);
     let mut expected = read_tools;
-    expected.extend(["request_cve_scan", "update_poam_progress", "verify_poam"].map(str::to_owned));
+    expected.extend(
+        [
+            "create_cve_poam",
+            "request_cve_scan",
+            "update_poam_progress",
+            "verify_poam",
+        ]
+        .map(str::to_owned),
+    );
     assert_eq!(listed, expected);
 }
 

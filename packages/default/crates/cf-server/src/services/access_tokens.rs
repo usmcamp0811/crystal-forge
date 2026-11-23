@@ -197,9 +197,8 @@ struct ScopeSpec {
 /// Scope catalog, specification section 7. `released` is false for scopes that
 /// no consumer supports yet; they stay unselectable until a later milestone.
 ///
-/// The write scopes `scans:request`, `poams:write` and `poams:verify` are
-/// released for Operator and Admin owners (TASK-534.5). `poams:close` stays
-/// unreleased. Every scope that does not end in `:read` is a write scope; see
+/// Released write scopes require Operator or Admin owners. `poams:close`
+/// stays unreleased. Every scope that does not end in `:read` is a write scope; see
 /// [`is_write_scope`].
 ///
 /// The compliance scopes come from TASK-534.6. `policies:read` and
@@ -209,7 +208,10 @@ struct ScopeSpec {
 /// TASK-534.8 releases `bundles:draft`. `compliance:preview` is open to every
 /// role and released by TASK-534.7 for the policy import preview; TASK-534.8
 /// also uses it for the bundle impact preview. It grants no write.
-const SCOPES: [ScopeSpec; 13] = [
+///
+/// `poams:create` (TASK-534.9) is a released write scope for Operator and
+/// Admin owners; it is not Admin-only.
+const SCOPES: [ScopeSpec; 14] = [
     ScopeSpec {
         scope: "cves:read",
         label: "Read CVEs and systems",
@@ -237,6 +239,14 @@ const SCOPES: [ScopeSpec; 13] = [
     ScopeSpec {
         scope: "scans:request",
         label: "Request CVE scans",
+        default_selected: false,
+        requires_operator: true,
+        requires_admin: false,
+        released: true,
+    },
+    ScopeSpec {
+        scope: "poams:create",
+        label: "Create CVE POA&Ms",
         default_selected: false,
         requires_operator: true,
         requires_admin: false,
@@ -1490,8 +1500,14 @@ mod tests {
             assert_eq!(unavailable_reason(spec, false, false), None, "{read}");
             assert!(!scope_requires_admin(read));
         }
-        for write in ["scans:request", "poams:write", "poams:verify"] {
+        for write in [
+            "scans:request",
+            "poams:create",
+            "poams:write",
+            "poams:verify",
+        ] {
             let spec = scope_spec(write).unwrap();
+            assert!(!scope_requires_admin(write));
             assert_eq!(
                 unavailable_reason(spec, false, false),
                 Some("Requires Operator")
@@ -1535,7 +1551,7 @@ mod tests {
         assert!(!is_write_scope("compliance:preview"));
         assert!(is_write_scope("policies:draft"));
         assert!(scope_spec("admin").is_none());
-        assert_eq!(SCOPES.len(), 13);
+        assert_eq!(SCOPES.len(), 14);
     }
 
     #[test]

@@ -17,32 +17,25 @@ use crate::models::poam::{
     VerificationAttemptView, VerificationItemView, WaiverListQuery, WaiverView,
 };
 
-const SUMMARY_COLUMNS: &str = r#"
-    p.id, 'POAM-' || lpad(p.human_number::text, 4, '0') AS human_id,
-    p.title, p.plan, p.owner, poam_assignee_view(p) AS assignee, p.target_date, p.risk, p.status, p.revision,
-    COALESCE(p.status <> 'completed' AND p.target_date < $1, FALSE) AS overdue,
-    (SELECT COUNT(DISTINCT l.finding_id) FROM poam_finding_links l
-      WHERE l.poam_id = p.id AND ((p.status <> 'completed' AND l.retired_at IS NULL)
-        OR (p.status = 'completed' AND l.retirement_reason='closed:'||p.closure_attempt_id::text))) AS finding_count,
-    (SELECT COUNT(DISTINCT l.cve_finding_id) FROM poam_cve_finding_links l
-      WHERE l.poam_id = p.id AND ((p.status <> 'completed' AND l.retired_at IS NULL)
-        OR (p.status = 'completed' AND l.retirement_reason='closed:'||p.closure_attempt_id::text))) AS cve_finding_count,
-    p.created_at, p.updated_at, p.closed_at, p.closure_attempt_id
-"#;
-
 const SUMMARY_COLUMNS_BEFORE_TODAY: &str = r#"
     p.id, 'POAM-' || lpad(p.human_number::text, 4, '0') AS human_id,
     p.title, p.plan, p.owner, poam_assignee_view(p) AS assignee, p.target_date, p.risk, p.status, p.revision,
     COALESCE(p.status <> 'completed' AND p.target_date <
 "#;
 
+// The configuration relationship contributes one finding until handoff. Its
+// immutable baseline remains in detail but never adds to the runtime count.
 const SUMMARY_COLUMNS_AFTER_TODAY: &str = r#", FALSE) AS overdue,
     (SELECT COUNT(DISTINCT l.finding_id) FROM poam_finding_links l
       WHERE l.poam_id = p.id AND ((p.status <> 'completed' AND l.retired_at IS NULL)
         OR (p.status = 'completed' AND l.retirement_reason='closed:'||p.closure_attempt_id::text))) AS finding_count,
     (SELECT COUNT(DISTINCT l.cve_finding_id) FROM poam_cve_finding_links l
       WHERE l.poam_id = p.id AND ((p.status <> 'completed' AND l.retired_at IS NULL)
-        OR (p.status = 'completed' AND l.retirement_reason='closed:'||p.closure_attempt_id::text))) AS cve_finding_count,
+        OR (p.status = 'completed' AND l.retirement_reason='closed:'||p.closure_attempt_id::text)))
+      + (SELECT COUNT(*) FROM poam_configuration_cve_findings l
+         WHERE l.poam_id = p.id AND NOT l.runtime_linked) AS cve_finding_count,
+    EXISTS (SELECT 1 FROM poam_configuration_cve_findings l
+            WHERE l.poam_id = p.id AND NOT l.runtime_linked) AS configuration_planning_only,
     p.created_at, p.updated_at, p.closed_at, p.closure_attempt_id
 "#;
 
@@ -63,6 +56,7 @@ struct RelatedPoamSummary {
     overdue: bool,
     finding_count: i64,
     cve_finding_count: i64,
+    configuration_planning_only: bool,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     closed_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -88,6 +82,7 @@ impl RelatedPoamSummary {
                 overdue: self.overdue,
                 finding_count: self.finding_count,
                 cve_finding_count: self.cve_finding_count,
+                configuration_planning_only: self.configuration_planning_only,
                 created_at: self.created_at,
                 updated_at: self.updated_at,
                 closed_at: self.closed_at,
@@ -574,7 +569,7 @@ pub async fn list_tx(
             // SECURITY: Historical links cannot search a moved host's current
             // B hostname (or other hidden current-system facts) for an A-only
             // actor, even when A's scheduled POA&M remains visible.
-            .push(" OR EXISTS (SELECT 1 FROM poam_cve_finding_links cve_link JOIN poam_cve_findings cve_finding ON cve_finding.id=cve_link.cve_finding_id JOIN systems cve_system ON cve_system.id=cve_finding.system_id WHERE cve_link.poam_id=p.id AND (")
+             .push(" OR EXISTS (SELECT 1 FROM LATERAL (SELECT cve_finding_id FROM poam_cve_finding_links WHERE poam_id=p.id UNION ALL SELECT cve_finding_id FROM poam_configuration_cve_findings WHERE poam_id=p.id) cve_link JOIN poam_cve_findings cve_finding ON cve_finding.id=cve_link.cve_finding_id JOIN systems cve_system ON cve_system.id=cve_finding.system_id WHERE (")
             .push_bind(is_admin)
             .push(" OR cve_system.environment_id=ANY(")
             .push_bind(environment_ids)
@@ -1178,7 +1173,9 @@ pub async fn detail(
     verification_before_at: Option<chrono::DateTime<chrono::Utc>>,
     verification_before_id: Option<Uuid>,
 ) -> Result<Option<PoamDetail>> {
-    let sql = format!("SELECT {SUMMARY_COLUMNS} FROM poams p WHERE p.id = $2");
+    let sql = format!(
+        "SELECT {SUMMARY_COLUMNS_BEFORE_TODAY} $1 {SUMMARY_COLUMNS_AFTER_TODAY} FROM poams p WHERE p.id = $2"
+    );
     let Some(poam) = sqlx::query_as::<_, PoamSummary>(&sql)
         .bind(today)
         .bind(poam_id)
@@ -1187,7 +1184,17 @@ pub async fn detail(
     else {
         return Ok(None);
     };
-    // PAGINATION: Select one keyset page across both finding families before
+    let configuration_cve_finding = sqlx::query_as(
+        r#"SELECT link.* FROM poam_configuration_cve_findings link
+           JOIN systems system ON system.id=link.system_id
+           WHERE link.poam_id=$1 AND ($2 OR system.environment_id=ANY($3))"#,
+    )
+    .bind(poam_id)
+    .bind(is_admin)
+    .bind(environment_ids)
+    .fetch_optional(&mut **tx)
+    .await?;
+    // PAGINATION: Select one keyset page across policy and runtime CVE links before
     // hydrating either response array. Otherwise each family can consume the
     // full limit and the shared cursor can skip or repeat the other family.
     let finding_page = sqlx::query_as::<_, (String, Uuid, chrono::DateTime<chrono::Utc>)>(
@@ -1505,6 +1512,7 @@ pub async fn detail(
         poam,
         findings,
         cve_findings,
+        configuration_cve_finding,
         findings_has_more,
         findings_next_cursor,
         milestones,

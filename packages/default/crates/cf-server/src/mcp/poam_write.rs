@@ -1,18 +1,21 @@
-//! Defines the POA&M write MCP tools `update_poam_progress` and `verify_poam`.
+//! Defines the MCP tools for POA&M creation, progress, and verification.
 //!
 //! The functions here parse and bound the tool arguments and map service
 //! errors to [`ToolError`]. They do not authorize: the POA&M service
-//! reauthorizes the token row, the scope (`poams:write` or `poams:verify`),
+//! reauthorizes the token row, the required write scope,
 //! the owner role (Operator or Admin) and the effective environments inside
 //! the mutation transaction, and requires every POA&M subject in scope. A
 //! hidden POA&M returns [`ToolError::NotFound`], the same result as an absent
 //! one.
 //!
-//! The write set is closed. `update_poam_progress` cannot change risk, title,
+//! `create_cve_poam` uses runtime evidence when eligible or records a separate
+//! HEAD planning subject. It hands off an existing planning POA&M in place
+//! when eligible exact runtime evidence becomes available.
+//! `update_poam_progress` cannot change risk, title,
 //! plan, owner, assignee, target date, finding links or waivers, and cannot
 //! close or reopen a POA&M. `verify_poam` records a verification attempt and
-//! never closes. Every write records the access token id in the activity,
-//! audit and verification rows; the owner stays the recorded actor.
+//! never closes. Mutations record the access token ID in the applicable
+//! activity, audit, and verification rows; the owner stays the recorded actor.
 
 use chrono::NaiveDate;
 use serde::Deserialize;
@@ -20,14 +23,62 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::tools::{ToolCaller, ToolError, parse_arguments, restricted_actor};
-use crate::models::poam::PoamStatus;
+use super::tools::{
+    ToolCaller, ToolError, normalize_cve_id, parse_arguments, restricted_actor, system_id_schema,
+};
+use crate::models::poam::{CreateScannedCvePoamRequest, PoamStatus};
 use crate::services::poam::{
     self as poam_service, PoamError, RestrictedProgressAction, SystemClock,
 };
 
 fn poam_id_schema() -> Value {
     json!({"type": "string", "format": "uuid", "description": "POA&M ID."})
+}
+
+/// Returns the closed create-or-reuse argument schema.
+pub(super) fn create_cve_poam_schema() -> Value {
+    json!({
+        "type": "object", "additionalProperties": false,
+        "required": ["system_id", "cve_id", "canonical_package_name", "expected_scan_id", "title"],
+        "properties": {
+            "system_id": system_id_schema(),
+            "cve_id": {"type": "string", "minLength": 13, "maxLength": 20},
+            "canonical_package_name": {"type": "string", "minLength": 1, "maxLength": 4096,
+                "description": "Exact, case-sensitive canonical package name."},
+            "expected_scan_id": {"type": "string", "format": "uuid",
+                "description": "Expected sealed HEAD scan ID. Used only for a new planning POA&M."},
+            "title": {"type": "string", "minLength": 1, "maxLength": 256},
+            "plan": {"type": "string", "maxLength": 16384},
+        }
+    })
+}
+
+/// Creates or reuses a POA&M via the environment-scoped owner credential.
+///
+/// # Errors
+/// Returns argument, authorization, evidence, conflict, or persistence errors.
+pub(super) async fn create_cve_poam(
+    pool: &PgPool,
+    caller: &ToolCaller,
+    arguments: Value,
+) -> Result<Value, ToolError> {
+    let mut request: CreateScannedCvePoamRequest = parse_arguments(arguments)?;
+    request.cve_id = normalize_cve_id(&request.cve_id)
+        .filter(|id| id.len() <= 20)
+        .ok_or_else(|| ToolError::InvalidArguments("cve_id must be a canonical CVE ID".into()))?;
+    let package = &request.canonical_package_name;
+    if package.trim() != package
+        || package.is_empty()
+        || package.len() > 4096
+        || package.contains('\0')
+    {
+        return Err(ToolError::InvalidArguments(
+            "canonical_package_name must be an exact non-empty package name".into(),
+        ));
+    }
+    poam_service::restricted_create_cve_poam(pool, &restricted_actor(caller), request)
+        .await
+        .map_err(|error| tool_error(error, "poams:create"))
 }
 
 fn revision_schema() -> Value {

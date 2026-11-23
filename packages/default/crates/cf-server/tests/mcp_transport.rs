@@ -502,9 +502,11 @@ async fn tools_list_shows_only_tools_allowed_by_token_scopes(pool: PgPool) {
     assert_eq!(
         tool_names(&reply),
         BTreeSet::from([
+            "find_systems".to_owned(),
             "get_scan_result".to_owned(),
             "get_system_security_context".to_owned(),
             "list_remediation_work".to_owned(),
+            "list_scan_findings".to_owned(),
         ])
     );
 
@@ -544,7 +546,7 @@ async fn tools_list_shows_only_tools_allowed_by_token_scopes(pool: PgPool) {
         .filter(|name| !mcp::tools::is_write_tool(name) && **name != "validate_policy_draft")
         .map(|name| (*name).to_owned())
         .collect();
-    assert_eq!(expected.len(), 12);
+    assert_eq!(expected.len(), 14);
     assert_eq!(tool_names(&reply), expected);
 }
 
@@ -603,7 +605,7 @@ async fn admin_status_reports_configuration_and_requires_admin(pool: PgPool) {
         body["phase"],
         "read and write (write tools require a token write scope)"
     );
-    assert_eq!(body["tools"].as_array().map(Vec::len), Some(21));
+    assert_eq!(body["tools"].as_array().map(Vec::len), Some(24));
     assert_eq!(body["access_tokens_enabled"], true);
     assert_eq!(body["max_token_lifetime_days"], 90);
     assert_eq!(body["active_token_count"], 1);
@@ -673,9 +675,11 @@ async fn slow_request_body_is_cut_off_by_the_request_deadline(pool: PgPool) {
     assert_eq!(
         tool_names(&listed),
         BTreeSet::from([
+            "find_systems".to_owned(),
             "get_scan_result".to_owned(),
             "get_system_security_context".to_owned(),
             "list_remediation_work".to_owned(),
+            "list_scan_findings".to_owned(),
         ])
     );
 }

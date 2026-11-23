@@ -440,9 +440,11 @@ SQL
     beginPhase critical-integration-targets
     # Preserve the existing targets and Cargo's failure propagation. Separate
     # compilation/linking from execution to identify a silent boundary.
+    # mcp_scan_findings also runs the sealed HEAD POA&M planning HTTP cases.
     for testTarget in \
       access_tokens \
       admin_source_grants \
+      agent_access_migration_order \
       already_current_deployment \
       assignment_semantics \
       compliance_assignment_zombie_repair \
@@ -460,6 +462,7 @@ SQL
       mcp_transport \
       mcp_write_poam \
       mcp_write_scan \
+      mcp_scan_findings \
       mcp_write_transport \
       oidc_entitlements \
       policy_counts_defect \

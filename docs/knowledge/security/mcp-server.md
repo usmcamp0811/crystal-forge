@@ -69,6 +69,7 @@ TASK-534.8 adds two tools that create and update untrusted compliance bundle
 drafts from exact policy version IDs, and one tool that previews the effect of
 a candidate bundle version on a system or environment; see
 [Bundle authoring and impact preview](#bundle-authoring-and-impact-preview).
+TASK-534.9 adds two configuration scan read tools.
 
 This concept describes implemented code. It does not describe verified
 behavior: build and test results for the exact head are recorded in the task,
@@ -281,6 +282,8 @@ effective set gives empty lists and `not_found` for single resources.
 
 | Tool | Scopes | Inputs | Output | Limits and rules |
 | --- | --- | --- | --- | --- |
+| `find_systems` | `cves:read` | `query` (required, 1 to 200 characters), `limit` | `systems`, `has_more` | Matches the whole hostname or effective configuration name without regard to case. Orders matches by case-folded hostname, then system ID. `has_more` indicates truncation; there is no discovery cursor. |
+| `list_scan_findings` | `cves:read` | `system_id` (required), `scan_id`, `severity`, `package` (exact, case-sensitive canonical package name, 1 to 200 characters), `limit`, `cursor` | `system`, `selection`, `evidence_kind`, `evidence_representation`, `is_runtime_authoritative`, `read_only`, `state`, `head`, `scan_request_target`, `attempt`, `provenance`, `counts`, `findings`, `has_more`, `next_cursor` | Defaults to the registered configuration at flake HEAD. An explicit `scan_id` selects only that sealed scan if it belongs to the registered flake and configuration. |
 | `list_remediation_work` | `cves:read`; `include_poams=true` also needs `poams:read` | `environment_ids` (optional UUID array), `severity` (optional array of `critical`, `high`, `medium`, `low`, `unknown`), `limit`, `cursor`, `include_poams` (default `false`) | `items`: `system_id`, `hostname`, `environment_id`, `environment_name`, `cve_id`, `package_name`, `installed_version`, `fixed_version`, `severity`, `evidence_authority` (`exact_current_scan`), `scan_id`, `scan_completed_at`, and `poam` (`id`, `human_id`, `title`, `status`, or null) only with `include_poams`; `next_cursor` | One item per system, CVE and package from `view_current_exact_cve_occurrences`, filtered by the effective environments in SQL. Ordered by CVE, package, system ID. An `environment_ids` entry outside the effective set gives `invalid_arguments`; the selector never widens the set. No totals. |
 | `get_system_security_context` | `cves:read` | `system_id` (required), `severity`, `limit`, `cursor` | `system` (`id`, `hostname`, `management_mode`, `environment`, `is_active`), `evidence` (`authority`, `current_state`, `exact_authority_failure`, `source`, `running_target`, `read_only`, `note`), `vulnerabilities` (`cve_id`, `package_name`, `canonical_package_name`, `installed_version`, `fixed_version`, `severity`, `cvss_score`, `status`, `description`, `first_seen`, `published_at`), `has_more`, `next_cursor` | Reads the System Detail Current CVE inventory. `no_scan` is not clean. External and Reference systems have no managed running report and no current findings. |
 | `get_remediation_context` | `cves:read`, `provenance:read` | `system_id`, `cve_id` (`CVE-YYYY-NNNN`, any letter case), `package_name` (1 to 200 characters); all required | `evidence_key` (`system_id`, `scan_id`, `cve_id`, `package_name`, `occurrence_derivation_path`), `package` (`installed_version`, `fixed_version`), `target` (`generation`, `store_path`, `derivation_path`, `commit_hash`, or null), `scan`, `attribution` (`status: unknown`), `hints`, `hints_are_authoritative: false` | `not_found` when the current scan of the system has no such CVE and package. `target` comes from `view_current_cve_authority` and is null when it names another scan. No flake repository URL is returned. Source and module attribution is unknown until TASK-271. Hints appear only when a fixed version is known. |
@@ -298,6 +301,97 @@ effective environments of its own call. Unknown argument fields give
 A hidden system or POA&M gives `not_found`, the same result as a nonexistent
 one. The system check runs before the cursor is read, so a cursor cannot tell
 the two cases apart.
+
+### Configuration scan inventory
+
+`find_systems` and `list_scan_findings` use one read-only database snapshot per
+call. They recheck the active token, owner, memberships and environments in
+that snapshot. The recheck can narrow the admitted scope but cannot widen it.
+The system objects contain `system_id`, `hostname`, `configuration_name`,
+`flake_id`, `environment` (`id` as UUID, `name`), `management_mode`, and
+`is_active`. `flake_id` is the database's `flakes.id`, a PostgreSQL `integer`
+(32-bit, serialized as a JSON number), or null when no flake is registered.
+The effective configuration name is the registered configuration name, or the
+hostname when the registered name is empty.
+
+For `list_scan_findings`, omit `scan_id` to select `flake_head`. HEAD requires
+`flakes.snapshot_ready_at` and position zero in the branch snapshot. The tool
+looks up the exact NixOS configuration on that commit. It uses
+`view_derivation_execution_evidence` to check for a completed build with a
+derivation path and a recorded output path, then selects the newest completed
+schema-1 scan of that execution. A physical alias alone does not prove
+execution reuse. The tool never falls back to an older HEAD. An explicit
+`scan_id` selects `exact_scan` and
+may identify historical or archived evidence. An absent, unrelated or
+unsealed explicit scan gives `not_found`, before cursor validation.
+
+`state` is `head_not_ready` when there is no ready position-zero commit,
+and `target_not_ready` when HEAD is ready but has no usable evaluation or built
+output for the registered configuration. For a usable target, the state is
+`no_scan_for_head` when there is no qualifying scan or active attempt, and
+`scan_pending_for_head` when a scan is active but no sealed evidence is
+available. `attempt` gives the exact lifecycle status, such as `pending` or
+`in_progress`. If completed evidence exists, `state` is `completed` even when
+a newer attempt is active. A source-less response has no counts; it does not
+indicate a clean scan.
+
+With completed evidence, `evidence_representation` is `schema1_observations`.
+`head.configuration_derivation_id` identifies the current HEAD configuration,
+if evaluated. `provenance.scan_derivation_id`, `commit_id`, and `commit_hash`
+identify the selected scan's actual derivation and source commit. These can
+differ from HEAD with proven execution reuse or an explicit historical scan.
+`provenance.scanned_system_store_path` reports the actual output path recorded
+on the scan's derivation, or null when that path is unavailable. An expected
+output path alone is not evidence of the scanned path.
+
+`counts` separates `projected_unfiltered` (all
+projected CVE/package pairs), `projected_filtered` (matching pairs across all
+pages), `page` (rows returned), and `raw_scanner` (persisted scanner counts).
+The inventory excludes whitelisted occurrences and picks one representative
+per CVE and canonical package. Pass `next_cursor` as `cursor` with the same
+system, selection and filters. The cursor is at most 8,192 bytes and is bound
+to the selected scan and inventory revision. A changed selection or inventory
+requires a new first page.
+
+`scan_request_target` reports the separate system scan admission target. Use
+its `expected_derivation_id` with `request_cve_scan` when requesting that
+target. If `matches_head` is false, requesting that target does not request a
+scan of the HEAD configuration. A null target has no ID to submit. The
+findings always carry `evidence_kind: configuration_scan` and `read_only: true`.
+`is_runtime_authoritative` is true only when `view_current_cve_authority`
+identifies the same system and scan in the same read snapshot. Neither this flag
+nor the configuration inventory grants mutation authority. Use
+`get_system_security_context` for running evidence.
+
+### Configuration-based CVE planning
+
+`create_cve_poam` requires `poams:create`, an active Operator or Admin owner,
+and a grant for the system's current environment. The closed argument object
+requires `system_id` (UUID), `cve_id` (CVE identifier),
+`canonical_package_name` (exact canonical name), `expected_scan_id` (UUID),
+and `title` (nonempty string). `plan` is optional. The result returns
+`poam_id`, `created`, `revision`, `status`, `evidence_kind` and
+`baseline_scan_id`. `created: false` means the existing plan was reused.
+
+If no eligible current-runtime occurrence exists, a new plan requires the
+expected sealed scan for the registered configuration at flake HEAD. Its
+baseline is immutable. Later scans reuse the existing finding identity and
+do not replace that baseline. A planning-only POA&M accepts progress updates
+but cannot enter verification or close. When eligible current-runtime evidence
+becomes available, a subsequent `create_cve_poam` call attaches a separate
+runtime baseline to the same POA&M through the existing runtime link checks.
+The configuration baseline remains in `configuration_cve_finding` in the
+detail response. Detail and register summaries expose `configuration_planning_only`
+and count the planning relationship in `cve_finding_count` only until handoff.
+The POA&M UI labels the configuration scan as runtime unverified before handoff
+and as historical afterward. The baseline row shows the HEAD commit, the
+observed package version and the scan completion time. A `Baseline provenance`
+disclosure lists the scanned system store path, the occurrence derivation path,
+the scan derivation ID and the configuration derivation ID. The UI keeps notes
+and milestones available under the usual permissions but hides entry to
+verification, verify, and close, and disables `Link finding`, while the plan is
+configuration-only. Existing runtime verification, linking and closure rules
+still apply after handoff.
 
 Full-or-not-found POA&M rule: `get_poam_detail` returns a POA&M only when every
 current context and every current or retired policy and CVE finding subject is
@@ -378,7 +472,8 @@ loses Admin. See [owner access token service](access-token-service.md#scope-cata
 ## Write tools
 
 Write capability belongs to the token. An Operator or Admin owner selects
-`scans:request`, `poams:write` or `poams:verify` when creating the token; a
+`scans:request`, `poams:create`, `poams:write` or `poams:verify` when creating
+the token; a
 Viewer owner cannot. A token that combines a write scope with a production
 environment needs an explicit production confirmation at creation. The Web UI
 confirmation names the selected write capabilities and production
@@ -392,6 +487,7 @@ scope, the write tool does not appear in `tools/list` and a call gives
 | --- | --- | --- | --- | --- |
 | `request_cve_scan` | `scans:request` | `system_id`, `expected_derivation_id` (both required) | `status: accepted`, `scan_id`, `derivation_id`, `configuration_derivation_id`, `note` | Uses the browser scan admission with the token. A changed target gives `invalid_arguments` `scan_target_changed`; an ineligible system `scan_ineligible`; no executor `scan_executor_unavailable`. A repeated request returns the scan already active for the target. Acceptance is not a result. |
 | `get_scan_result` | `cves:read` | `system_id`, `scan_id` | Scan status, timestamps, counts and scanner | The scan must be the system's current evidence scan or a scan of its current target or execution source; otherwise `not_found`. |
+| `create_cve_poam` | `poams:create` | `system_id`, `cve_id`, `canonical_package_name`, `expected_scan_id`, `title`; optional `plan` | `poam_id`, `created`, `revision`, `status`, `evidence_kind`, `baseline_scan_id` | See [Configuration-based CVE planning](#configuration-based-cve-planning). |
 | `update_poam_progress` | `poams:write` | `poam_id`, `revision`, `action` (one of `add_note`, `set_status`, `add_milestone`, `update_milestone`, `remove_milestone`, tagged by `type`) | `poam_id`, new `revision`, `status`, `changed` | Status can never become `completed`. Risk, title, plan, owner, assignee, target date, finding links, waivers, closure and reopening cannot change. A stale revision gives `invalid_arguments` `stale_revision`. |
 | `verify_poam` | `poams:verify` | `poam_id`, `revision` | `attempt_id`, `outcome` (`accepted` or `rejected`), `revision`, `items`, `cve_items` | The POA&M must be awaiting verification. Never closes it. |
 
