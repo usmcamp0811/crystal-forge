@@ -454,6 +454,7 @@ SQL
       flake_position_http \
       framework_version_id_lifecycle \
       hardening_admission_migration_upgrade \
+      legacy_grant_upgrade \
       management_mode_migration_upgrade \
       mcp_bundle_authoring \
       mcp_compliance_read \
