@@ -17,5 +17,5 @@
 
 # Reference
 
-* [Crystal Forge v0.4.0 release notes](release-notes-v0-4-0.md) - Summarizes what the v0.4.0 release adds over v0.3.1 (design-parity web UI, CF-XCCDF interchange and compliance versioning, CVE scan loop, Niks3 caches, owner access tokens with a read-only MCP endpoint, standalone NixOS module generation) and how to upgrade; open it to see the feature set of v0.4.0 and the upgrade steps.
+* [Crystal Forge v0.4.0 release notes](release-notes-v0-4-0.md) - Summarizes what the v0.4.0 release adds over v0.3.1 (design-parity web UI, CF-XCCDF interchange and compliance versioning, CVE scan loop, Niks3 caches, owner access tokens with an MCP endpoint for agents, standalone NixOS module generation) and how to upgrade; open it to see the feature set of v0.4.0 and the upgrade steps.
 * [Crystal Forge product vision pitch deck](product-vision-pitch-deck.md) - Lists the Slidev pitch deck source files in packages/slides with a one-line summary and link for each slide; open it to find the slide that states a product claim before reusing or updating the deck.

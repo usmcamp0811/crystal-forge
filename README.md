@@ -39,7 +39,7 @@ See the [changelog](./CHANGELOG.md) for what changed since v0.3.1.
   NixOS modules generated from exported policies.
 - **Web UI and access control**: A Dioxus dashboard with OIDC, local, or dev
   authentication, Admin, Operator, and Viewer roles, and owner access tokens
-  with an optional read-only MCP endpoint.
+  with an optional MCP endpoint for coding agents.
 
 ## Documentation
 

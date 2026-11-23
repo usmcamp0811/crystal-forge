@@ -10,15 +10,18 @@ crate carries the same version number.
 ## [0.4.0] - Unreleased
 
 The release date is set when the `v0.4.0` tag is created. This section covers
-the 73 merge requests merged into `dev` after `v0.3.1` (2026-05-30). The
-read-only MCP endpoint is counted with !346, which absorbed its slice. Work
-that is still open is not listed.
+the 77 merge requests merged into `dev` after `v0.3.1` (2026-05-30). Three
+slices of the agent-access stack (!347, !350, !352) merged into their parent
+branches and arrived with !346, !349 and !351. Work that is still open is not
+listed.
 
 ### Upgrading from 0.3.1
 
-- **Database.** The server applies 191 new migrations (`0134` to `0336`) at
-  startup. No migration that existed in `v0.3.1` was modified, so stored
-  checksums stay valid. Back up the database before you upgrade; the
+- **Database.** The server applies 199 new migrations (`0134` to `0348`) at
+  startup. All 127 migrations from `v0.3.1` are still present with the same
+  version, file name and content, so their stored checksums stay valid. The
+  migrations directory moved to `packages/default/crates/cf-server/migrations`
+  in the backend split (!305). Back up the database before you upgrade; the
   migrations have no down scripts.
 - **NixOS module.** A comparison of the option declarations in
   `modules/nixos/crystal-forge/default.nix` found no option from `v0.3.1`
@@ -29,7 +32,8 @@ that is still open is not listed.
 - **Access tokens.** `accessTokens.enable` defaults to `true`. Signed-in users
   can create tokens after the upgrade. Tokens stay inert until a consumer
   admits them. The MCP endpoint is off by default (`mcp.enable = false`) and
-  requires `accessTokens.enable`.
+  requires `accessTokens.enable`. A token can only do what its selected scopes
+  and its owner's role allow.
 - **Upgrade check.** The upgrade check (`integration-upgrade`, scenario
   `version-transition`) starts from the genuine `v0.3.1` packages. See
   [its README](./checks/integration-upgrade/README.md).
@@ -38,13 +42,24 @@ that is still open is not listed.
 
 #### Access and identity
 
-- Owner access tokens with a Profile UI (!346, option `accessTokens.enable`, on by default) and
-  the authorization groundwork for personal access tokens and the MCP server
-  (!345).
-- A read-only MCP endpoint at `POST /mcp` with four tools (`list_remediation_work`,
-  `get_system_security_context`, `get_remediation_context`, `get_poam_detail`).
-  It is off by default, needs `accessTokens.enable`, and arrived in !346
-  together with the token service.
+- Owner access tokens with a Profile UI (!346, option `accessTokens.enable`,
+  on by default) and the authorization groundwork for personal access tokens
+  and the MCP server (!345). The service defines 14 scopes; `poams:close`
+  is not yet selectable. The three authoring scopes (`policies:draft`,
+  `policies:import`, `bundles:draft`) need an Admin owner.
+- An MCP endpoint at `POST /mcp` for coding agents, off by default
+  (`mcp.enable`) and dependent on `accessTokens.enable`. It offers 24 tools,
+  each gated by a token scope, and records every write as made by the agent
+  token:
+  - Read tools: CVE and scan inventory for a system or the configuration's
+    flake HEAD (!347, !353), POA&M detail, and the compliance policy, bundle
+    and requirement catalogs (!350).
+  - Write tools: request a CVE scan, update or verify a POA&M (!349), and
+    create a POA&M from sealed configuration evidence (!353).
+  - Authoring tools: create, update, validate and import policy drafts
+    (!351), and create and update bundle drafts with an impact preview
+    (!352). No tool trusts, publishes, assigns or deletes. See the
+    [MCP server concept](./docs/knowledge/security/mcp-server.md).
 - System agent key rotation from the Agent identity section (!319).
 - Account notifications and active session management (!314), and the
   Profile and Preferences view (!312).

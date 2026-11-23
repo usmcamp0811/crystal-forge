@@ -1,7 +1,7 @@
 # Bundle Update Log
 
 ## 2026-11-22
-* **TASK-540 v0.4.0 release preparation:** Added the v0.4.0 release notes concept. Updated the project introduction, system context, and release roadmap for v0.4.0, and the nixos-module-generation manifest example for the `0.4.0` generator string. Rechecked the STIG control module count (25), deployment policy names, and deployment strategy names against the code. Removed the unrecomputed v0.3.0 progress figure from the release roadmap.
+* **TASK-540 v0.4.0 release preparation:** Added the v0.4.0 release notes concept, written against `dev` after the agent-access stack (MCP read, write, authoring and CVE planning tools) and the legacy upgrade rehearsal merged. Updated the project introduction, system context, and release roadmap for v0.4.0, and the nixos-module-generation manifest example for the `0.4.0` generator string. Rechecked the STIG control module count (25), deployment policy names, and deployment strategy names against the code. Removed the unrecomputed v0.3.0 progress figure from the release roadmap.
 
 ## 2026-11-17
 * **TASK-534.2 second review (actor recheck, multi-role editor):** Documented that PATCH `/admin/users/:id` rechecks the acting Admin (active, Admin role, live session) inside its transaction after the advisory lock and ordered actor/target row locks, with 403, no write and no audit on failure. Recorded the lock order and that other admin mutations are not yet rechecked in a transaction (Backlog TASK-535). Documented editor normalization of several local roles and its notice. Server and browser results for these fixes remain pending; no builds ran for this update.

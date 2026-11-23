@@ -73,7 +73,7 @@ Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-
 - **Dev mode**: Bypass authentication for local development
 - **RBAC**: Admin, Operator, Viewer roles with permission guards
 - **Session security**: HttpOnly secure cookies, CSRF protection, JIT provisioning
-- **Access tokens**: Signed-in users create their own tokens. An optional read-only MCP endpoint admits them. See [Owner access token service](../security/access-token-service.md) and [MCP server](../security/mcp-server.md).
+- **Access tokens**: Signed-in users create their own tokens. An optional MCP endpoint lets agents use them within the scopes and role of the owner. See [Owner access token service](../security/access-token-service.md) and [MCP server](../security/mcp-server.md).
 
 ## Data Model
 
