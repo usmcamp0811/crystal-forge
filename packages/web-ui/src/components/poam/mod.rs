@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use uuid::Uuid;
@@ -17,7 +17,8 @@ use crate::components::icon::{Icon, IconName};
 use crate::state::app_state::AppState;
 use crate::views::poam_api::{
     self, ActivityView, AddFindingRequest, AddMilestoneRequest, AddNoteRequest, AssessmentOutcome,
-    AssignmentReferenceRequest, ClosePreconditionDetails, CreateCvePoamRequest, CveFindingView,
+    AssignmentReferenceRequest, ClosePreconditionDetails, ConfigurationCveFindingView,
+    CreateCvePoamRequest, CveFindingView,
     CveObservationReference, FindingObservationReference, FindingRelationshipEntry,
     FindingRequirementView, FindingView, MilestoneView, PoamApiError, PoamAssigneeCatalog,
     PoamAssigneeRequest, PoamAssigneeView, PoamDetail, PoamDetailQuery, PoamRisk, PoamStatus,
@@ -430,8 +431,11 @@ pub const fn status_label(status: PoamStatus) -> &'static str {
     status.label()
 }
 
-fn available_status_transitions(status: PoamStatus) -> &'static [PoamStatus] {
-    match status {
+fn available_status_transitions(
+    status: PoamStatus,
+    configuration_planning_only: bool,
+) -> impl Iterator<Item = PoamStatus> {
+    let choices: &[PoamStatus] = match status {
         PoamStatus::Open => &[
             PoamStatus::InProgress,
             PoamStatus::Blocked,
@@ -449,19 +453,75 @@ fn available_status_transitions(status: PoamStatus) -> &'static [PoamStatus] {
         ],
         PoamStatus::AwaitingVerification => &[PoamStatus::InProgress, PoamStatus::Blocked],
         PoamStatus::Completed => &[],
-    }
+    };
+    choices.iter().copied().filter(move |choice| {
+        !configuration_planning_only || *choice != PoamStatus::AwaitingVerification
+    })
 }
 
 /// Returns whether the detail view may offer `Verify now` and
 /// `Authoritative close`.
 ///
-/// The server records a verification attempt only for a POA&M that is
-/// awaiting verification. It answers every other state, including `Open`,
-/// `InProgress`, `Blocked`, and `Completed`, with `409 invalid_transition`.
-/// The view therefore never offers these actions elsewhere. This function
-/// mirrors that rule for presentation only; the server still decides.
-fn verification_actions_available(status: PoamStatus) -> bool {
-    status == PoamStatus::AwaitingVerification
+/// The server requires awaiting verification and rejects configuration-only
+/// plans until runtime handoff. The server still decides whether to close.
+fn verification_actions_available(status: PoamStatus, configuration_planning_only: bool) -> bool {
+    status == PoamStatus::AwaitingVerification && !configuration_planning_only
+}
+
+fn configuration_baseline_label(configuration_planning_only: bool) -> &'static str {
+    if configuration_planning_only {
+        "Configuration scan · Runtime unverified"
+    } else {
+        "Historical configuration scan · Planning baseline only"
+    }
+}
+
+/// Returns why `Link finding` is unavailable, or `None` when only the
+/// readonly rule applies.
+///
+/// The server rejects any policy or runtime finding link while a POA&M is
+/// configuration planning-only. After runtime handoff linking follows the
+/// usual rules.
+fn link_finding_blocked_reason(configuration_planning_only: bool) -> Option<&'static str> {
+    configuration_planning_only.then_some(
+        "Configuration planning POA&Ms cannot link findings until runtime handoff",
+    )
+}
+
+/// Returns the first 12 characters of a commit hash for display. The full
+/// hash stays available as the element title.
+fn short_commit_hash(hash: &str) -> String {
+    hash.chars().take(12).collect()
+}
+
+/// Formats a baseline scan completion time to the minute in UTC.
+fn baseline_completed_label(completed_at: DateTime<Utc>) -> String {
+    completed_at.format("%Y-%m-%d %H:%M UTC").to_string()
+}
+
+/// Returns the labelled secondary provenance of a configuration baseline, in
+/// display order, for the expandable `Baseline provenance` block.
+fn configuration_baseline_provenance(
+    finding: &ConfigurationCveFindingView,
+) -> [(&'static str, String); 4] {
+    [
+        (
+            "Scanned system store path",
+            finding.baseline_scanned_store_path.clone(),
+        ),
+        (
+            "Occurrence derivation path",
+            finding.baseline_occurrence_derivation_path.clone(),
+        ),
+        (
+            "Scan derivation ID",
+            finding.baseline_scan_derivation_id.to_string(),
+        ),
+        (
+            "Configuration derivation ID",
+            finding.baseline_configuration_derivation_id.to_string(),
+        ),
+    ]
 }
 
 /// Returns the semantic CSS class for a server POA&M status.
@@ -1679,8 +1739,14 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
     };
     let target_timing = target_timing_label(&detail.poam, chrono::Utc::now().date_naive());
     let deficiency_heading = deficiency_title(active_findings.len());
-    let vulnerability_scope =
-        vulnerability_scope_title(&active_cve_findings, &historical_cve_findings);
+    let configuration_finding = detail.configuration_cve_finding.as_ref();
+    let link_finding_blocked = link_finding_blocked_reason(detail.poam.configuration_planning_only);
+    let has_runtime_cve_findings = !detail.cve_findings.is_empty();
+    let vulnerability_scope = if has_runtime_cve_findings {
+        vulnerability_scope_title(&active_cve_findings, &historical_cve_findings)
+    } else {
+        "Vulnerability scope".to_owned()
+    };
     let active_cve_groups = group_cve_scope(&active_cve_findings);
     // Viewers never see metadata controls, so they never see the save action.
     // The save handler clones the loaded summary because it must outlive this
@@ -1835,8 +1901,8 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                 }
                 LifecycleSection { detail: detail.clone(), readonly, close_details: close_details(), verification_loading: history_loading() == Some(HistoryPageKind::Verification), on_load_more_verification: move |_| if let Some(query) = verification_page_query.clone() { load_more(HistoryPageKind::Verification, query); }, on_transition: move |status| { let request = TransitionPoamRequest { revision, status, note: None }; busy.set(Some("Changing status".to_string())); spawn(async move { match poam_api::transition_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("changing status", err) } }); }, on_verify: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Verifying".to_string())); spawn(async move { match poam_api::verify_poam(props.poam_id, &request).await { Ok(_) => { busy.set(None); load(true); }, Err(err) => handle_error("verifying remediation", err) } }); }, on_close: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Closing".to_string())); spawn(async move { match poam_api::close_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("closing", err) } }); }, on_reopen: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Reopening".to_string())); spawn(async move { match poam_api::reopen_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("reopening", err) } }); } }
                 section { class: "poam-tray-section", "data-testid": "poam-deficiency",
-                    header { h3 { "{deficiency_heading}" } button { class: "btn btn-ghost xs focus-ring", disabled: readonly, onclick: move |_| finding_picker.toggle(), Icon { name: IconName::Link, size: 11 } "Link finding" } }
-                    if active_findings.is_empty() && detail.cve_findings.is_empty() { div { role: "status", class: "poam-empty", "No findings are linked." } }
+                    header { h3 { "{deficiency_heading}" } button { class: "btn btn-ghost xs focus-ring", "data-testid": "poam-link-finding", disabled: readonly || link_finding_blocked.is_some(), title: link_finding_blocked.unwrap_or(""), onclick: move |_| finding_picker.toggle(), Icon { name: IconName::Link, size: 11 } "Link finding" } }
+                    if active_findings.is_empty() && !has_runtime_cve_findings && configuration_finding.is_none() && !detail.poam.configuration_planning_only { div { role: "status", class: "poam-empty", "No findings are linked." } }
                     if !active_findings.is_empty() {
                     div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-findings-table", thead { tr { th { "Host" } th { "Requirement" } th { "Policy" } th { "Current result" } th { "Actions" } } } tbody {
                         for finding in active_findings.clone() { { let finding_for_navigation = finding.clone(); let finding_id = finding.id; let requirements = requirement_presentations(&finding.requirements, &finding.requirement_version_ids); rsx! { tr { key: "{finding.link_id}", "data-testid": "poam-linked-finding", "data-finding-id": "{finding.id}", td { class: "mono", "{finding.hostname}" } td { class: "poam-requirement", if requirements.is_empty() { span { class: "poam-muted", "Not provided by this finding" } } else { for requirement in requirements { div { class: "poam-requirement-context", if let Some(framework) = requirement.framework { span { class: "poam-requirement-framework", "{framework}" } } else { span { class: "poam-requirement-framework", "Unresolved requirement version" } } strong { class: "mono", "{requirement.control}" } if let Some(title) = requirement.title { span { class: "poam-requirement-title", "{title}" } } } } } } td { "{finding.policy_name}" } td { span { class: "poam-chip {result_class(finding.resolution_state)}", "{result_label(finding.resolution_state)}" } } td { class: "poam-row-actions", button { class: "btn btn-ghost xs focus-ring", onclick: move |_| props.on_open_finding.call(finding_for_navigation.clone()), "Evidence" } button { class: "btn-icon focus-ring", title: "Unlink finding", disabled: readonly, onclick: move |_| { busy.set(Some("Unlinking finding".to_string())); spawn(async move { match poam_api::unlink_poam_finding(props.poam_id, finding_id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("unlinking finding", err) } }); }, Icon { name: IconName::X, size: 12 } } } } } } }
@@ -1893,10 +1959,12 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                         }
                     }
                 }
-                if !active_cve_findings.is_empty() || !historical_cve_findings.is_empty() {
+                if has_runtime_cve_findings || configuration_finding.is_some() {
                     section { class: "poam-tray-section", "data-testid": "poam-linked-vulnerabilities",
                         header { h3 { "{vulnerability_scope}" } }
-                        p { class: "poam-section-help", "Scope is fixed at creation; a re-scan does not change the recorded links. Justification or whitelisting is not remediation. Closure still requires authoritative exact evidence to clear the finding." }
+                        if has_runtime_cve_findings {
+                            p { class: "poam-section-help", "Scope is fixed at creation; a re-scan does not change the recorded links. Justification or whitelisting is not remediation. Closure still requires authoritative exact evidence to clear the finding." }
+                        }
                         for group in active_cve_groups.clone() {
                             div { key: "{group.cve_id}-{group.package}", class: "poam-cve-group", "data-testid": "poam-cve-group", "data-cve-id": "{group.cve_id}", "data-cve-package": "{group.package}",
                                 div { class: "poam-cve-group-head",
@@ -1969,6 +2037,41 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                                 }
                             }
                         }
+                        // The configuration baseline is sealed HEAD scan
+                        // evidence, not runtime evidence. It uses the stacked
+                        // audit row style and a neutral chip so it never reads
+                        // as a runtime result.
+                        if let Some(finding) = configuration_finding {
+                            {
+                                let head_short = short_commit_hash(&finding.baseline_head_commit_hash);
+                                let completed = baseline_completed_label(finding.baseline_scan_completed_at);
+                                let completed_title = finding.baseline_scan_completed_at.to_rfc3339();
+                                let provenance = configuration_baseline_provenance(finding);
+                                rsx! {
+                                    div { class: "poam-retired-row", "data-testid": "poam-configuration-cve-finding",
+                                        div { class: "poam-retired-identity",
+                                            strong { class: "mono", "{finding.canonical_cve_id}" }
+                                            span { class: "mono poam-muted", "{finding.canonical_package_name}" }
+                                            span { class: "poam-chip", "{configuration_baseline_label(detail.poam.configuration_planning_only)}" }
+                                        }
+                                        div { class: "poam-retired-evidence",
+                                            small { class: "mono", title: "{finding.baseline_head_commit_hash}", "HEAD {head_short} · Observed {finding.baseline_observed_package_version}" }
+                                            small { class: "mono poam-muted", title: "{completed_title}", "Scan completed {completed}" }
+                                            small { class: "mono poam-muted", "System {finding.system_id}" }
+                                            small { class: "mono poam-muted", "Original scan {finding.baseline_scan_id}" }
+                                        }
+                                        details { class: "poam-retired-history", "data-testid": "poam-configuration-baseline-provenance",
+                                            summary { class: "focus-ring", "Baseline provenance" }
+                                            div { class: "poam-retired-evidence",
+                                                for (label, value) in provenance {
+                                                    small { key: "{label}", class: "mono poam-muted", "{label}: {value}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 section { class: "poam-tray-section",
@@ -2017,6 +2120,8 @@ struct LifecycleSectionProps {
 #[component]
 fn LifecycleSection(props: LifecycleSectionProps) -> Element {
     let status = props.detail.poam.status;
+    let planning_only = props.detail.poam.configuration_planning_only;
+    let transitions = available_status_transitions(status, planning_only);
     rsx! {
         section { class: "poam-tray-section",
             header { h3 { "Remediation status" } if status == PoamStatus::Completed { div { class: "poam-lifecycle-actions", button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_reopen.call(()), Icon { name: IconName::Rollback, size: 11 } "Reopen" } } } }
@@ -2032,18 +2137,14 @@ fn LifecycleSection(props: LifecycleSectionProps) -> Element {
                         disabled: true,
                         "{status_label(status)}"
                     }
-                    for choice in available_status_transitions(status).iter().copied() {
+                    for choice in transitions {
                         button { class: "focus-ring", title: choice.description(), disabled: props.readonly, onclick: move |_| props.on_transition.call(choice), "{status_label(choice)}" }
                     }
                 }
             }
-            // COMPATIBILITY: The server accepts verification only while a POA&M
-            // is awaiting verification and answers `409 invalid_transition` in
-            // every other state. `Verify now` and `Authoritative close`
-            // therefore exist only in that state. `Authoritative close` stays
-            // enabled after a failed check: the server, not the browser,
-            // decides closure and returns the structured rejection.
-            if verification_actions_available(status) {
+            // Authoritative close stays available after a failed check: the
+            // server decides closure and returns the structured rejection.
+            if verification_actions_available(status, planning_only) {
                 div { class: "poam-verify-box", "data-coach-target": "poam-verify",
                     div { role: "status", class: "sd-callout sd-callout-warn", Icon { name: IconName::Warn, size: 13 } div { strong { "Awaiting verification." } " Remediation is reported complete, but the finding result remains independent. Verify against current assessments, then use authoritative close." } }
                     div { class: "poam-verify-actions",
@@ -2547,6 +2648,7 @@ mod tests {
             overdue,
             finding_count: 1,
             cve_finding_count: 0,
+            configuration_planning_only: false,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             closed_at: None,
@@ -2574,10 +2676,15 @@ mod tests {
         );
         assert!(PoamStatus::Blocked.description().contains("dependency"));
         assert_eq!(
-            available_status_transitions(PoamStatus::AwaitingVerification),
-            &[PoamStatus::InProgress, PoamStatus::Blocked]
+            available_status_transitions(PoamStatus::AwaitingVerification, false)
+                .collect::<Vec<_>>(),
+            [PoamStatus::InProgress, PoamStatus::Blocked]
         );
-        assert!(available_status_transitions(PoamStatus::Completed).is_empty());
+        assert!(
+            available_status_transitions(PoamStatus::Completed, false)
+                .next()
+                .is_none()
+        );
     }
 
     #[test]
@@ -3237,13 +3344,107 @@ mod tests {
             PoamStatus::Completed,
         ] {
             assert!(
-                !verification_actions_available(status),
+                !verification_actions_available(status, false),
                 "{status:?} must not offer verification"
             );
         }
         assert!(verification_actions_available(
-            PoamStatus::AwaitingVerification
+            PoamStatus::AwaitingVerification,
+            false
         ));
+        assert!(!verification_actions_available(
+            PoamStatus::AwaitingVerification,
+            true
+        ));
+    }
+
+    #[test]
+    fn configuration_baseline_is_unverified_or_historical() {
+        assert_eq!(
+            configuration_baseline_label(true),
+            "Configuration scan · Runtime unverified"
+        );
+        assert_eq!(
+            configuration_baseline_label(false),
+            "Historical configuration scan · Planning baseline only"
+        );
+    }
+
+    #[test]
+    fn link_finding_is_blocked_only_while_configuration_planning_only() {
+        let reason = link_finding_blocked_reason(true).expect("planning-only blocks linking");
+        assert!(reason.contains("runtime handoff"), "{reason}");
+        // After runtime handoff only the readonly rule applies.
+        assert_eq!(link_finding_blocked_reason(false), None);
+        let source = include_str!("mod.rs");
+        assert!(source.contains(
+            "disabled: readonly || link_finding_blocked.is_some(), title: link_finding_blocked.unwrap_or(\"\")"
+        ));
+    }
+
+    fn configuration_baseline_fixture() -> ConfigurationCveFindingView {
+        ConfigurationCveFindingView {
+            system_id: Uuid::from_u128(2),
+            canonical_cve_id: "CVE-2026-1234".into(),
+            canonical_package_name: "fixture-package".into(),
+            baseline_scan_id: Uuid::from_u128(3),
+            baseline_head_commit_hash: "0123456789abcdef0123456789abcdef01234567".into(),
+            baseline_configuration_derivation_id: 7,
+            baseline_scan_derivation_id: 8,
+            baseline_scan_completed_at: "2026-11-20T08:30:59Z".parse().unwrap(),
+            baseline_scanned_store_path: "/nix/store/aaaa-nixos-system-host".into(),
+            baseline_occurrence_derivation_path: "/nix/store/bbbb-fixture-package-1.2.3.drv"
+                .into(),
+            baseline_observed_package_version: "1.2.3".into(),
+        }
+    }
+
+    #[test]
+    fn configuration_baseline_shows_head_commit_version_and_completion() {
+        let finding = configuration_baseline_fixture();
+        assert_eq!(
+            short_commit_hash(&finding.baseline_head_commit_hash),
+            "0123456789ab"
+        );
+        assert_eq!(short_commit_hash("abc"), "abc");
+        assert_eq!(
+            baseline_completed_label(finding.baseline_scan_completed_at),
+            "2026-11-20 08:30 UTC"
+        );
+    }
+
+    #[test]
+    fn configuration_baseline_provenance_lists_paths_and_derivations_in_order() {
+        let finding = configuration_baseline_fixture();
+        assert_eq!(
+            configuration_baseline_provenance(&finding),
+            [
+                (
+                    "Scanned system store path",
+                    "/nix/store/aaaa-nixos-system-host".to_string()
+                ),
+                (
+                    "Occurrence derivation path",
+                    "/nix/store/bbbb-fixture-package-1.2.3.drv".to_string()
+                ),
+                ("Scan derivation ID", "8".to_string()),
+                ("Configuration derivation ID", "7".to_string()),
+            ]
+        );
+        let source = include_str!("mod.rs");
+        assert!(source.contains("summary { class: \"focus-ring\", \"Baseline provenance\" }"));
+    }
+
+    #[test]
+    fn planning_only_tray_keeps_progress_transitions_but_omits_entry_to_verification() {
+        assert_eq!(
+            available_status_transitions(PoamStatus::Open, true).collect::<Vec<_>>(),
+            [PoamStatus::InProgress, PoamStatus::Blocked]
+        );
+        assert!(
+            available_status_transitions(PoamStatus::Open, false)
+                .any(|choice| choice == PoamStatus::AwaitingVerification)
+        );
     }
 
     #[test]

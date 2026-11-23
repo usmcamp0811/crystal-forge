@@ -17,6 +17,9 @@ sources:
   - id: compliance-scopes
     resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0343_compliance_token_scopes.sql at commit f4fcba6f"
     title: Compliance scope allowlist
+  - id: planning-scope
+    resource: "Crystal Forge repository file packages/default/crates/cf-server/migrations/0346_configuration_cve_poam_planning.sql at commit 459f0489"
+    title: Scope allowlist with poams:create
 ---
 
 # Owner access token service
@@ -135,9 +138,12 @@ because name uniqueness follows revocation and not expiry.
 
 The service catalog (`SCOPES` in the service) decides which scopes an owner can
 select. The `api_access_token_scopes.scope` CHECK constraint repeats the
-thirteen names at the database boundary. Migration
+fourteen names at the database boundary. Migration
 `0343_compliance_token_scopes.sql` replaced the constraint of migration 0336
-to add the six compliance scopes.
+to add the six compliance scopes. Migration
+`0346_configuration_cve_poam_planning.sql` replaced it again to add
+`poams:create` (TASK-534.9); 0343 always applies first, so the 0346 list keeps
+all thirteen earlier names.
 
 | Scope | Label | Role | Released | Preselected |
 | --- | --- | --- | --- | --- |
@@ -145,6 +151,7 @@ to add the six compliance scopes.
 | `poams:read` | Read POA&Ms | Viewer | Yes | Yes |
 | `provenance:read` | Read authorized provenance | Viewer | Yes | Yes |
 | `scans:request` | Request CVE scans | Operator | Yes | No |
+| `poams:create` | Create CVE POA&Ms | Operator | Yes | No |
 | `poams:write` | Update POA&M progress | Operator | Yes | No |
 | `poams:verify` | Verify POA&M evidence | Operator | Yes | No |
 | `poams:close` | Close POA&Ms | Operator | No | No |

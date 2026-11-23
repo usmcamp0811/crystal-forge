@@ -89,6 +89,7 @@ fn selection() -> RegisterExportSelection {
                 overdue: false,
                 finding_count: 0,
                 cve_finding_count: 1,
+                configuration_planning_only: false,
                 created_at: now,
                 updated_at: now,
                 closed_at: None,

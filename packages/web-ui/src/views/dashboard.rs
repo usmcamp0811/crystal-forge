@@ -1773,6 +1773,7 @@ mod tests {
             overdue: true,
             finding_count: 1,
             cve_finding_count: 0,
+            configuration_planning_only: false,
             created_at: timestamp,
             updated_at: timestamp,
             closed_at: None,

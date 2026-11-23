@@ -237,6 +237,25 @@ pub struct CveObservationReference {
     pub canonical_package_name: String,
 }
 
+/// Selects one finding identity for MCP create-or-reuse.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateScannedCvePoamRequest {
+    /// Identifies the affected system.
+    pub system_id: Uuid,
+    /// Gives the canonical CVE ID after transport normalization.
+    pub cve_id: String,
+    /// Gives the exact case-sensitive canonical package name.
+    pub canonical_package_name: String,
+    /// Pins the current HEAD scan for a new configuration planning subject.
+    pub expected_scan_id: Uuid,
+    /// Gives the title for a newly created POA&M.
+    pub title: String,
+    /// Gives the optional plan for a newly created POA&M.
+    #[serde(default)]
+    pub plan: String,
+}
+
 /// Requests linking one current exact CVE occurrence to an existing POA&M.
 #[derive(Debug, Deserialize)]
 pub struct AddCveFindingRequest {
@@ -572,9 +591,12 @@ pub struct PoamSummary {
     pub overdue: bool,
     /// Counts active findings, or the closure finding set for a completed POA&M.
     pub finding_count: i64,
-    /// Counts exact-CVE findings without changing policy finding semantics.
+    /// Counts runtime CVE links and one configuration CVE before runtime handoff.
     #[serde(default)]
     pub cve_finding_count: i64,
+    /// Indicates that the configuration plan cannot verify or close before runtime handoff.
+    #[serde(default)]
+    pub configuration_planning_only: bool,
     /// Records when the POA&M was created.
     pub created_at: DateTime<Utc>,
     /// Records the most recent POA&M mutation.
@@ -1075,6 +1097,9 @@ pub struct PoamDetail {
     /// Gives exact-CVE links selected by the shared finding-history page.
     #[serde(default)]
     pub cve_findings: Vec<CveFindingView>,
+    /// Gives the immutable HEAD planning baseline, including after runtime handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_cve_finding: Option<ConfigurationCveFindingView>,
     /// Indicates that an older findings page is available.
     pub findings_has_more: bool,
     /// Selects the next older findings page when present.
@@ -1095,6 +1120,43 @@ pub struct PoamDetail {
     pub activity_has_more: bool,
     /// Selects the next older activity page when present.
     pub activity_next_cursor: Option<HistoryCursor>,
+}
+
+/// Identifies a planning subject and its immutable sealed HEAD scan evidence.
+/// The baseline remains visible after runtime handoff where the subject is in scope.
+/// This projection does not provide deployed-runtime authority.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ConfigurationCveFindingView {
+    /// Identifies the stable system/CVE/package finding.
+    pub cve_finding_id: Uuid,
+    /// Identifies the system whose registered HEAD supplied the finding.
+    pub system_id: Uuid,
+    /// Gives the canonical CVE ID.
+    pub canonical_cve_id: String,
+    /// Gives the canonical package name.
+    pub canonical_package_name: String,
+    /// Identifies the flake HEAD commit at creation.
+    pub baseline_head_commit_id: i32,
+    /// Gives the flake HEAD commit hash at creation.
+    pub baseline_head_commit_hash: String,
+    /// Identifies the configuration derivation at HEAD.
+    pub baseline_configuration_derivation_id: i32,
+    /// Identifies the sealed scan selected from HEAD.
+    pub baseline_scan_id: Uuid,
+    /// Identifies the scan execution derivation, which can differ from the carrier.
+    pub baseline_scan_derivation_id: i32,
+    /// Identifies the execution derivation's commit.
+    pub baseline_scan_commit_id: i32,
+    /// Gives the execution derivation's commit hash.
+    pub baseline_scan_commit_hash: String,
+    /// Gives the scan completion timestamp.
+    pub baseline_scan_completed_at: DateTime<Utc>,
+    /// Gives the scanned system output path.
+    pub baseline_scanned_store_path: String,
+    /// Gives the observed package derivation path.
+    pub baseline_occurrence_derivation_path: String,
+    /// Gives the observed package version.
+    pub baseline_observed_package_version: String,
 }
 
 /// Reports a failing finding that can be linked to the selected POA&M.
