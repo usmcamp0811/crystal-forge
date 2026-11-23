@@ -1586,6 +1586,7 @@ async fn http_offers_no_trust_publish_or_assign_tool_and_audits_denials(pool: Pg
         "scans:request",
         "poams:write",
         "poams:verify",
+        "poams:create",
         "policies:read",
         "policies:draft",
         "policies:import",
