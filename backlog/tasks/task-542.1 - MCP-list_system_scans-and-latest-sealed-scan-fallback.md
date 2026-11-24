@@ -31,7 +31,7 @@ An agent can discover the sealed configuration scans of a system and fall back t
 - New read tool in cf-server/src/mcp/scan_inventory.rs, scope cves:read, using scoped_read (one REPEATABLE READ snapshot) and SCOPED_SYSTEMS. Hidden and unknown systems return not found.
 - Source: the existing sealed_configuration_cve_scans view, filtered by the system's flake_id and effective configuration name, the same relation that list_scan_findings uses for an explicit scan_id. Every listed scan_id is therefore accepted by list_scan_findings(scan_id).
 - Keyset pagination on (completed_at DESC, scan_id DESC) with an opaque cursor bound to the filters; bounded limit (existing limit_schema).
-- is_runtime_authoritative comes only from view_current_cve_authority. is_head is true when the scan is of the proven execution derivation of HEAD from configuration_cve_head, the scan that flake_head selection uses (with execution reuse its commit can be earlier than HEAD).
+- is_runtime_authoritative comes only from view_current_cve_authority. is_head is true for every scan of the proven execution derivation of HEAD from configuration_cve_head (evidence identity, not selection); flake_head selects the newest such scan, the first one with is_head true in list order. With execution reuse a HEAD scan can belong to an earlier commit.
 - latest_sealed_scan in list_scan_findings is a reference only. It never changes state, selection, findings, or planning eligibility.
 
 ## Verification plan

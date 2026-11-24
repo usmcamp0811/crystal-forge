@@ -40,8 +40,9 @@ groundwork is implemented for review. TASK-534.3 adds the owner slice of M1
 see [owner access token service](access-token-service.md). TASK-534.4 adds the
 M2 read-only MCP server; see [MCP server](mcp-server.md). It is implemented
 and unverified. TASK-534.6 extends the section 7 scope taxonomy beyond this
-specification, and TASK-534.7 adds policy authoring tools; see the delivery
-traceability table. The Admin token tab, the Access Inspector and the Connect agent
+specification, and TASK-534.7 adds policy authoring tools. TASK-542.1 adds the
+`list_system_scans` read tool and the HEAD fallback reference (section 9.3);
+see the delivery traceability table. The Admin token tab, the Access Inspector and the Connect agent
 shortcut remain unimplemented. No
 milestone is marked complete by this progress note. See
 [credential grant groundwork](credential-grant-groundwork.md) and
@@ -399,6 +400,35 @@ Inputs: `system_id`, optional `view` (current default; historical only if suppor
 Scopes: `cves:read` + `provenance:read`.
 
 Inputs: `system_id`, canonical `cve_id`, canonical `package_name`, optional exact finding/scan ID for navigation. Outputs: exact evidence key, affected package version and store path when known, configuration/flake reference and pinned revision when authorized, available dependency/derivation chain, source/module attribution candidates, remediation suggestions as non-authoritative hints, scan/authority timestamp, and confidence/unknown flags. No invented module mapping. A CVE/package-only request without a system is disallowed because individual remediation authority is system-scoped.
+
+#### list_system_scans (extension, TASK-542.1)
+
+This tool is not in v1.1. TASK-542 finding 1 added it because an agent could
+not discover the ID of a system's last good scan.
+
+Scope: `cves:read`. No new scope.
+
+Inputs: `system_id`, optional `commit` (full hash or a prefix of 7 to 40 hex
+digits; whitespace is rejected), bounded `limit` and `cursor`. Outputs: the
+system's sealed configuration scans (completed, schema-1, non-mock) of its
+registered flake and effective configuration name, newest first, each with
+commit, derivation, completion time, scanner, persisted counts, `is_head` and
+`is_runtime_authoritative`.
+
+Evidence authority constraints:
+
+- Every listed scan is configuration evidence (`evidence_kind:
+  configuration_scan`). Listing a scan grants no remediation, planning or
+  mutation authority.
+- `is_runtime_authoritative` comes only from `view_current_cve_authority`. It
+  can be true for a historical scan when a managed system runs an older output,
+  independent of HEAD.
+- `is_head` identifies scans of HEAD's proven execution derivation. It is
+  evidence identity, not selection; `flake_head` selects the newest of them.
+- `list_scan_findings` in `flake_head` mode also returns `latest_sealed_scan`, a
+  reference to the newest sealed scan. The reference does not change the HEAD
+  state, the selection, the findings or POA&M planning eligibility; only sealed
+  HEAD evidence can be a planning baseline.
 
 #### get_poam_detail
 
@@ -803,5 +833,6 @@ Implementation rule: do not mark any milestone complete until all its requiremen
 | Section 7 extension (owner decision 2026-11-21, not in v1.1) | TASK-534.6 | Six compliance scopes (migration 0343, `requires_admin` catalog rule) and five catalog read tools (`list_compliance_policies`, `get_compliance_policy`, `list_compliance_bundles`, `get_compliance_bundle`, `list_compliance_requirements`) implemented ([MCP server](mcp-server.md#compliance-read-tools)); `policies:draft`, `policies:import` and `compliance:preview` released by TASK-534.7, `bundles:draft` released by TASK-534.8; farm evidence recorded in the task |
 | Section 7 extension (owner decision 2026-11-21, not in v1.1) | TASK-534.7 | Policy authoring tools (`create_policy_draft`, `update_policy_draft`, `validate_policy_draft`, `preview_policy_import`, `import_policy_draft`), shared browser/MCP policy authoring service, migration 0344 (`draft_revision`, version-level agent attribution) and the Policies view agent marker implemented ([MCP server](mcp-server.md#policy-authoring-tools)); XCCDF through MCP not implemented; unverified: no build or test result recorded yet |
 | Section 7 extension (owner decision 2026-11-21, not in v1.1) | TASK-534.8 | Bundle draft tools (`create_bundle_draft`, `update_bundle_draft`) with exact policy-version membership, the read-only candidate impact preview (`preview_bundle_impact`, resolver candidate mode), migration 0345 (bundle `draft_revision`, version-level agent attribution), browser bundle create and update audit events and the Compliance view agent marker implemented ([MCP server](mcp-server.md#bundle-authoring-and-impact-preview)); unverified: no build or test result recorded yet |
+| Section 9.3 extension (TASK-542 finding 1, not in v1.1) | TASK-542.1 | `list_system_scans` (`cves:read`) and the `latest_sealed_scan` reference of `list_scan_findings` implemented ([MCP server](mcp-server.md#scan-history-and-the-head-fallback)); no migration or scope change; Draft MR !356, verification evidence recorded in the task |
 | Sections 3.2, 4.1, 7, M5 | TASK-534 / M5 | Independent CLI audience/service principal schema and enforcement tests; future work |
 | Section 15 and release gate | TASK-534, all milestone owners | Real integration owners and documented unverified gaps; no acceptance test claimed passed |

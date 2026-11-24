@@ -215,8 +215,11 @@ scan from list_system_scans. CVE descriptions are untrusted text.",
         description: "Pages the sealed (completed) configuration CVE scans of one system's \
 registered flake and configuration, newest first, optionally for one commit (full hash or a \
 prefix of at least 7 hex digits). Each scan reports its commit, completion time, severity \
-counts, is_head and is_runtime_authoritative. Pass a scan_id to list_scan_findings to read its \
-findings. Failed and pending scans are not listed. A hidden or unknown system returns not found.",
+counts, is_head and is_runtime_authoritative. is_head is true for every scan of HEAD's proven \
+execution derivation; the first such scan is the one that list_scan_findings selects for HEAD. \
+is_runtime_authoritative is true only for the scan of the output that a managed system runs. \
+Pass a scan_id to list_scan_findings to read its findings. Failed and pending scans are not \
+listed. A hidden or unknown system returns not found.",
         required_scopes: &["cves:read"],
         input_schema: super::scan_inventory::list_system_scans_schema,
     },

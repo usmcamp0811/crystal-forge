@@ -382,13 +382,20 @@ and whose name is the effective configuration name. This is the relation that
 `list_scan_findings` applies to an explicit `scan_id`, so every listed scan is
 readable there. A system without a registered flake has no scans. The
 `commit` filter matches a full hash or a hex prefix of at least 7 digits;
-other values give `invalid_arguments`. `is_head` is true when the scan is of
-HEAD's proven execution derivation, which is the scan that `flake_head`
-selection uses; with execution reuse, that scan's `commit_hash` can be an
-earlier commit. `is_runtime_authoritative` has the same meaning as in
-`list_scan_findings`. Failed, pending and legacy (pre-schema-1) scans are not
-listed. The cursor is bound to the system and the `commit` filter; reuse with
-other arguments gives `invalid_arguments`.
+other values give `invalid_arguments`, including values with whitespace.
+`is_head` identifies HEAD evidence, not the selected scan: it is true for
+every scan of HEAD's proven execution derivation, so several scans can have
+it. `flake_head` selects the newest of them, in the same order as this list,
+so the selected scan is the first listed scan with `is_head` true. With
+execution reuse, a HEAD scan's `commit_hash` can be an earlier commit than
+`head_commit_hash`. In `latest_sealed_scan`, `is_head` true also means that
+the reference is the scan that `flake_head` selects.
+`is_runtime_authoritative` has the same meaning as in `list_scan_findings`;
+it can be true for a historical scan when a managed system runs an older
+output, independent of HEAD. Failed, pending, legacy (pre-schema-1) and
+mock scans are not listed. The cursor is bound to the system and the `commit`
+filter; reuse with other arguments, including another visible system, gives
+`invalid_arguments`.
 
 ### Configuration-based CVE planning
 

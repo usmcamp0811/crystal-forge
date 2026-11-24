@@ -354,6 +354,8 @@ pub(super) async fn list_scan_findings(
     // fall back to it with scan_id when HEAD has no sealed scan. The
     // reference never changes state, selection, findings, or planning
     // eligibility: only sealed HEAD evidence can be a planning baseline.
+    // is_head has the list_system_scans meaning. Because this is the newest
+    // sealed scan, is_head true also means that it is the selected scan.
     let latest_sealed_scan = if args.scan_id.is_none() {
         sealed_scans(&mut tx, &system, None, None, 1)
             .await?
@@ -577,8 +579,11 @@ fn decode_scan_cursor(value: &str, filter: &str) -> Result<ScanCursor, ToolError
 }
 
 /// Returns a lowercase commit filter, or an argument error.
+///
+/// The rule matches the published JSON Schema (7 to 40 characters, pattern
+/// `^[0-9A-Fa-f]+$`) exactly. Whitespace is not trimmed: a value with any
+/// whitespace is rejected, so runtime and schema validation agree.
 fn commit_prefix(value: &str) -> Result<String, ToolError> {
-    let value = value.trim();
     if !(MIN_COMMIT_PREFIX..=MAX_COMMIT_CHARS).contains(&value.len())
         || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
@@ -593,11 +598,22 @@ fn commit_prefix(value: &str) -> Result<String, ToolError> {
 ///
 /// A sealed scan is a completed, non-mock, evidence schema 1 scan of a NixOS
 /// derivation of the system's flake and effective configuration name. Each
-/// item reports `is_head` (the scan is of HEAD's proven execution
-/// derivation, which is the scan that `list_scan_findings` selects for HEAD)
-/// and `is_runtime_authoritative` (the scan is the system's Current authority
-/// scan in `view_current_cve_authority`). Configuration evidence is never
-/// runtime evidence by itself. Failed and pending scans are not listed.
+/// item reports `is_head` and `is_runtime_authoritative`.
+///
+/// `is_head` is evidence identity, not selection: it is true for every scan
+/// whose derivation is HEAD's proven execution derivation (the
+/// `execution_derivation_id` of `configuration_cve_head` when its target is
+/// ready). Several scans can be HEAD evidence. `flake_head` selection uses
+/// the newest of them with the same `(completed_at, scan_id)` order as this
+/// list, so the selected scan is the first listed scan with `is_head` true.
+/// With execution reuse, a HEAD scan can belong to an earlier commit.
+///
+/// `is_runtime_authoritative` is true only when `view_current_cve_authority`
+/// names the scan as the system's Current authority scan, which can be a
+/// historical scan when the system runs an older output. Configuration
+/// evidence is never runtime evidence by itself.
+///
+/// Failed, pending, legacy (pre-schema-1) and mock scans are not listed.
 ///
 /// # Errors
 /// - [`ToolError::Forbidden`] when the token or owner no longer grants
@@ -702,7 +718,17 @@ mod tests {
     fn commit_filter_accepts_hex_prefixes_only() {
         assert_eq!(commit_prefix("72C4C5F").unwrap(), "72c4c5f");
         assert!(commit_prefix(&"a".repeat(40)).is_ok());
-        for bad in ["72c4c5", "72c4c5g", "72c4c5%", &"a".repeat(41)] {
+        for bad in [
+            "72c4c5",
+            "72c4c5g",
+            "72c4c5%",
+            &"a".repeat(41),
+            " 72c4c5f",
+            "72c4c5f ",
+            "72c4 c5f",
+            "72c4c5f\n",
+            "\t72c4c5f",
+        ] {
             assert!(commit_prefix(bad).is_err(), "{bad}");
         }
     }

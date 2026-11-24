@@ -450,8 +450,143 @@ fn scan_ids(page: &Value) -> Vec<Value> {
         .collect()
 }
 
+fn scan_flags(page: &Value, flag: &str) -> Vec<bool> {
+    page["scans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|scan| scan[flag].as_bool().unwrap())
+        .collect()
+}
+
+/// Returns `(cve_id, package_name, installed_version, occurrence path)` of
+/// every finding on the page, in response order.
+fn finding_keys(page: &Value) -> Vec<(String, String, String, String)> {
+    page["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|finding| {
+            let text = |key: &str| finding[key].as_str().unwrap().to_owned();
+            (
+                text("cve_id"),
+                text("package_name"),
+                text("installed_version"),
+                text("occurrence_derivation_path"),
+            )
+        })
+        .collect()
+}
+
+/// One observation: CVE, canonical package, observed name and version, and
+/// observed derivation path.
+type Observation<'a> = (&'a str, &'a str, &'a str, &'a str, &'a str);
+
+fn owned(observations: &[Observation<'_>]) -> Vec<(String, String, String, String)> {
+    observations
+        .iter()
+        .map(|(cve, _, name, version, path)| {
+            (
+                (*cve).to_owned(),
+                (*name).to_owned(),
+                (*version).to_owned(),
+                (*path).to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// Returns a fixed completion time `minute` minutes after a base instant.
+fn at(minute: i64) -> chrono::DateTime<Utc> {
+    chrono::DateTime::parse_from_rfc3339("2026-11-20T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc)
+        + chrono::Duration::minutes(minute)
+}
+
+/// Creates a sealed schema-1 scan with `observations` that completed at
+/// `completed_at`. Completed evidence is immutable, so the observations and
+/// the completion time are written before and while sealing.
+async fn sealed_scan(
+    pool: &PgPool,
+    derivation: i32,
+    completed_at: chrono::DateTime<Utc>,
+    observations: &[Observation<'_>],
+) -> Uuid {
+    let id = scan(pool, derivation, "in_progress").await;
+    for (cve, canonical, name, version, path) in observations {
+        sqlx::query(
+            "INSERT INTO cves(id,cvss_v3_score) VALUES($1,9.8) ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(cve)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO cve_scan_vulnerability_observations(scan_id,canonical_cve_id,\
+             canonical_package_name,observed_package_name,observed_package_version,\
+             observed_derivation_path,is_whitelisted,detection_method) \
+             VALUES ($1,$2,$3,$4,$5,$6,false,'test')",
+        )
+        .bind(id)
+        .bind(cve)
+        .bind(canonical)
+        .bind(name)
+        .bind(version)
+        .bind(path)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "UPDATE cve_scans SET status='completed',completed_at=$2,evidence_schema_version=1,\
+         total_packages=$3,total_vulnerabilities=$3 WHERE id=$1",
+    )
+    .bind(id)
+    .bind(completed_at)
+    .bind(observations.len() as i32)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+/// Asserts that following `scan_id` returns exactly `expected` findings, the
+/// scan's own counts and provenance, and no runtime authority.
+async fn assert_exact_scan(
+    pool: &PgPool,
+    caller: &ToolCaller,
+    system: Uuid,
+    scan_id: Uuid,
+    expected: &[Observation<'_>],
+    (commit_hash, derivation, store_path): (&str, i32, &str),
+) {
+    let page = listing(pool, caller, json!({"system_id":system,"scan_id":scan_id})).await;
+    assert_eq!(page["selection"], "exact_scan");
+    assert_eq!(page["state"], "completed");
+    assert_eq!(page["evidence_kind"], "configuration_scan");
+    assert_eq!(page["is_runtime_authoritative"], false);
+    assert_eq!(finding_keys(&page), owned(expected), "{scan_id}");
+    for finding in page["findings"].as_array().unwrap() {
+        assert_eq!(finding["severity"], "critical");
+    }
+    assert_eq!(page["counts"]["projected_unfiltered"], expected.len());
+    assert_eq!(page["counts"]["projected_filtered"], expected.len());
+    assert_eq!(page["counts"]["page"], expected.len());
+    assert_eq!(
+        page["counts"]["raw_scanner"]["total_vulnerabilities"],
+        expected.len()
+    );
+    assert_eq!(page["provenance"]["scan"]["scan_id"], json!(scan_id));
+    assert_eq!(page["provenance"]["commit_hash"], commit_hash);
+    assert_eq!(page["provenance"]["scan_derivation_id"], derivation);
+    assert_eq!(page["provenance"]["scanned_system_store_path"], store_path);
+    assert!(page["latest_sealed_scan"].is_null());
+    assert!(page["next_cursor"].is_null());
+}
+
 #[sqlx::test]
-async fn system_scans_list_sealed_history_and_head_fallback(pool: PgPool) {
+async fn system_scans_follow_configuration_history_and_head_fallback(pool: PgPool) {
     let env = environment(&pool, "visible").await;
     let other_env = environment(&pool, "hidden").await;
     let repo = flake(&pool, "history-repo").await;
@@ -461,105 +596,172 @@ async fn system_scans_list_sealed_history_and_head_fallback(pool: PgPool) {
     let (caller, _) = issue(&pool, AuthRole::Viewer, env, "cves:read").await;
     let first = commit(&pool, repo, "a").await;
     let second = commit(&pool, repo, "b").await;
-    let other = commit(&pool, other_repo, "c").await;
-    let first_drv = derivation(&pool, first, "Shared_Config", "/nix/store/aaaa-first").await;
-    let second_drv = derivation(&pool, second, "Shared_Config", "/nix/store/bbbb-second").await;
-    let other_drv = derivation(&pool, other, "Shared_Config", "/nix/store/cccc-other").await;
-    // Oldest first. Completed evidence is immutable, so the explicit
-    // completion time that makes the order deterministic is set while sealing.
-    let mut sealed = Vec::new();
-    for (drv, minutes_ago) in [(first_drv, 30), (first_drv, 20), (second_drv, 10)] {
-        let id = scan(&pool, drv, "in_progress").await;
-        sqlx::query(
-            "UPDATE cve_scans SET status='completed',completed_at=NOW()-make_interval(mins=>$2),\
-             evidence_schema_version=1,total_packages=12,total_vulnerabilities=7 WHERE id=$1",
-        )
-        .bind(id)
-        .bind(minutes_ago)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sealed.push(json!(id));
-    }
-    scan(&pool, second_drv, "failed").await;
-    let foreign = scan(&pool, other_drv, "in_progress").await;
-    seal(&pool, foreign).await;
+    let first_path = "/nix/store/aaaa-first";
+    let second_path = "/nix/store/bbbb-second";
+    let first_drv = derivation(&pool, first, "Shared_Config", first_path).await;
+    let second_drv = derivation(&pool, second, "Shared_Config", second_path).await;
+
+    let old_findings = [(
+        "CVE-2099-1001",
+        "openssl",
+        "openssl",
+        "3.0.1",
+        "/nix/store/o1-openssl-3.0.1.drv",
+    )];
+    let mid_findings = [(
+        "CVE-2099-1002",
+        "zlib",
+        "zlib",
+        "1.2.11",
+        "/nix/store/z1-zlib-1.2.11.drv",
+    )];
+    let head_old_findings = [
+        (
+            "CVE-2099-1003",
+            "bash",
+            "bash",
+            "5.1",
+            "/nix/store/b1-bash-5.1.drv",
+        ),
+        (
+            "CVE-2099-1004",
+            "bash",
+            "bash",
+            "5.1",
+            "/nix/store/b1-bash-5.1.drv",
+        ),
+    ];
+    let head_new_findings = [(
+        "CVE-2099-1005",
+        "curl",
+        "curl",
+        "8.0.0",
+        "/nix/store/c1-curl-8.0.0.drv",
+    )];
+    let old = sealed_scan(&pool, first_drv, at(0), &old_findings).await;
+    let mid = sealed_scan(&pool, first_drv, at(10), &mid_findings).await;
+    let head_old = sealed_scan(&pool, second_drv, at(20), &head_old_findings).await;
+    let head_new = sealed_scan(&pool, second_drv, at(30), &head_new_findings).await;
+    let newest_first = [json!(head_new), json!(head_old), json!(mid), json!(old)];
 
     // HEAD has no derivation yet: the state stays target_not_ready and the
-    // reference names the newest sealed scan, which the agent can read.
+    // reference names the newest sealed scan.
     set_head(&pool, repo, commit(&pool, repo, "d").await).await;
     let waiting = listing(&pool, &caller, json!({"system_id":system})).await;
     assert_eq!(waiting["state"], "target_not_ready");
     assert!(waiting["findings"].as_array().unwrap().is_empty());
-    assert_eq!(waiting["latest_sealed_scan"]["scan_id"], sealed[2]);
+    assert!(waiting["counts"].is_null());
+    assert_eq!(waiting["latest_sealed_scan"]["scan_id"], json!(head_new));
     assert_eq!(waiting["latest_sealed_scan"]["commit_hash"], "b".repeat(40));
     assert_eq!(waiting["latest_sealed_scan"]["is_head"], false);
-    let fallback = listing(
+    assert_eq!(waiting["latest_sealed_scan"]["completed_at"], json!(at(30)));
+
+    // Following the reference returns that scan's findings only: the other
+    // three scans of the same flake and configuration contribute nothing.
+    let fallback =
+        Uuid::parse_str(waiting["latest_sealed_scan"]["scan_id"].as_str().unwrap()).unwrap();
+    assert_exact_scan(
         &pool,
         &caller,
-        json!({"system_id":system,"scan_id":sealed[2]}),
+        system,
+        fallback,
+        &head_new_findings,
+        (&"b".repeat(40), second_drv, second_path),
     )
     .await;
-    assert_eq!(fallback["state"], "completed");
-    assert_eq!(fallback["provenance"]["scan"]["scan_id"], sealed[2]);
-    assert!(fallback["latest_sealed_scan"].is_null());
+    // Historical configuration-only evidence keeps its own commit.
+    assert_exact_scan(
+        &pool,
+        &caller,
+        system,
+        old,
+        &old_findings,
+        (&"a".repeat(40), first_drv, first_path),
+    )
+    .await;
 
     let all = system_scans(&pool, &caller, json!({"system_id":system})).await;
-    assert_eq!(
-        scan_ids(&all),
-        [sealed[2].clone(), sealed[1].clone(), sealed[0].clone()]
-    );
+    assert_eq!(scan_ids(&all), newest_first);
     assert_eq!(all["evidence_kind"], "configuration_scan");
     assert_eq!(all["head_commit_hash"], "d".repeat(40));
-    assert_eq!(all["scans"][0]["commit_hash"], "b".repeat(40));
+    assert_eq!(scan_flags(&all, "is_head"), [false; 4]);
+    assert_eq!(scan_flags(&all, "is_runtime_authoritative"), [false; 4]);
+    let totals: Vec<_> = all["scans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|scan| scan["counts"]["total_vulnerabilities"].clone())
+        .collect();
+    assert_eq!(totals, [json!(1), json!(2), json!(1), json!(1)]);
     assert_eq!(all["scans"][0]["commit_id"], second);
-    assert_eq!(all["scans"][0]["counts"]["total_vulnerabilities"], 7);
+    assert_eq!(all["scans"][0]["derivation_id"], second_drv);
+    assert_eq!(all["scans"][0]["completed_at"], json!(at(30)));
     assert_eq!(all["scans"][0]["scanner"]["name"], "inventory-fixture");
-    assert_eq!(all["scans"][0]["is_head"], false);
-    assert_eq!(all["scans"][0]["is_runtime_authoritative"], false);
     assert_eq!(all["has_more"], false);
     assert!(all["next_cursor"].is_null());
 
-    let page = system_scans(&pool, &caller, json!({"system_id":system,"limit":2})).await;
-    assert_eq!(scan_ids(&page), [sealed[2].clone(), sealed[1].clone()]);
-    assert_eq!(page["has_more"], true);
-    let cursor = page["next_cursor"].as_str().unwrap();
-    let rest = system_scans(
+    // HEAD configuration-only evidence: both scans of the HEAD derivation are
+    // HEAD evidence; flake_head selects the newest of them.
+    set_head(&pool, repo, second).await;
+    let head = system_scans(&pool, &caller, json!({"system_id":system})).await;
+    assert_eq!(head["head_commit_hash"], "b".repeat(40));
+    assert_eq!(scan_flags(&head, "is_head"), [true, true, false, false]);
+    assert_eq!(scan_flags(&head, "is_runtime_authoritative"), [false; 4]);
+    let current = listing(&pool, &caller, json!({"system_id":system})).await;
+    assert_eq!(current["state"], "completed");
+    assert_eq!(current["selection"], "flake_head");
+    assert_eq!(current["is_runtime_authoritative"], false);
+    assert_eq!(current["provenance"]["scan"]["scan_id"], json!(head_new));
+    assert_eq!(finding_keys(&current), owned(&head_new_findings));
+    assert_eq!(current["latest_sealed_scan"]["scan_id"], json!(head_new));
+    assert_eq!(current["latest_sealed_scan"]["is_head"], true);
+    // The older HEAD scan stays readable with only its own findings.
+    assert_exact_scan(
         &pool,
         &caller,
-        json!({"system_id":system,"limit":2,"cursor":cursor}),
+        system,
+        head_old,
+        &head_old_findings,
+        (&"b".repeat(40), second_drv, second_path),
     )
     .await;
-    assert_eq!(scan_ids(&rest), [sealed[0].clone()]);
-    assert!(rest["next_cursor"].is_null());
 
-    let by_commit = system_scans(
+    let by_prefix = system_scans(
         &pool,
         &caller,
         json!({"system_id":system,"commit":"AAAAAAA"}),
     )
     .await;
-    assert_eq!(scan_ids(&by_commit), [sealed[1].clone(), sealed[0].clone()]);
-    let full = system_scans(
+    assert_eq!(scan_ids(&by_prefix), [json!(mid), json!(old)]);
+    let by_full = system_scans(
         &pool,
         &caller,
         json!({"system_id":system,"commit":"b".repeat(40)}),
     )
     .await;
-    assert_eq!(scan_ids(&full), [sealed[2].clone()]);
+    assert_eq!(scan_ids(&by_full), [json!(head_new), json!(head_old)]);
 
+    let page = system_scans(&pool, &caller, json!({"system_id":system,"limit":2})).await;
+    let cursor = page["next_cursor"].as_str().unwrap().to_owned();
     for args in [
         json!({"system_id":system,"commit":"aaaaaaa","cursor":cursor}),
         json!({"system_id":system,"cursor":"malformed"}),
         json!({"system_id":system,"commit":"aaaaaa"}),
         json!({"system_id":system,"commit":"aaaaaaz"}),
         json!({"system_id":system,"commit":"a%aaaaa"}),
-        json!({"system_id":system,"scan_id":sealed[0]}),
+        json!({"system_id":system,"commit":" aaaaaaa"}),
+        json!({"system_id":system,"commit":"aaaaaaa "}),
+        json!({"system_id":system,"commit":"aaa aaaa"}),
+        json!({"system_id":system,"commit":"aaaaaaa\n"}),
+        json!({"system_id":system,"scan_id":old}),
     ] {
-        assert!(matches!(
-            call_tool(&pool, &caller, "list_system_scans", args).await,
-            Err(ToolError::InvalidArguments(_))
-        ));
+        assert!(
+            matches!(
+                call_tool(&pool, &caller, "list_system_scans", args.clone()).await,
+                Err(ToolError::InvalidArguments(_))
+            ),
+            "{args}"
+        );
     }
     for system in [hidden, Uuid::new_v4()] {
         assert!(matches!(
@@ -573,16 +775,291 @@ async fn system_scans_list_sealed_history_and_head_fallback(pool: PgPool) {
             Err(ToolError::NotFound)
         ));
     }
+}
 
-    // When HEAD is the second commit, its scan is the HEAD scan.
+#[sqlx::test]
+async fn system_scans_report_runtime_authority_and_execution_reuse(pool: PgPool) {
+    let env = environment(&pool, "visible").await;
+    let (caller, _) = issue(&pool, AuthRole::Viewer, env, "cves:read").await;
+
+    // A managed system whose running output decides runtime authority.
+    let repo = flake(&pool, "runtime-repo").await;
+    let system = host(&pool, repo, env, "runner").await;
+    let first = commit(&pool, repo, "1").await;
+    let second = commit(&pool, repo, "2").await;
+    let first_path = "/nix/store/1111-runtime-first";
+    let second_path = "/nix/store/2222-runtime-second";
+    let first_drv = derivation(&pool, first, "Shared_Config", first_path).await;
+    let second_drv = derivation(&pool, second, "Shared_Config", second_path).await;
+    let historical = sealed_scan(
+        &pool,
+        first_drv,
+        at(0),
+        &[(
+            "CVE-2099-2001",
+            "glibc",
+            "glibc",
+            "2.38",
+            "/nix/store/g1-glibc.drv",
+        )],
+    )
+    .await;
+    let head_old = sealed_scan(
+        &pool,
+        second_drv,
+        at(10),
+        &[(
+            "CVE-2099-2002",
+            "sudo",
+            "sudo",
+            "1.9.14",
+            "/nix/store/s1-sudo.drv",
+        )],
+    )
+    .await;
+    let head_new = sealed_scan(
+        &pool,
+        second_drv,
+        at(20),
+        &[("CVE-2099-2003", "xz", "xz", "5.6.0", "/nix/store/x1-xz.drv")],
+    )
+    .await;
     set_head(&pool, repo, second).await;
-    let head = system_scans(&pool, &caller, json!({"system_id":system})).await;
-    assert_eq!(head["head_commit_hash"], "b".repeat(40));
-    assert_eq!(head["scans"][0]["is_head"], true);
-    assert_eq!(head["scans"][1]["is_head"], false);
-    let current = listing(&pool, &caller, json!({"system_id":system})).await;
-    assert_eq!(current["state"], "completed");
-    assert_eq!(current["latest_sealed_scan"]["is_head"], true);
+    sqlx::query(
+        "UPDATE systems SET management_mode='managed',public_key='fixture-key' WHERE id=$1",
+    )
+    .bind(system)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let run = |store_path: &'static str, generation: i32| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO system_states(hostname,change_reason,store_path,generation, \
+                 generation_matches_current_store_path) VALUES('runner','startup',$1,$2,true)",
+            )
+            .bind(store_path)
+            .bind(generation)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+
+    // Historical runtime authority independent of HEAD: the system runs the
+    // first commit, so only the historical scan is authoritative.
+    run(first_path, 1).await;
+    let scans = system_scans(&pool, &caller, json!({"system_id":system})).await;
+    assert_eq!(
+        scan_ids(&scans),
+        [json!(head_new), json!(head_old), json!(historical)]
+    );
+    assert_eq!(scan_flags(&scans, "is_head"), [true, true, false]);
+    assert_eq!(
+        scan_flags(&scans, "is_runtime_authoritative"),
+        [false, false, true]
+    );
+    let head = listing(&pool, &caller, json!({"system_id":system})).await;
+    assert_eq!(head["provenance"]["scan"]["scan_id"], json!(head_new));
+    assert_eq!(head["is_runtime_authoritative"], false);
+    let explicit = listing(
+        &pool,
+        &caller,
+        json!({"system_id":system,"scan_id":historical}),
+    )
+    .await;
+    assert_eq!(explicit["is_runtime_authoritative"], true);
+
+    // Positive runtime authority on HEAD: the newest HEAD scan only.
+    run(second_path, 2).await;
+    let scans = system_scans(&pool, &caller, json!({"system_id":system})).await;
+    assert_eq!(
+        scan_flags(&scans, "is_runtime_authoritative"),
+        [true, false, false]
+    );
+    let head = listing(&pool, &caller, json!({"system_id":system})).await;
+    assert_eq!(head["is_runtime_authoritative"], true);
+    assert_eq!(head["latest_sealed_scan"]["scan_id"], json!(head_new));
+
+    // Proven execution reuse: HEAD reuses the build of an earlier commit, so
+    // that earlier commit's scan is HEAD evidence.
+    let reuse_repo = flake(&pool, "reuse-repo").await;
+    let reuse_system = host(&pool, reuse_repo, env, "reuser").await;
+    let origin_commit = commit(&pool, reuse_repo, "e").await;
+    let head_commit = commit(&pool, reuse_repo, "f").await;
+    let reuse_path = "/nix/store/eeee-reused-output";
+    let origin = derivation(&pool, origin_commit, "Shared_Config", reuse_path).await;
+    let head_drv: i32 = sqlx::query_scalar(
+        "INSERT INTO derivations(commit_id,derivation_type,derivation_name,derivation_path,\
+         expected_store_path,reused_from_derivation_id,status_id) \
+         VALUES($1,'nixos','Shared_Config',$2,$3,$4,10) RETURNING id",
+    )
+    .bind(head_commit)
+    .bind(format!("{reuse_path}.drv"))
+    .bind(reuse_path)
+    .bind(origin)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let job: Uuid = sqlx::query_scalar(
+        "INSERT INTO build_jobs(derivation_id,environment_id,status,completed_at) \
+         VALUES($1,$2,'success',NOW()) RETURNING id",
+    )
+    .bind(origin)
+    .bind(env)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE derivations SET reused_build_job_id=$2 WHERE id=$1")
+        .bind(head_drv)
+        .bind(job)
+        .execute(&pool)
+        .await
+        .unwrap();
+    set_head(&pool, reuse_repo, head_commit).await;
+    let reused_findings = [(
+        "CVE-2099-2004",
+        "perl",
+        "perl",
+        "5.36",
+        "/nix/store/p1-perl.drv",
+    )];
+    let reused = sealed_scan(&pool, origin, at(5), &reused_findings).await;
+    let scans = system_scans(&pool, &caller, json!({"system_id":reuse_system})).await;
+    assert_eq!(scan_ids(&scans), [json!(reused)]);
+    assert_eq!(scans["head_commit_hash"], "f".repeat(40));
+    assert_eq!(scans["scans"][0]["commit_hash"], "e".repeat(40));
+    assert_eq!(scans["scans"][0]["derivation_id"], origin);
+    assert_eq!(scan_flags(&scans, "is_head"), [true]);
+    assert_eq!(scan_flags(&scans, "is_runtime_authoritative"), [false]);
+    let head = listing(&pool, &caller, json!({"system_id":reuse_system})).await;
+    assert_eq!(head["state"], "completed");
+    assert_eq!(head["head"]["configuration_derivation_id"], head_drv);
+    assert_eq!(head["provenance"]["scan"]["scan_id"], json!(reused));
+    assert_eq!(head["latest_sealed_scan"]["is_head"], true);
+    assert_eq!(finding_keys(&head), owned(&reused_findings));
+}
+
+#[sqlx::test]
+async fn system_scans_exclude_ineligible_scans_and_page_through_equal_times(pool: PgPool) {
+    let env = environment(&pool, "visible").await;
+    let (caller, _) = issue(&pool, AuthRole::Viewer, env, "cves:read").await;
+    let repo = flake(&pool, "ties-repo").await;
+    let other_repo = flake(&pool, "peer-repo").await;
+    let empty_repo = flake(&pool, "empty-repo").await;
+    let system = host(&pool, repo, env, "ties").await;
+    let peer = host(&pool, other_repo, env, "peer").await;
+    let empty = host(&pool, empty_repo, env, "empty").await;
+    let main = commit(&pool, repo, "3").await;
+    let mock_commit = commit(&pool, repo, "4").await;
+    let drv = derivation(&pool, main, "Shared_Config", "/nix/store/3333-ties").await;
+    let finding = [(
+        "CVE-2099-3001",
+        "lz4",
+        "lz4",
+        "1.9.4",
+        "/nix/store/l1-lz4.drv",
+    )];
+
+    // Three eligible scans completed at the same instant.
+    let mut eligible = Vec::new();
+    for _ in 0..3 {
+        eligible.push(sealed_scan(&pool, drv, at(0), &finding).await);
+    }
+    // Ineligible: legacy, pending, failed, mock, other configuration, other
+    // flake. Each would be newest if it were listed.
+    let legacy = scan(&pool, drv, "in_progress").await;
+    sqlx::query("UPDATE cve_scans SET status='completed',completed_at=$2 WHERE id=$1")
+        .bind(legacy)
+        .bind(at(60))
+        .execute(&pool)
+        .await
+        .unwrap();
+    scan(&pool, drv, "pending").await;
+    scan(&pool, drv, "failed").await;
+    let mock_drv: i32 = sqlx::query_scalar(
+        "INSERT INTO derivations(commit_id,derivation_type,derivation_name,derivation_path,\
+         store_path,status_id,completed_at,policy_results) \
+         VALUES($1,'nixos','Shared_Config','/nix/store/4444-mock.drv','/nix/store/4444-mock',\
+         10,NOW(),'{\"execution_mode\":\"mock\"}'::jsonb) RETURNING id",
+    )
+    .bind(mock_commit)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sealed_scan(&pool, mock_drv, at(60), &finding).await;
+    let other_config = derivation(&pool, main, "Other_Config", "/nix/store/5555-other").await;
+    sealed_scan(&pool, other_config, at(60), &finding).await;
+    let peer_commit = commit(&pool, other_repo, "6").await;
+    let peer_drv = derivation(&pool, peer_commit, "Shared_Config", "/nix/store/6666-peer").await;
+    let peer_scan = sealed_scan(&pool, peer_drv, at(60), &finding).await;
+
+    // Equal completion times order by scan ID descending (PostgreSQL compares
+    // UUID bytes, which matches the lowercase hex text order).
+    let mut expected: Vec<Value> = eligible.iter().map(|id| json!(id)).collect();
+    expected.sort_by_key(|id| std::cmp::Reverse(id.as_str().unwrap().to_owned()));
+    let first = system_scans(&pool, &caller, json!({"system_id":system,"limit":2})).await;
+    assert_eq!(scan_ids(&first), expected[..2]);
+    assert_eq!(first["has_more"], true);
+    let cursor = first["next_cursor"].as_str().unwrap().to_owned();
+    let rest = system_scans(
+        &pool,
+        &caller,
+        json!({"system_id":system,"limit":2,"cursor":cursor}),
+    )
+    .await;
+    assert_eq!(scan_ids(&rest), expected[2..]);
+    assert_eq!(rest["has_more"], false);
+    assert!(rest["next_cursor"].is_null());
+    let findings = listing(&pool, &caller, json!({"system_id":system})).await;
+    assert_eq!(findings["state"], "head_not_ready");
+    assert_eq!(findings["latest_sealed_scan"]["scan_id"], expected[0]);
+
+    // A cursor is bound to its system, also for another visible system.
+    assert!(matches!(
+        call_tool(
+            &pool,
+            &caller,
+            "list_system_scans",
+            json!({"system_id":peer,"limit":2,"cursor":cursor})
+        )
+        .await,
+        Err(ToolError::InvalidArguments(_))
+    ));
+    let peer_scans = system_scans(&pool, &caller, json!({"system_id":peer})).await;
+    assert_eq!(scan_ids(&peer_scans), [json!(peer_scan)]);
+
+    // Empty history: HEAD is ready but there is no sealed scan.
+    let empty_commit = commit(&pool, empty_repo, "7").await;
+    derivation(
+        &pool,
+        empty_commit,
+        "Shared_Config",
+        "/nix/store/7777-empty",
+    )
+    .await;
+    set_head(&pool, empty_repo, empty_commit).await;
+    let none = system_scans(&pool, &caller, json!({"system_id":empty})).await;
+    assert_eq!(none["scans"], json!([]));
+    assert_eq!(none["has_more"], false);
+    assert!(none["next_cursor"].is_null());
+    let none = listing(&pool, &caller, json!({"system_id":empty})).await;
+    assert_eq!(none["state"], "no_scan_for_head");
+    assert!(none["latest_sealed_scan"].is_null());
+
+    // Direct invocation without cves:read is forbidden before any read.
+    let (poams_only, _) = issue(&pool, AuthRole::Viewer, env, "poams:read").await;
+    assert!(matches!(
+        call_tool(
+            &pool,
+            &poams_only,
+            "list_system_scans",
+            json!({"system_id":system})
+        )
+        .await,
+        Err(ToolError::Forbidden(_))
+    ));
 }
 
 async fn rpc(app: &Router, secret: &str, name: &str, args: Value) -> Value {
