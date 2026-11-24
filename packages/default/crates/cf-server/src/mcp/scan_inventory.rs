@@ -1,8 +1,14 @@
 //! Reads sealed configuration evidence and checks its independent runtime authority.
+//!
+//! Tools: `find_systems`, `list_scan_findings` and `list_system_scans`. All
+//! three need `cves:read` and read in one REPEATABLE READ snapshot that
+//! [`scoped_read`] opens after it rechecks the owner and token.
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -11,13 +17,18 @@ use crate::auth::authorization::CredentialIdentity;
 use crate::queries::{access_tokens, cve_scans, cves};
 
 use super::tools::{
-    Severity, ToolCaller, ToolError, cursor_schema, inventory_error, inventory_request,
-    limit_schema, page_limit, parse_arguments, sanitize_description, severity_names,
-    severity_schema, system_id_schema,
+    MAX_CURSOR_BYTES, Severity, ToolCaller, ToolError, cursor_schema, inventory_error,
+    inventory_request, limit_schema, page_limit, parse_arguments, sanitize_description,
+    severity_names, severity_schema, system_id_schema,
 };
 
 const MAX_NAME_CHARS: usize = 200;
 const SCOPES: &[&str] = &["cves:read"];
+/// Shortest accepted commit prefix. Seven hex digits is the Git default
+/// abbreviation; shorter prefixes match too many commits to be useful.
+const MIN_COMMIT_PREFIX: usize = 7;
+/// Length of a full SHA-1 Git commit hash in hex digits.
+const MAX_COMMIT_CHARS: usize = 40;
 
 /// Returns the bounded exact-name discovery schema.
 pub(super) fn find_systems_schema() -> Value {
@@ -42,6 +53,21 @@ pub(super) fn list_scan_findings_schema() -> Value {
             "severity": severity_schema(),
             "package": {"type": "string", "minLength": 1, "maxLength": MAX_NAME_CHARS,
                 "description": "Exact, case-sensitive canonical package name from the scan inventory."},
+            "cursor": cursor_schema(),
+            "limit": limit_schema(),
+        }
+    })
+}
+
+/// Returns the sealed scan listing schema.
+pub(super) fn list_system_scans_schema() -> Value {
+    json!({
+        "type": "object", "additionalProperties": false, "required": ["system_id"],
+        "properties": {
+            "system_id": system_id_schema(),
+            "commit": {"type": "string", "minLength": MIN_COMMIT_PREFIX,
+                "maxLength": MAX_COMMIT_CHARS, "pattern": "^[0-9A-Fa-f]+$",
+                "description": "Full commit hash or a prefix of at least 7 hex digits."},
             "cursor": cursor_schema(),
             "limit": limit_schema(),
         }
@@ -324,6 +350,26 @@ pub(super) async fn list_scan_findings(
             })
         });
 
+    // In flake_head mode, name the newest sealed scan so that an agent can
+    // fall back to it with scan_id when HEAD has no sealed scan. The
+    // reference never changes state, selection, findings, or planning
+    // eligibility: only sealed HEAD evidence can be a planning baseline.
+    let latest_sealed_scan = if args.scan_id.is_none() {
+        sealed_scans(&mut tx, &system, None, None, 1)
+            .await?
+            .first()
+            .map(|row| {
+                json!({
+                    "scan_id": row.scan_id,
+                    "commit_hash": row.commit_hash,
+                    "completed_at": row.completed_at,
+                    "is_head": execution_id == Some(row.derivation_id),
+                })
+            })
+    } else {
+        None
+    };
+
     let mut is_runtime_authoritative = false;
     let mut evidence_representation = None;
     let (state, provenance, counts, findings, next_cursor) = if let Some(scan) = scan {
@@ -422,10 +468,262 @@ pub(super) async fn list_scan_findings(
         "head": head,
         "scan_request_target": request_target,
         "attempt": attempt,
+        "latest_sealed_scan": latest_sealed_scan,
         "provenance": provenance,
         "counts": counts,
         "findings": findings,
         "has_more": next_cursor.is_some(),
         "next_cursor": next_cursor,
     }))
+}
+
+/// Identifies one sealed configuration scan of a system.
+#[derive(sqlx::FromRow)]
+struct SealedScanSummary {
+    scan_id: Uuid,
+    completed_at: DateTime<Utc>,
+    scanner_name: String,
+    scanner_version: Option<String>,
+    derivation_id: i32,
+    commit_id: i32,
+    commit_hash: String,
+    raw_counts: Value,
+}
+
+/// Returns the system's sealed configuration scans, newest first.
+///
+/// INVARIANT: The filter is the relation that `list_scan_findings` applies
+/// to an explicit `scan_id` (same view, flake and configuration name), so
+/// every returned scan ID is accepted there. A system without a flake has no
+/// scans because `flake_id = NULL` matches no row.
+///
+/// `commit_prefix` must be validated lowercase hex; it is used in `LIKE`.
+/// `after` is the exclusive keyset position `(completed_at, scan_id)`.
+async fn sealed_scans(
+    tx: &mut Transaction<'_, Postgres>,
+    system: &SystemMatch,
+    commit_prefix: Option<&str>,
+    after: Option<(DateTime<Utc>, Uuid)>,
+    limit: i64,
+) -> Result<Vec<SealedScanSummary>, ToolError> {
+    sqlx::query_as::<_, SealedScanSummary>(
+        r#"SELECT scan_id,completed_at,scanner_name::text AS scanner_name,
+                  scanner_version::text AS scanner_version,derivation_id,commit_id,
+                  commit_hash::text AS commit_hash,raw_counts
+           FROM sealed_configuration_cve_scans
+           WHERE flake_id=$1 AND configuration_name=$2
+             AND ($3::text IS NULL OR commit_hash::text LIKE $3 || '%')
+             AND ($4::timestamptz IS NULL OR (completed_at,scan_id) < ($4,$5::uuid))
+           ORDER BY completed_at DESC,scan_id DESC LIMIT $6"#,
+    )
+    .bind(system.flake_id)
+    .bind(&system.configuration_name)
+    .bind(commit_prefix)
+    .bind(after.map(|(time, _)| time))
+    .bind(after.map(|(_, id)| id))
+    .bind(limit)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_error)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListScansArgs {
+    system_id: Uuid,
+    commit: Option<String>,
+    cursor: Option<String>,
+    limit: Option<i64>,
+}
+
+/// Keyset continuation of `list_system_scans`, bound to its filters.
+#[derive(Serialize, Deserialize)]
+struct ScanCursor {
+    filter: String,
+    completed_at: DateTime<Utc>,
+    scan_id: Uuid,
+}
+
+/// Fingerprints the system and commit filter of one listing. The commit is
+/// length-prefixed, so an absent filter and an empty value never collide.
+fn scan_filter(system_id: Uuid, commit: Option<&str>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"list_system_scans");
+    digest.update(system_id.as_bytes());
+    match commit {
+        None => digest.update([0u8]),
+        Some(text) => {
+            digest.update([1u8]);
+            digest.update((text.len() as u64).to_be_bytes());
+            digest.update(text.as_bytes());
+        }
+    }
+    hex::encode(digest.finalize())
+}
+
+fn decode_scan_cursor(value: &str, filter: &str) -> Result<ScanCursor, ToolError> {
+    let invalid = || ToolError::InvalidArguments("cursor is invalid".into());
+    if value.is_empty() || value.len() > MAX_CURSOR_BYTES {
+        return Err(invalid());
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(value).map_err(|_| invalid())?;
+    let cursor: ScanCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if cursor.filter != filter {
+        return Err(ToolError::InvalidArguments(
+            "cursor was issued for a different system or commit filter".into(),
+        ));
+    }
+    Ok(cursor)
+}
+
+/// Returns a lowercase commit filter, or an argument error.
+fn commit_prefix(value: &str) -> Result<String, ToolError> {
+    let value = value.trim();
+    if !(MIN_COMMIT_PREFIX..=MAX_COMMIT_CHARS).contains(&value.len())
+        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ToolError::InvalidArguments(format!(
+            "commit must contain {MIN_COMMIT_PREFIX} to {MAX_COMMIT_CHARS} hex digits"
+        )));
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+/// Pages the sealed configuration scans of one visible system, newest first.
+///
+/// A sealed scan is a completed, non-mock, evidence schema 1 scan of a NixOS
+/// derivation of the system's flake and effective configuration name. Each
+/// item reports `is_head` (the scan is of HEAD's proven execution
+/// derivation, which is the scan that `list_scan_findings` selects for HEAD)
+/// and `is_runtime_authoritative` (the scan is the system's Current authority
+/// scan in `view_current_cve_authority`). Configuration evidence is never
+/// runtime evidence by itself. Failed and pending scans are not listed.
+///
+/// # Errors
+/// - [`ToolError::Forbidden`] when the token or owner no longer grants
+///   `cves:read`.
+/// - [`ToolError::NotFound`] when the system is absent or not readable.
+/// - [`ToolError::InvalidArguments`] for a malformed commit, limit, or cursor,
+///   or a cursor issued for other arguments.
+/// - [`ToolError::Internal`] on a database failure.
+pub(super) async fn list_system_scans(
+    pool: &PgPool,
+    caller: &ToolCaller,
+    arguments: Value,
+) -> Result<Value, ToolError> {
+    let (mut tx, environments) = scoped_read(pool, caller).await?;
+    let args: ListScansArgs = parse_arguments(arguments)?;
+    let limit = page_limit(args.limit)?;
+    let commit = args.commit.as_deref().map(commit_prefix).transpose()?;
+    let filter = scan_filter(args.system_id, commit.as_deref());
+    let after = args
+        .cursor
+        .as_deref()
+        .map(|value| decode_scan_cursor(value, &filter))
+        .transpose()?
+        .map(|cursor| (cursor.completed_at, cursor.scan_id));
+    let system = sqlx::query_as::<_, SystemMatch>(&format!(
+        "{SCOPED_SYSTEMS} SELECT * FROM scoped WHERE system_id=$2"
+    ))
+    .bind(&environments)
+    .bind(args.system_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_error)?
+    .ok_or(ToolError::NotFound)?;
+
+    let head = sqlx::query_as::<_, Head>("SELECT * FROM configuration_cve_head($1,$2)")
+        .bind(system.flake_id)
+        .bind(&system.configuration_name)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    let head_execution = head
+        .as_ref()
+        .filter(|head| head.target_ready)
+        .and_then(|head| head.execution_derivation_id);
+    // PERFORMANCE: The authority view is read once per page, not per row.
+    let authority: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT scan_id FROM view_current_cve_authority \
+         WHERE system_id=$1 AND scan_id IS NOT NULL",
+    )
+    .bind(system.system_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db_error)?;
+
+    let mut rows = sealed_scans(&mut tx, &system, commit.as_deref(), after, limit + 1).await?;
+    tx.commit().await.map_err(db_error)?;
+    let has_more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    let next_cursor = match rows.last().filter(|_| has_more) {
+        Some(last) => Some(
+            serde_json::to_vec(&ScanCursor {
+                filter,
+                completed_at: last.completed_at,
+                scan_id: last.scan_id,
+            })
+            .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+            .map_err(|error| ToolError::Internal(error.into()))?,
+        ),
+        None => None,
+    };
+    let scans = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "scan_id": row.scan_id,
+                "commit_id": row.commit_id,
+                "commit_hash": row.commit_hash,
+                "derivation_id": row.derivation_id,
+                "completed_at": row.completed_at,
+                "scanner": {"name": row.scanner_name, "version": row.scanner_version},
+                "counts": row.raw_counts,
+                "is_head": head_execution == Some(row.derivation_id),
+                "is_runtime_authoritative": authority.contains(&row.scan_id),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "system": system,
+        "evidence_kind": "configuration_scan",
+        "head_commit_hash": head.and_then(|head| head.commit_hash),
+        "scans": scans,
+        "has_more": has_more,
+        "next_cursor": next_cursor,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commit_filter_accepts_hex_prefixes_only() {
+        assert_eq!(commit_prefix("72C4C5F").unwrap(), "72c4c5f");
+        assert!(commit_prefix(&"a".repeat(40)).is_ok());
+        for bad in ["72c4c5", "72c4c5g", "72c4c5%", &"a".repeat(41)] {
+            assert!(commit_prefix(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn scan_cursor_is_bound_to_system_and_commit() {
+        let system = Uuid::new_v4();
+        let filter = scan_filter(system, Some("72c4c5f"));
+        let cursor = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&ScanCursor {
+                filter: filter.clone(),
+                completed_at: Utc::now(),
+                scan_id: Uuid::new_v4(),
+            })
+            .unwrap(),
+        );
+        assert!(decode_scan_cursor(&cursor, &filter).is_ok());
+        assert!(decode_scan_cursor(&cursor, &scan_filter(system, None)).is_err());
+        assert!(
+            decode_scan_cursor(&cursor, &scan_filter(Uuid::new_v4(), Some("72c4c5f"))).is_err()
+        );
+        assert!(decode_scan_cursor("not base64!", &filter).is_err());
+    }
 }

@@ -590,6 +590,7 @@ async fn tools_list_shows_write_tools_only_with_write_scopes(pool: PgPool) {
         "get_system_security_context".to_owned(),
         "list_remediation_work".to_owned(),
         "list_scan_findings".to_owned(),
+        "list_system_scans".to_owned(),
     ]);
 
     let read_only = issue(&pool, owner, READ, &[env]).await;

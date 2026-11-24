@@ -76,9 +76,10 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", 
 ///
 /// The authoritative definitions live in [`tools`]; `tools/list` uses
 /// [`tools::visible_tools`], not this list.
-pub const MCP_TOOL_NAMES: [&str; 24] = [
+pub const MCP_TOOL_NAMES: [&str; 25] = [
     "find_systems",
     "list_scan_findings",
+    "list_system_scans",
     "list_remediation_work",
     "get_system_security_context",
     "get_remediation_context",

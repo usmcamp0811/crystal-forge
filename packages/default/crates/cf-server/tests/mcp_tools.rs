@@ -394,6 +394,7 @@ fn visible_tools_follow_granted_scopes() {
         [
             "find_systems",
             "list_scan_findings",
+            "list_system_scans",
             "list_remediation_work",
             "get_system_security_context",
             "get_scan_result"
@@ -404,6 +405,7 @@ fn visible_tools_follow_granted_scopes() {
         [
             "find_systems",
             "list_scan_findings",
+            "list_system_scans",
             "list_remediation_work",
             "get_system_security_context",
             "get_remediation_context",
