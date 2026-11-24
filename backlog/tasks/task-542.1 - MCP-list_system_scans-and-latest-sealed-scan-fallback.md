@@ -1,10 +1,10 @@
 ---
 id: TASK-542.1
 title: MCP list_system_scans and latest sealed scan fallback
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-11-24T14:39:00Z'
-updated_date: '2026-11-24T18:34:00Z'
+updated_date: '2026-11-24T19:11:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-542
@@ -73,4 +73,6 @@ LOCK: OpenCode on vm-agent in /home/mcamp/code/crystal-forge/TASK-542.1-mcp-list
 - No migration, no SQLx offline metadata change (runtime query_as only), no browser-visible change, integration-access not affected (no scope change).
 
 Design note: is_head uses HEAD's proven execution derivation (same rule as configuration_head_cve_scan), not commit equality, because execution reuse can make the HEAD scan's commit earlier than HEAD.
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/356 (Draft, targets dev). Lock released: awaiting review. Pushed via ssh://altssh.gitlab.com:443 because port 22 to gitlab.com timed out from vm-agent.
 <!-- SECTION:NOTES:END -->
