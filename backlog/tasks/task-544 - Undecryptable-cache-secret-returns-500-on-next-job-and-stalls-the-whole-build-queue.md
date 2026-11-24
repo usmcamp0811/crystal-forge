@@ -3,9 +3,10 @@ id: TASK-544
 title: >-
   Undecryptable cache secret returns 500 on next-job and stalls the whole build
   queue
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-11-24T21:41:00Z'
+updated_date: '2026-11-24T23:28:00Z'
 labels:
   - builders
   - cache
@@ -55,5 +56,5 @@ A cache secret that cannot be decrypted is a visible, actionable configuration f
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Diagnosis 2026-11-24: builders reckless and webb both enabled and active with fresh heartbeats. 286 queued jobs, all passing artifact/environment predicates. Builder journal shows a 500 every 5 s. Server journal shows the decrypt WARN for derivation_id=3424580 at the same moments. Root cause on the host: the cache-encryption-key file content changed. It is under investigation in fmf modules/nixos/services/crystal-forge (Vault template added 2026-11-23).
+Stacked delivery approved by the user on 2026-11-24 (4 slices, one MR each, each stacked on the previous): TASK-544.1 dispatch skip + cache_secret_undecryptable (AC2, AC3, the logging part of AC1) -> TASK-544.2 startup check + config-health + Caches page (AC1, part of AC6) -> TASK-544.3 Builders/queue UI state (AC4) -> TASK-544.4 CVE worker classification (AC5, rest of AC6). Parent closes when all four are Done. Diagnosis 2026-11-24: builders reckless and webb enabled and active with fresh heartbeats; 286 queued jobs passing artifact/environment predicates; builder journal 500 every 5 s; server journal 'failed to decrypt cache secret' for the same head job at the same moments. Host root cause (fmf cache-encryption-key template read the wrong Vault field) was fixed separately.
 <!-- SECTION:NOTES:END -->
