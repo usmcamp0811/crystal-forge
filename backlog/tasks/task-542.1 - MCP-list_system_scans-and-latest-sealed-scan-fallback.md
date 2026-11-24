@@ -1,9 +1,10 @@
 ---
 id: TASK-542.1
 title: MCP list_system_scans and latest sealed scan fallback
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-24T14:39:00Z'
+updated_date: '2026-11-24T14:40:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-542
@@ -56,3 +57,9 @@ TASK-534.9 (merged).
 - [ ] #6 Tool descriptions name the fallback path, and docs/knowledge/security/mcp-server.md documents the tool and field
 - [ ] #7 Database-backed regression tests cover ordering, commit filter, cursor, environment scoping, and the fallback reference
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: OpenCode on vm-agent in /home/mcamp/code/crystal-forge/TASK-542.1-mcp-list-system-scans
+<!-- SECTION:NOTES:END -->
