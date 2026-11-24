@@ -3,9 +3,10 @@ id: TASK-544.1
 title: >-
   Skip undecryptable cache destinations at next-job dispatch and report
   cache_secret_undecryptable
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-24T23:27:00Z'
+updated_date: '2026-11-24T23:28:00Z'
 labels:
   - builders
   - cache
@@ -62,3 +63,9 @@ None. Slices 544.2, 544.3 and 544.4 stack on this one.
 - [ ] #5 A wire-name test covers the new reason; a unit test covers the typed decrypt error with a wrong key; a database test covers both peek functions with a blocked environment and with the NULL environment blocked.
 - [ ] #6 docs/knowledge describes the new 409 reason, the per-environment skip and the log; nix build .#okf-knowledge -L passes.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-agent on vm-agent in /home/mcamp/code/crystal-forge/TASK-544.1-cache-secret-dispatch
+<!-- SECTION:NOTES:END -->
