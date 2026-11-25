@@ -211,9 +211,38 @@ Every next-job 409 response has a JSON body with a stable `reason` field:
   the selected evaluator contract.
 - `source_materialization_cancelled` means canonical source preparation was
   cancelled before claim.
+- `cache_secret_undecryptable` means every queued job that the builder may take
+  resolves to a cache destination whose stored credential the server cannot
+  decrypt. It applies to both execution strategies. The response names no
+  destination. See "Undecryptable cache credentials" below.
 
 The first three checks occur before queue lookup. Source cancellation occurs
 before the atomic claim. None of these responses claims or mutates a queued job.
+
+### Undecryptable cache credentials
+
+Dispatch resolves the cache destinations of the selected job before it claims
+the job, because the builder receives the push credentials with the job. A
+destination depends only on the job's environment. When the server cannot
+decrypt a stored credential of that destination, for example because
+`CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY` holds a different key than the one that
+encrypted the credential, the server:
+
+1. logs one `ERROR` per affected environment in the poll, with the destination
+   id, destination name, column and a static cause, and never the value;
+2. sets that environment aside for the rest of the poll and selects the next
+   candidate from another environment, so jobs that use a healthy destination
+   still dispatch; and
+3. returns `409` with `cache_secret_undecryptable` when no candidate remains,
+   or `404` when the queue has no candidate and nothing was set aside.
+
+No response claims or mutates a queued job. A job set aside stays `queued` and
+dispatches after the key or the stored credential is repaired. A builder from
+before this reason existed reads the response as an unstructured 409, takes no
+job and polls again.
+
+This applies to dispatch only. Output and closure publication, which run after a
+claim, still return a server error for the same fault.
 
 ## Related concepts
 

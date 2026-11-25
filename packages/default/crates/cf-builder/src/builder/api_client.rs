@@ -965,6 +965,10 @@ impl BuilderApiClient {
                 Ok(NextJobConflictReason::SourceMaterializationCancelled) => warn!(
                     "Server cancelled canonical source preparation before claim; the builder will poll again (409 Conflict)"
                 ),
+                Ok(NextJobConflictReason::CacheSecretUndecryptable) => warn!(
+                    "Server cannot decrypt the cache credential for any job this builder may take; no job was claimed. \
+                     Repair the server's cache encryption key or the stored cache credential (409 Conflict)"
+                ),
                 Err(error) => warn!(
                     error = %error,
                     "Server rejected next-job polling with an unstructured or unknown 409 Conflict response"
@@ -979,6 +983,13 @@ impl BuilderApiClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".to_string());
+            // A blank body must not read as a truncated message: the server
+            // sends an empty body for some failures, for example a 500.
+            let error_text = if error_text.trim().is_empty() {
+                "no response body; see the server log"
+            } else {
+                error_text.trim()
+            };
             anyhow::bail!("Get next job failed with status {}: {}", status, error_text);
         }
 

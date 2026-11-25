@@ -154,7 +154,7 @@ NixOS module sets these keys from
 - `CRYSTAL_FORGE_CONFIG` - Path to config file. Default `/var/lib/crystal_forge/config.toml`. The file is optional.
 - `CRYSTAL_FORGE__<SECTION>__<KEY>` - Overrides any key of the file, for example `CRYSTAL_FORGE__DATABASE__HOST`. The separator is a double underscore.
 - `AUTH_MODE=dev|oidc|local` - Supplies the default of `server.auth_mode` when the key is absent. The default is `oidc`.
-- `CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY` - Key material for encrypting stored cache secrets (AES-256-GCM). `CRYSTAL_FORGE_SECRET_KEY` is the fallback variable.
+- `CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY` - Key material for encrypting stored cache secrets (AES-256-GCM). `CRYSTAL_FORGE_SECRET_KEY` is the fallback variable. The key must stay the same for the life of the stored secrets: after a change, the server cannot decrypt them and skips the affected cache destinations at dispatch (see [Verified-source evaluator contract](../builders/verified-source-evaluator-contract.md)).
 
 The server does not read `DATABASE_URL`. The database connection is built from the `[database]` fields. `DATABASE_URL` is used by development tooling and the `crystal-forge-migrate` helper (see [Local development workflow](local-development-workflow.md)).
 

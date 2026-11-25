@@ -262,26 +262,68 @@ fn validate_requested_paths(
     Ok(validated)
 }
 
-async fn resolve_cache_destinations_for_derivation(
+/// Why the cache destinations of a derivation could not be resolved.
+enum CacheResolveError {
+    /// A stored cache credential cannot be decrypted. The fault belongs to the
+    /// destination, so dispatch can set the affected environment aside.
+    Undecryptable(crate::queries::cache_destinations::CacheSecretUndecryptable),
+    /// Any other failure, already mapped to the response status.
+    Status(StatusCode),
+}
+
+async fn try_resolve_cache_destinations_for_derivation(
     pool: &sqlx::PgPool,
     derivation: &crate::derivations::Derivation,
-) -> Result<Vec<crate::models::cache_destination::CacheDestination>, StatusCode> {
+) -> Result<Vec<crate::models::cache_destination::CacheDestination>, CacheResolveError> {
     crate::queries::cache_push::eligible_cache_destinations_for_derivation(pool, derivation)
         .await
         .map_err(|e| {
+            if let Some(fault) =
+                e.downcast_ref::<crate::queries::cache_destinations::CacheSecretUndecryptable>()
+            {
+                return CacheResolveError::Undecryptable(fault.clone());
+            }
             tracing::warn!(
                 derivation_id = derivation.id,
                 "failed to resolve canonical cache destinations: {e}"
             );
             // Work admitted before registrations spread across environments is
             // refused as a conflict the operator can act on, not a server fault.
-            if e.downcast_ref::<crate::queries::cache_push::AmbiguousDerivationEnvironment>()
-                .is_some()
-            {
-                StatusCode::CONFLICT
-            } else {
+            CacheResolveError::Status(
+                if e.downcast_ref::<crate::queries::cache_push::AmbiguousDerivationEnvironment>()
+                    .is_some()
+                {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                },
+            )
+        })
+}
+
+/// Resolves cache destinations for paths that already hold a claimed job.
+///
+/// Only next-job dispatch skips an undecryptable destination. After a claim
+/// the job is committed to this derivation, so the fault stays a server error
+/// here.
+async fn resolve_cache_destinations_for_derivation(
+    pool: &sqlx::PgPool,
+    derivation: &crate::derivations::Derivation,
+) -> Result<Vec<crate::models::cache_destination::CacheDestination>, StatusCode> {
+    try_resolve_cache_destinations_for_derivation(pool, derivation)
+        .await
+        .map_err(|error| match error {
+            CacheResolveError::Undecryptable(fault) => {
+                tracing::warn!(
+                    derivation_id = derivation.id,
+                    destination_id = fault.destination_id,
+                    destination = %fault.destination_name,
+                    column = fault.column,
+                    "failed to resolve canonical cache destinations: failed to decrypt cache secret"
+                );
                 StatusCode::INTERNAL_SERVER_ERROR
             }
+            CacheResolveError::Status(status) => status,
         })
 }
 
@@ -377,13 +419,14 @@ fn builder_cache_push_config_from_destination(
 async fn builder_cache_push_config_for_derivation(
     pool: &sqlx::PgPool,
     derivation: &crate::derivations::Derivation,
-) -> Result<BuilderCachePushConfig, StatusCode> {
-    let destinations = resolve_cache_destinations_for_derivation(pool, derivation).await?;
+) -> Result<BuilderCachePushConfig, CacheResolveError> {
+    let destinations = try_resolve_cache_destinations_for_derivation(pool, derivation).await?;
 
     destinations
         .first()
         .map(builder_cache_push_config_from_destination)
         .unwrap_or_else(|| Ok(BuilderCachePushConfig::disabled()))
+        .map_err(CacheResolveError::Status)
 }
 
 async fn verified_source_identity_for_derivation(
@@ -588,6 +631,22 @@ fn next_job_conflict(reason: NextJobConflictReason) -> Response {
         Json(NextJobConflictResponse { reason }),
     )
         .into_response()
+}
+
+/// Answers a poll that found no candidate to preflight.
+///
+/// With no environment set aside, an empty queue is the normal 404. With at
+/// least one set aside, the queue is not empty: every remaining job resolves to
+/// a cache destination that this server cannot decrypt, so the builder gets a
+/// credential-free reason it can log. The response claims and mutates nothing.
+fn no_candidate_response(blocked: &builders::BlockedEnvironments) -> Result<Response, StatusCode> {
+    if blocked.is_empty() {
+        Err(StatusCode::NOT_FOUND)
+    } else {
+        Ok(next_job_conflict(
+            NextJobConflictReason::CacheSecretUndecryptable,
+        ))
+    }
 }
 
 /// Returns a preclaim conflict when the selected cache cannot be decoded.
@@ -2816,118 +2875,163 @@ pub async fn get_next_job(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let preflight_source = if execution_strategy
-        == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
-    {
-        if let Some(reason) =
-            source_delivery_conflict(execution_strategy, state.server_config.source_delivery_mode)
+    // CONCURRENCY: One poll selects a candidate, preflights its cache, and
+    // claims only that candidate. A candidate whose cache credential cannot be
+    // decrypted sets its environment aside for the rest of this poll, and the
+    // loop selects again from the other environments. Nothing is claimed or
+    // mutated for a set-aside candidate. Each pass blocks a new environment,
+    // so the loop ends.
+    let mut blocked = builders::BlockedEnvironments::default();
+    let (preflight_source, candidate, cache_push) = loop {
+        let preflight_source = if execution_strategy
+            == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
         {
-            tracing::warn!(
-                builder_id = %builder_id,
-                ?state.server_config.source_delivery_mode,
-                "verified-source contract version 1 requires canonical server artifact delivery"
-            );
-            return Ok(next_job_conflict(reason));
-        }
-        let (candidate, published) = loop {
-            let Some(candidate) = builders::peek_next_verified_source_job(
-                    &state.pool,
-                    &environment_ids,
-                )
-                .await
-                .map_err(|error| {
-                    tracing::error!(builder_id = %builder_id, "failed to select source preflight candidate: {error:#}");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?
-                else {
-                    return Err(StatusCode::NOT_FOUND);
-                };
-            match crate::flake::verified_source::lookup_published_source(
-                &state.server_config.source_archive_root,
-                &candidate.repo_url,
-                &candidate.commit_hash,
-            )
-            .await
-            {
-                Ok(published) => break (candidate, published),
-                Err(error)
-                    if matches!(
-                        error.class,
-                        crate::flake::verified_source::MaterializationFailureClass::NotPublished
-                            | crate::flake::verified_source::MaterializationFailureClass::UnsupportedObjectFormat
-                            | crate::flake::verified_source::MaterializationFailureClass::Deterministic
-                    ) =>
-                {
-                    // Pre-contract jobs cannot satisfy the signed source and
-                    // evaluator identity. Retire each stale queue head so a
-                    // compatible job behind it can be selected in this poll.
-                    let retired = builders::mark_queued_verified_source_job_obsolete(
+            if let Some(reason) = source_delivery_conflict(
+                execution_strategy,
+                state.server_config.source_delivery_mode,
+            ) {
+                tracing::warn!(
+                    builder_id = %builder_id,
+                    ?state.server_config.source_delivery_mode,
+                    "verified-source contract version 1 requires canonical server artifact delivery"
+                );
+                return Ok(next_job_conflict(reason));
+            }
+            let (candidate, published) = loop {
+                let Some(candidate) = builders::peek_next_verified_source_job_excluding(
                         &state.pool,
-                        &candidate.job_id,
-                        &format!("contract-v1 source publication is unusable: {error}"),
+                        &environment_ids,
+                        &blocked,
                     )
                     .await
-                    .map_err(|transition_error| {
-                        tracing::error!(
-                            job_id = %candidate.job_id,
-                            "failed to retire obsolete verified-source job: {transition_error:#}"
-                        );
+                    .map_err(|error| {
+                        tracing::error!(builder_id = %builder_id, "failed to select source preflight candidate: {error:#}");
                         StatusCode::INTERNAL_SERVER_ERROR
-                    })?;
-                    tracing::warn!(
-                        job_id = %candidate.job_id,
-                        class = ?error.class,
-                        retired,
-                        "retired obsolete verified-source authority before claim"
-                    );
-                }
-                Err(error) => {
-                    let status = match error.class {
-                        crate::flake::verified_source::MaterializationFailureClass::Transient => {
-                            StatusCode::SERVICE_UNAVAILABLE
-                        }
-                        crate::flake::verified_source::MaterializationFailureClass::Cancelled => {
-                            return Ok(next_job_conflict(
-                                NextJobConflictReason::SourceMaterializationCancelled,
-                            ));
-                        }
-                        crate::flake::verified_source::MaterializationFailureClass::NotPublished
-                        | crate::flake::verified_source::MaterializationFailureClass::UnsupportedObjectFormat
-                        | crate::flake::verified_source::MaterializationFailureClass::Deterministic => {
-                            StatusCode::UNPROCESSABLE_ENTITY
-                        }
+                    })?
+                    else {
+                        return no_candidate_response(&blocked);
                     };
-                    tracing::warn!(
-                        job_id = %candidate.job_id,
-                        class = ?error.class,
-                        "canonical source is not ready for dispatch: {error}"
-                    );
-                    return Err(status);
+                match crate::flake::verified_source::lookup_published_source(
+                    &state.server_config.source_archive_root,
+                    &candidate.repo_url,
+                    &candidate.commit_hash,
+                )
+                .await
+                {
+                    Ok(published) => break (candidate, published),
+                    Err(error)
+                        if matches!(
+                            error.class,
+                            crate::flake::verified_source::MaterializationFailureClass::NotPublished
+                                | crate::flake::verified_source::MaterializationFailureClass::UnsupportedObjectFormat
+                                | crate::flake::verified_source::MaterializationFailureClass::Deterministic
+                        ) =>
+                    {
+                        // Pre-contract jobs cannot satisfy the signed source and
+                        // evaluator identity. Retire each stale queue head so a
+                        // compatible job behind it can be selected in this poll.
+                        let retired = builders::mark_queued_verified_source_job_obsolete(
+                            &state.pool,
+                            &candidate.job_id,
+                            &format!("contract-v1 source publication is unusable: {error}"),
+                        )
+                        .await
+                        .map_err(|transition_error| {
+                            tracing::error!(
+                                job_id = %candidate.job_id,
+                                "failed to retire obsolete verified-source job: {transition_error:#}"
+                            );
+                            StatusCode::INTERNAL_SERVER_ERROR
+                        })?;
+                        tracing::warn!(
+                            job_id = %candidate.job_id,
+                            class = ?error.class,
+                            retired,
+                            "retired obsolete verified-source authority before claim"
+                        );
+                    }
+                    Err(error) => {
+                        let status = match error.class {
+                            crate::flake::verified_source::MaterializationFailureClass::Transient => {
+                                StatusCode::SERVICE_UNAVAILABLE
+                            }
+                            crate::flake::verified_source::MaterializationFailureClass::Cancelled => {
+                                return Ok(next_job_conflict(
+                                    NextJobConflictReason::SourceMaterializationCancelled,
+                                ));
+                            }
+                            crate::flake::verified_source::MaterializationFailureClass::NotPublished
+                            | crate::flake::verified_source::MaterializationFailureClass::UnsupportedObjectFormat
+                            | crate::flake::verified_source::MaterializationFailureClass::Deterministic => {
+                                StatusCode::UNPROCESSABLE_ENTITY
+                            }
+                        };
+                        tracing::warn!(
+                            job_id = %candidate.job_id,
+                            class = ?error.class,
+                            "canonical source is not ready for dispatch: {error}"
+                        );
+                        return Err(status);
+                    }
                 }
+            };
+            Some((candidate, published))
+        } else {
+            None
+        };
+        let candidate = if let Some((candidate, _)) = preflight_source.as_ref() {
+            builders::get_build_job_by_id(&state.pool, &candidate.job_id)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::NOT_FOUND)?
+        } else {
+            let Some(candidate) = builders::peek_next_server_derivation_job_excluding(
+                &state.pool,
+                &environment_ids,
+                &blocked,
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            else {
+                return no_candidate_response(&blocked);
+            };
+            candidate
+        };
+        let derivation =
+            crate::queries::derivations::get_derivation_by_id(&state.pool, candidate.derivation_id)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let cache_push = match builder_cache_push_config_for_derivation(&state.pool, &derivation)
+            .await
+        {
+            Ok(cache_push) => cache_push,
+            Err(CacheResolveError::Status(status)) => return Err(status),
+            Err(CacheResolveError::Undecryptable(fault)) => {
+                // SECURITY: Log the destination and column, never a value.
+                tracing::error!(
+                    builder_id = %builder_id,
+                    job_id = %candidate.id,
+                    environment_id = ?candidate.environment_id,
+                    destination_id = fault.destination_id,
+                    destination = %fault.destination_name,
+                    column = fault.column,
+                    cause = %fault.cause,
+                    "cache credential cannot be decrypted; skipping jobs in this environment for this poll"
+                );
+                // INVARIANT: The selection excludes blocked environments, so
+                // a candidate from an already blocked one means the exclusion
+                // is broken. Fail the poll instead of looping on it.
+                if !blocked.insert(candidate.environment_id) {
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+                continue;
             }
         };
-        Some((candidate, published))
-    } else {
-        None
+        if let Some(reason) = cache_type_conflict(&next_job_request, &cache_push) {
+            return Ok(next_job_conflict(reason));
+        }
+        break (preflight_source, candidate, cache_push);
     };
-    let candidate = if let Some((candidate, _)) = preflight_source.as_ref() {
-        builders::get_build_job_by_id(&state.pool, &candidate.job_id)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    } else {
-        builders::peek_next_server_derivation_job(&state.pool, &environment_ids)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    }
-    .ok_or(StatusCode::NOT_FOUND)?;
-    let derivation =
-        crate::queries::derivations::get_derivation_by_id(&state.pool, candidate.derivation_id)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let cache_push = builder_cache_push_config_for_derivation(&state.pool, &derivation).await?;
-    if let Some(reason) = cache_type_conflict(&next_job_request, &cache_push) {
-        return Ok(next_job_conflict(reason));
-    }
     // CONCURRENCY: Claim only the cache-preflighted candidate and retain its
     // selected configuration. A lost candidate must not substitute a job or
     // resolve a newly selected Niks3 cache after this capability check.

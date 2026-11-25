@@ -146,9 +146,9 @@ pub enum SourceInputDeliveryMode {
 
 /// Identifies why the server rejected a next-job poll before claiming work.
 ///
-/// These reasons describe builder/server contract incompatibilities or source
-/// preparation cancellation. A conflict response does not claim or mutate a
-/// queued job.
+/// These reasons describe builder/server contract incompatibilities, source
+/// preparation cancellation, or a server-side cache credential fault. A
+/// conflict response does not claim or mutate a queued job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NextJobConflictReason {
@@ -162,6 +162,16 @@ pub enum NextJobConflictReason {
     IncompatibleSourceDelivery,
     /// Canonical source preparation was cancelled before the job could be claimed.
     SourceMaterializationCancelled,
+    /// Every queued job this builder may take resolves to a cache destination
+    /// whose stored credential the server cannot decrypt.
+    ///
+    /// This is a server configuration fault, not a builder fault. Retrying the
+    /// poll cannot help until an operator repairs the server's cache key or
+    /// the stored credential. The response names no destination: the server
+    /// log carries those details, so a builder learns nothing about server
+    /// configuration. A builder from before this reason existed reads the
+    /// response as an unstructured 409 and polls again.
+    CacheSecretUndecryptable,
 }
 
 /// Describes an HTTP 409 response from the next-job endpoint.
@@ -1313,6 +1323,10 @@ mod tests {
             (
                 NextJobConflictReason::SourceMaterializationCancelled,
                 "source_materialization_cancelled",
+            ),
+            (
+                NextJobConflictReason::CacheSecretUndecryptable,
+                "cache_secret_undecryptable",
             ),
         ] {
             let response = NextJobConflictResponse { reason };

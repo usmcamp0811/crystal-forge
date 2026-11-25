@@ -55,6 +55,39 @@ pub async fn get_cache_destination_by_name(
     destination.map(decrypt_destination_secrets).transpose()
 }
 
+/// Identifies a stored cache credential that the configured key cannot open.
+///
+/// Callers downcast this error from the [`anyhow::Error`] that
+/// [`decrypt_destination_secrets`] returns. It names the destination and the
+/// column so that an operator can find the fault. It never carries the
+/// credential value, the ciphertext, or the key.
+///
+/// The fault belongs to the destination, not to the job that happened to read
+/// it. Dispatch uses it to skip the affected environment instead of failing
+/// the poll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheSecretUndecryptable {
+    /// Identifier of the cache destination that holds the credential.
+    pub destination_id: i32,
+    /// Name of the cache destination that holds the credential.
+    pub destination_name: String,
+    /// Column that holds the credential, for example `attic_token`.
+    pub column: &'static str,
+    /// Static reason from the decryption layer, for example a missing key or
+    /// an authentication failure. It never contains secret material.
+    pub cause: String,
+}
+
+impl std::fmt::Display for CacheSecretUndecryptable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // COMPATIBILITY: log filters and tests match this exact text. The
+        // destination and column are structured fields, not part of it.
+        f.write_str("failed to decrypt cache secret")
+    }
+}
+
+impl std::error::Error for CacheSecretUndecryptable {}
+
 fn decrypt_destination_secrets(mut destination: CacheDestination) -> Result<CacheDestination> {
     // COMPATIBILITY: Recognized legacy CA annotations are projected in memory.
     // Never rewrite stored roots, ciphertext, or timestamps during GET/probes.
@@ -64,21 +97,41 @@ fn decrypt_destination_secrets(mut destination: CacheDestination) -> Result<Cach
     destination
         .validate_niks3_certificates()
         .map_err(anyhow::Error::msg)?;
-    destination.attic_token = cache_secrets::decrypt_optional(destination.attic_token.as_deref())?;
+    let (destination_id, destination_name) = (destination.id, destination.name.clone());
+    let decrypt = |column: &'static str, value: Option<&str>| {
+        cache_secrets::decrypt_optional(value).map_err(|error| {
+            anyhow::Error::new(CacheSecretUndecryptable {
+                destination_id,
+                destination_name: destination_name.clone(),
+                column,
+                // The decryption layer reports only static text, never the value.
+                cause: error.to_string(),
+            })
+        })
+    };
+    destination.attic_token = decrypt("attic_token", destination.attic_token.as_deref())?;
     destination.s3_access_key_id =
-        cache_secrets::decrypt_optional(destination.s3_access_key_id.as_deref())?;
-    destination.s3_secret_access_key =
-        cache_secrets::decrypt_optional(destination.s3_secret_access_key.as_deref())?;
+        decrypt("s3_access_key_id", destination.s3_access_key_id.as_deref())?;
+    destination.s3_secret_access_key = decrypt(
+        "s3_secret_access_key",
+        destination.s3_secret_access_key.as_deref(),
+    )?;
     destination.s3_session_token =
-        cache_secrets::decrypt_optional(destination.s3_session_token.as_deref())?;
+        decrypt("s3_session_token", destination.s3_session_token.as_deref())?;
     destination.niks3_auth_token =
-        cache_secrets::decrypt_optional(destination.niks3_auth_token.as_deref())?;
-    destination.niks3_write_client_key =
-        cache_secrets::decrypt_optional(destination.niks3_write_client_key.as_deref())?;
-    destination.niks3_read_client_key =
-        cache_secrets::decrypt_optional(destination.niks3_read_client_key.as_deref())?;
-    destination.niks3_read_basic_password =
-        cache_secrets::decrypt_optional(destination.niks3_read_basic_password.as_deref())?;
+        decrypt("niks3_auth_token", destination.niks3_auth_token.as_deref())?;
+    destination.niks3_write_client_key = decrypt(
+        "niks3_write_client_key",
+        destination.niks3_write_client_key.as_deref(),
+    )?;
+    destination.niks3_read_client_key = decrypt(
+        "niks3_read_client_key",
+        destination.niks3_read_client_key.as_deref(),
+    )?;
+    destination.niks3_read_basic_password = decrypt(
+        "niks3_read_basic_password",
+        destination.niks3_read_basic_password.as_deref(),
+    )?;
     destination.refresh_niks3_configured();
     Ok(destination)
 }
@@ -1662,6 +1715,43 @@ mod tests {
             assert!(error.contains(field));
             assert!(!error.contains("AQID"));
         }
+    }
+
+    #[test]
+    fn undecryptable_secret_names_destination_and_column_without_the_value() {
+        // A well-formed envelope with an invalid tag fails to open under any
+        // key, including a missing one, so no key setup is needed here.
+        let ciphertext = "enc:v1:AAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let stored = CacheDestination {
+            id: 7,
+            name: "campground".into(),
+            attic_token: Some(ciphertext.into()),
+            ..base_destination()
+        };
+
+        let error = decrypt_destination_secrets(stored).unwrap_err();
+        let fault = error
+            .downcast_ref::<CacheSecretUndecryptable>()
+            .expect("typed fault");
+
+        assert_eq!(fault.destination_id, 7);
+        assert_eq!(fault.destination_name, "campground");
+        assert_eq!(fault.column, "attic_token");
+        assert_eq!(error.to_string(), "failed to decrypt cache secret");
+        assert!(!format!("{error:?} {fault:?}").contains("AAAAAAAAAAAAAAAA"));
+    }
+
+    #[test]
+    fn plaintext_and_absent_secrets_are_not_a_fault() {
+        let stored = CacheDestination {
+            attic_token: Some("legacy-plaintext".into()),
+            s3_secret_access_key: None,
+            ..base_destination()
+        };
+
+        let decrypted = decrypt_destination_secrets(stored).expect("legacy plaintext opens");
+
+        assert_eq!(decrypted.attic_token.as_deref(), Some("legacy-plaintext"));
     }
 
     #[test]

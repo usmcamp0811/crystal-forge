@@ -1156,6 +1156,59 @@ pub async fn claim_next_job_atomic(
     Ok(job)
 }
 
+/// Job environments set aside during one next-job poll.
+///
+/// Cache destinations depend only on a job's environment, so a destination
+/// whose credential cannot be decrypted fails every job in that environment
+/// alike. The poll records the environment here and selects its next
+/// candidate from another one.
+///
+/// INVARIANT: The set only grows during one poll and holds each environment
+/// once, so a poll selects at most one candidate per environment. That bounds
+/// the poll's selection loop. `None` stands for the global environment: jobs
+/// that have no owner environment.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BlockedEnvironments {
+    ids: Vec<Uuid>,
+    global: bool,
+}
+
+impl BlockedEnvironments {
+    /// Adds an environment and returns whether it was new.
+    pub fn insert(&mut self, environment_id: Option<Uuid>) -> bool {
+        match environment_id {
+            Some(id) if !self.ids.contains(&id) => {
+                self.ids.push(id);
+                true
+            }
+            Some(_) => false,
+            None => !std::mem::replace(&mut self.global, true),
+        }
+    }
+
+    /// Returns whether no environment is blocked.
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty() && !self.global
+    }
+
+    fn ids(&self) -> &[Uuid] {
+        &self.ids
+    }
+
+    fn global(&self) -> bool {
+        self.global
+    }
+}
+
+/// SQL predicate that drops jobs in blocked environments.
+///
+/// Binds `$2` (blocked environment ids) and `$3` (whether the NULL environment
+/// is blocked). The `CASE` stops a NULL environment from turning the id test
+/// into NULL, which would drop the row from every poll.
+const NOT_IN_BLOCKED_ENVIRONMENT: &str = "(CASE WHEN build_jobs.environment_id IS NULL \
+     THEN NOT $3::boolean \
+     ELSE NOT (build_jobs.environment_id = ANY($2::uuid[])) END)";
+
 /// Returns the next server-derivation candidate without claiming work.
 ///
 /// Uses the same eligibility and ordering as the atomic claim. The caller MUST
@@ -1169,6 +1222,27 @@ pub async fn peek_next_server_derivation_job(
     pool: &PgPool,
     environment_ids: &[Uuid],
 ) -> Result<Option<BuildJob>> {
+    peek_next_server_derivation_job_excluding(
+        pool,
+        environment_ids,
+        &BlockedEnvironments::default(),
+    )
+    .await
+}
+
+/// Returns the next server-derivation candidate outside `blocked` environments.
+///
+/// Same contract as [`peek_next_server_derivation_job`]. A job whose
+/// environment is in `blocked` is not a candidate, so one faulty cache
+/// destination does not hide the jobs behind it that use another one.
+///
+/// # Errors
+/// Returns an error when PostgreSQL cannot select the candidate.
+pub async fn peek_next_server_derivation_job_excluding(
+    pool: &PgPool,
+    environment_ids: &[Uuid],
+    blocked: &BlockedEnvironments,
+) -> Result<Option<BuildJob>> {
     sqlx::query_as::<_, BuildJobRow>(&format!(
         r#"
         SELECT build_jobs.*
@@ -1181,6 +1255,7 @@ pub async fn peek_next_server_derivation_job(
                OR build_jobs.environment_id IS NULL)
           AND ({ARTIFACT_POLICY_PREDICATE})
           AND ({JOB_ENVIRONMENT_IS_CURRENT})
+          AND {NOT_IN_BLOCKED_ENVIRONMENT}
         ORDER BY build_jobs.queue_position DESC NULLS LAST,
                  build_jobs.priority_weight DESC,
                  (SELECT c.commit_timestamp FROM commits c
@@ -1190,6 +1265,8 @@ pub async fn peek_next_server_derivation_job(
         "#,
     ))
     .bind(environment_ids)
+    .bind(blocked.ids())
+    .bind(blocked.global())
     .fetch_optional(pool)
     .await
     .context("Failed to select server-derivation claim candidate")
@@ -1219,6 +1296,23 @@ pub async fn peek_next_verified_source_job(
     pool: &PgPool,
     environment_ids: &[Uuid],
 ) -> Result<Option<VerifiedSourceClaimCandidate>> {
+    peek_next_verified_source_job_excluding(pool, environment_ids, &BlockedEnvironments::default())
+        .await
+}
+
+/// Returns the next verified-source candidate outside `blocked` environments.
+///
+/// Same contract as [`peek_next_verified_source_job`], with the exclusion
+/// described on [`peek_next_server_derivation_job_excluding`].
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot select the candidate.
+pub async fn peek_next_verified_source_job_excluding(
+    pool: &PgPool,
+    environment_ids: &[Uuid],
+    blocked: &BlockedEnvironments,
+) -> Result<Option<VerifiedSourceClaimCandidate>> {
     sqlx::query_as::<_, VerifiedSourceClaimCandidate>(&format!(
         r#"
         SELECT build_jobs.id AS job_id,
@@ -1235,6 +1329,7 @@ pub async fn peek_next_verified_source_job(
                OR build_jobs.environment_id IS NULL)
           AND ({ARTIFACT_POLICY_PREDICATE})
           AND ({JOB_ENVIRONMENT_IS_CURRENT})
+          AND {NOT_IN_BLOCKED_ENVIRONMENT}
           AND d.derivation_path IS NOT NULL
         ORDER BY
             build_jobs.queue_position DESC NULLS LAST,
@@ -1245,6 +1340,8 @@ pub async fn peek_next_verified_source_job(
         "#,
     ))
     .bind(environment_ids)
+    .bind(blocked.ids())
+    .bind(blocked.global())
     .fetch_optional(pool)
     .await
     .context("Failed to select verified-source claim candidate")
@@ -3545,6 +3642,95 @@ mod tests {
             .await
             .unwrap();
         job
+    }
+
+    #[test]
+    fn blocked_environments_hold_each_environment_once() {
+        let environment = Uuid::new_v4();
+        let mut blocked = BlockedEnvironments::default();
+        assert!(blocked.is_empty());
+
+        assert!(blocked.insert(Some(environment)));
+        assert!(!blocked.insert(Some(environment)));
+        assert!(blocked.insert(None));
+        assert!(!blocked.insert(None));
+        assert!(blocked.insert(Some(Uuid::new_v4())));
+        assert!(!blocked.is_empty());
+    }
+
+    async fn peek_heads(
+        pool: &PgPool,
+        blocked: &BlockedEnvironments,
+    ) -> (Option<Uuid>, Option<Uuid>) {
+        let server = peek_next_server_derivation_job_excluding(pool, &[], blocked)
+            .await
+            .unwrap()
+            .map(|job| job.id);
+        let source = peek_next_verified_source_job_excluding(pool, &[], blocked)
+            .await
+            .unwrap()
+            .map(|candidate| candidate.job_id);
+        (server, source)
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn blocked_environments_hide_only_their_own_jobs_from_both_peeks(pool: PgPool) {
+        let dev: Uuid = sqlx::query_scalar("SELECT id FROM environments WHERE name='dev'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let prod: Uuid = sqlx::query_scalar("SELECT id FROM environments WHERE name='prod'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let dev_job = artifact_claim_fixture(&pool, "external", dev).await;
+        let prod_job = artifact_claim_fixture(&pool, "external", prod).await;
+        let global_job = artifact_claim_fixture(&pool, "external", dev).await;
+        // A job with no owner environment: clear it on the registration and the job.
+        sqlx::query(
+            "UPDATE systems s SET environment_id = NULL
+             FROM build_jobs j
+             JOIN derivations d ON d.id = j.derivation_id
+             JOIN commits c ON c.id = d.commit_id
+             WHERE j.id = $1 AND s.flake_id = c.flake_id",
+        )
+        .bind(global_job)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE build_jobs SET environment_id = NULL WHERE id = $1")
+            .bind(global_job)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let all = [dev_job, prod_job, global_job];
+
+        let mut blocked = BlockedEnvironments::default();
+        let (server, source) = peek_heads(&pool, &blocked).await;
+        assert!(all.contains(&server.unwrap()));
+        assert!(all.contains(&source.unwrap()));
+
+        // Blocking one environment hides only that environment's jobs.
+        blocked.insert(Some(dev));
+        let (server, source) = peek_heads(&pool, &blocked).await;
+        assert!([prod_job, global_job].contains(&server.unwrap()));
+        assert!([prod_job, global_job].contains(&source.unwrap()));
+
+        let mut only_global = BlockedEnvironments::default();
+        only_global.insert(None);
+        let (server, source) = peek_heads(&pool, &only_global).await;
+        assert!([dev_job, prod_job].contains(&server.unwrap()));
+        assert!([dev_job, prod_job].contains(&source.unwrap()));
+
+        // The NULL environment is selectable until it is blocked itself.
+        blocked.insert(Some(prod));
+        assert_eq!(
+            peek_heads(&pool, &blocked).await,
+            (Some(global_job), Some(global_job))
+        );
+        blocked.insert(None);
+        assert_eq!(peek_heads(&pool, &blocked).await, (None, None));
     }
 
     #[sqlx::test(migrations = "./migrations")]
