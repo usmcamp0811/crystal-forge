@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-24T23:27:00Z'
-updated_date: '2026-11-24T23:28:00Z'
+updated_date: '2026-11-25T02:30:00Z'
 labels:
   - builders
   - cache
@@ -68,4 +68,6 @@ None. Slices 544.2, 544.3 and 544.4 stack on this one.
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: claude-agent on vm-agent in /home/mcamp/code/crystal-forge/TASK-544.1-cache-secret-dispatch
+
+STATUS 2026-11-24 (commit 2560b510 on TASK-544.1-cache-secret-dispatch, local only, not pushed, no MR yet). Implemented: typed CacheSecretUndecryptable, BlockedEnvironments + *_excluding peeks, per-poll skip loop, 409 cache_secret_undecryptable, ERROR log, builder warning + empty-body text, docs/knowledge. rustfmt --check clean (nix run nixpkgs#rustfmt, edition 2024). VERIFIED on the farm (cf-server-core-drv, checkPhase): new tests pass in both runs: blocked_environments_hold_each_environment_once, undecryptable_secret_names_destination_and_column_without_the_value, plaintext_and_absent_secrets_are_not_a_fault, cf_protocol next_job_conflict_reasons_have_stable_wire_names (cf_protocol 45 passed). NOT VERIFIED / BLOCKED: (1) cf-server-core checkPhase fails 16 unrelated tests (deployment_policies, compliance, compliance_interchange: 'Nix syntax validation unavailable: the Nix parser did not finish within 2 seconds'); the TASK-542.1 branch on the same dev base shows the same 16, and one of its runs passed 1635/0, so this is load-dependent, not this change; a run with 0 failures is still needed. (2) cf-builder-drv: three runs failed before compiling, farm niks3 publish returns 503 'IO error: No space left on device (os error 28)' for one NAR (Garage out of space); builder change is one match arm plus a message tweak, untested by compile. (3) nix build .#okf-knowledge fails on dev itself (TASK-545: arrow chain in TASK-542 Goal); all 58 validator tests pass and STALE=0, the only finding is that line. (4) blocked_environments_hide_only_their_own_jobs_from_both_peeks is #[ignore] (needs isolated migration-backed PostgreSQL) and has not been run. Do not move to Review until 1-4 are resolved.
 <!-- SECTION:NOTES:END -->
