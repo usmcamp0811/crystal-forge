@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-11-24T18:10:00Z'
-updated_date: '2026-11-24T18:34:00Z'
+updated_date: '2026-11-25T02:28:00Z'
 labels:
   - testing
 dependencies: []
@@ -36,4 +36,6 @@ The cf-server-core-drv check phase does not fail because of the fixture exec rac
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-24 TASK-542.1 second cf-server-core-drv run: builder::cve_worker::tests::scan_inputs_restore_independently_across_cache_sources failed with 'Failed to spawn nix copy from file:///derivation-cache' (cve_worker.rs:2930). First run: derivations::cache::publication_signing_tests::selected_publication_key_signs_resolved_root_and_propagates_failure (NotFound at cache.rs:638). A different fake-executable test failed in each run; 1634 of 1635 lib tests passed both times.
+
+2026-11-24 TASK-542.1 Run D at 4436e869: three fake-executable tests failed together (derivations::cache::publication_signing_tests::selected_publication_key_signs_resolved_root_and_propagates_failure, builder::cve_worker::tests::scan_inputs_restore_independently_across_cache_sources, handlers::api::builders::tests::niks3_probe_failure_never_polls_success_transition), with 'Text file busy (os error 26)', NotFound and 'Failed to spawn nix copy'. The same run had 16 Nix-parser-deadline failures (TASK-526).
 <!-- SECTION:NOTES:END -->
