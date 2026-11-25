@@ -4,7 +4,7 @@ title: MCP list_system_scans and latest sealed scan fallback
 status: In Progress
 assignee: []
 created_date: '2026-11-24T14:39:00Z'
-updated_date: '2026-11-25T02:28:00Z'
+updated_date: '2026-11-25T02:29:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-542
@@ -107,4 +107,12 @@ The flake and CI define no farm-run clippy gate. `.#code-metrics.complexity-repo
 - Exact-head GitLab pipeline result: see the MR description.
 - The card check used a mock-mode isolated server, not the dev server, and its screenshots were not attached to the MR (the capture directory in `/tmp` was cleared during the session). No UI code changed.
 - No live call of the new tool on the dev server yet.
+
+### Correction to the clippy statements in this task (2026-11-24)
+Earlier notes say no clippy gate exists in the flake or CI. That is wrong. CI job `complexity-check` (stage `metrics`, .gitlab-ci.yml) runs `.#code-metrics.complexity-report`, which runs `cargo clippy --all-targets --all-features` with the complexity lints on `packages/default` and `packages/web-ui` on the CI runner. That job is the declared clippy gate. It cannot run on the agent host (AGENTS.md forbids local compilation) and building `complexity-report` on the farm only builds the shell script, so the hosted job is the evidence.
+Hosted pipeline results for MR !356 (GitLab API, https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/<id>):
+- 3110275427 at 1bb3219e: component-tests, state-machine-tests, integration-access, integration-assurance, docs-site-check, dashboard-visibility-tests, cve-processing-test success; integration-delivery and integration-upgrade failed; complexity-check skipped (an earlier job failed). Failure reasons not examined.
+- 3110276535 at fb11f971 (same code as 1bb3219e, task-file commit only): all 10 jobs success, including complexity-check, component-tests (native core package) and state-machine-tests (MCP database targets).
+- 3111546242 at 6b7f7f4e (this round): running when this note was written.
+The clippy exception in the previous note is withdrawn: the farm clippy run (base 675 and head 675 unique complexity diagnostics, none new) is supplemental evidence, and the gate result is the `complexity-check` job of the pipeline for the final head.
 <!-- SECTION:NOTES:END -->
