@@ -265,40 +265,85 @@ fn validate_requested_paths(
 /// Why the cache destinations of a derivation could not be resolved.
 enum CacheResolveError {
     /// A stored cache credential cannot be decrypted. The fault belongs to the
-    /// destination, so dispatch can set the affected environment aside.
-    Undecryptable(crate::queries::cache_destinations::CacheSecretUndecryptable),
+    /// destinations of one environment, so dispatch can set that environment
+    /// aside.
+    Undecryptable {
+        /// Environment whose destinations were being read: the environment the
+        /// derivation resolved to, with `None` for the global fallback.
+        environment_id: Option<uuid::Uuid>,
+        /// Destination, column and static cause. Carries no secret.
+        fault: crate::queries::cache_destinations::CacheSecretUndecryptable,
+    },
     /// Any other failure, already mapped to the response status.
     Status(StatusCode),
 }
 
+/// Maps a failure from destination resolution to its dispatch outcome.
+///
+/// SECURITY: Only [`CacheSecretUndecryptable`] sets an environment aside. Every
+/// other failure keeps the status it had before that fault was typed: an
+/// ambiguous environment is a 409 the operator can act on, and anything else,
+/// including certificate or database failures, is a 500. Skipping an
+/// environment because of an unrelated error would hide that error and dispatch
+/// work the preflight did not clear.
+///
+/// [`CacheSecretUndecryptable`]: crate::queries::cache_destinations::CacheSecretUndecryptable
+fn classify_cache_resolve_error(
+    derivation_id: i32,
+    environment_id: Option<uuid::Uuid>,
+    error: &anyhow::Error,
+) -> CacheResolveError {
+    if let Some(fault) =
+        error.downcast_ref::<crate::queries::cache_destinations::CacheSecretUndecryptable>()
+    {
+        return CacheResolveError::Undecryptable {
+            environment_id,
+            fault: fault.clone(),
+        };
+    }
+    tracing::warn!(
+        derivation_id,
+        "failed to resolve canonical cache destinations: {error}"
+    );
+    // Work admitted before registrations spread across environments is refused
+    // as a conflict the operator can act on, not a server fault.
+    CacheResolveError::Status(
+        if error
+            .downcast_ref::<crate::queries::cache_push::AmbiguousDerivationEnvironment>()
+            .is_some()
+        {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        },
+    )
+}
+
+/// Resolves the eligible cache destinations of a derivation.
+///
+/// This is `eligible_cache_destinations_for_derivation` in two visible steps:
+/// resolve the environment, then read that environment's destinations. The
+/// caller learns which environment a decryption fault belongs to. Destinations
+/// depend on nothing but that environment: its assigned enabled destinations,
+/// or, when it has none, the global ones. A fault therefore affects every job
+/// that resolves to the same environment, and no other job.
 async fn try_resolve_cache_destinations_for_derivation(
     pool: &sqlx::PgPool,
     derivation: &crate::derivations::Derivation,
 ) -> Result<Vec<crate::models::cache_destination::CacheDestination>, CacheResolveError> {
-    crate::queries::cache_push::eligible_cache_destinations_for_derivation(pool, derivation)
-        .await
-        .map_err(|e| {
-            if let Some(fault) =
-                e.downcast_ref::<crate::queries::cache_destinations::CacheSecretUndecryptable>()
-            {
-                return CacheResolveError::Undecryptable(fault.clone());
-            }
-            tracing::warn!(
-                derivation_id = derivation.id,
-                "failed to resolve canonical cache destinations: {e}"
-            );
-            // Work admitted before registrations spread across environments is
-            // refused as a conflict the operator can act on, not a server fault.
-            CacheResolveError::Status(
-                if e.downcast_ref::<crate::queries::cache_push::AmbiguousDerivationEnvironment>()
-                    .is_some()
-                {
-                    StatusCode::CONFLICT
-                } else {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                },
-            )
-        })
+    let environment_id = crate::queries::cache_push::resolve_derivation_environment(
+        pool,
+        derivation.commit_id,
+        &derivation.derivation_name,
+    )
+    .await
+    .map_err(|e| classify_cache_resolve_error(derivation.id, None, &e))?;
+    crate::queries::cache_destinations::eligible_cache_destinations_for_environment(
+        pool,
+        environment_id,
+    )
+    .await
+    .map_err(|e| classify_cache_resolve_error(derivation.id, environment_id, &e))
 }
 
 /// Resolves cache destinations for paths that already hold a claimed job.
@@ -313,7 +358,7 @@ async fn resolve_cache_destinations_for_derivation(
     try_resolve_cache_destinations_for_derivation(pool, derivation)
         .await
         .map_err(|error| match error {
-            CacheResolveError::Undecryptable(fault) => {
+            CacheResolveError::Undecryptable { fault, .. } => {
                 tracing::warn!(
                     derivation_id = derivation.id,
                     destination_id = fault.destination_id,
@@ -3006,22 +3051,39 @@ pub async fn get_next_job(
         {
             Ok(cache_push) => cache_push,
             Err(CacheResolveError::Status(status)) => return Err(status),
-            Err(CacheResolveError::Undecryptable(fault)) => {
+            Err(CacheResolveError::Undecryptable {
+                environment_id,
+                fault,
+            }) => {
                 // SECURITY: Log the destination and column, never a value.
                 tracing::error!(
                     builder_id = %builder_id,
                     job_id = %candidate.id,
-                    environment_id = ?candidate.environment_id,
+                    environment_id = ?environment_id,
                     destination_id = fault.destination_id,
                     destination = %fault.destination_name,
                     column = fault.column,
                     cause = %fault.cause,
                     "cache credential cannot be decrypted; skipping jobs in this environment for this poll"
                 );
-                // INVARIANT: The selection excludes blocked environments, so
-                // a candidate from an already blocked one means the exclusion
-                // is broken. Fail the poll instead of looping on it.
-                if !blocked.insert(candidate.environment_id) {
+                // Set aside the environment whose destinations failed. The
+                // candidate's own environment is the same one unless the
+                // registrations changed between the peek and this read. Then
+                // the candidate is stale: the claim would reject it, because
+                // its environment is no longer current. Setting both aside
+                // keeps the loop moving in that case too.
+                //
+                // INVARIANT: The peek excludes every blocked environment, so
+                // the candidate's environment is new on each pass. At most one
+                // pass per environment, plus one for the global environment,
+                // can occur before the peek finds nothing.
+                let resolved_is_new = blocked.insert(environment_id);
+                let candidate_is_new = blocked.insert(candidate.environment_id);
+                if !(resolved_is_new || candidate_is_new) {
+                    tracing::error!(
+                        job_id = %candidate.id,
+                        "dispatch selected a candidate from an environment it had set aside"
+                    );
                     return Err(StatusCode::INTERNAL_SERVER_ERROR);
                 }
                 continue;
@@ -6156,6 +6218,85 @@ mod tests {
             conflict.reason,
             NextJobConflictReason::UnsupportedExecutionStrategy
         );
+    }
+
+    fn undecryptable_fault() -> crate::queries::cache_destinations::CacheSecretUndecryptable {
+        crate::queries::cache_destinations::CacheSecretUndecryptable {
+            destination_id: 7,
+            destination_name: "campground".into(),
+            column: "attic_token",
+            cause: "failed to decrypt cache secret".into(),
+        }
+    }
+
+    #[test]
+    fn only_the_typed_decryption_fault_sets_an_environment_aside() {
+        use super::{CacheResolveError, classify_cache_resolve_error};
+        let environment = Some(Uuid::new_v4());
+
+        // The typed fault is recognized, bare and under added context, and keeps
+        // the environment it was read for.
+        for error in [
+            anyhow::Error::new(undecryptable_fault()),
+            anyhow::Error::new(undecryptable_fault()).context("reading destinations"),
+        ] {
+            match classify_cache_resolve_error(1, environment, &error) {
+                CacheResolveError::Undecryptable {
+                    environment_id,
+                    fault,
+                } => {
+                    assert_eq!(environment_id, environment);
+                    assert_eq!(fault, undecryptable_fault());
+                }
+                CacheResolveError::Status(status) => panic!("typed fault became {status}"),
+            }
+        }
+
+        // Every other failure keeps its previous status and sets nothing aside.
+        let ambiguous =
+            anyhow::Error::new(crate::queries::cache_push::AmbiguousDerivationEnvironment);
+        assert!(matches!(
+            classify_cache_resolve_error(1, None, &ambiguous),
+            CacheResolveError::Status(StatusCode::CONFLICT)
+        ));
+        for other in [
+            anyhow::anyhow!("certificate field holds private key material"),
+            anyhow::anyhow!("connection reset by peer"),
+            // Same words, but not the typed error: text never triggers a skip.
+            anyhow::anyhow!("failed to decrypt cache secret"),
+        ] {
+            assert!(matches!(
+                classify_cache_resolve_error(1, environment, &other),
+                CacheResolveError::Status(StatusCode::INTERNAL_SERVER_ERROR)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_queue_answer_is_a_credential_free_reason_and_empty_queue_stays_404() {
+        use super::no_candidate_response;
+        use crate::queries::builders::BlockedEnvironments;
+
+        // Nothing set aside: the ordinary empty queue, unchanged.
+        assert_eq!(
+            no_candidate_response(&BlockedEnvironments::default()).unwrap_err(),
+            StatusCode::NOT_FOUND
+        );
+
+        // Something set aside: a 409 whose whole body is the reason.
+        for blocked_environment in [Some(Uuid::new_v4()), None] {
+            let mut blocked = BlockedEnvironments::default();
+            blocked.insert(blocked_environment);
+            let response = no_candidate_response(&blocked).unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({"reason": "cache_secret_undecryptable"})
+            );
+        }
     }
 
     #[test]

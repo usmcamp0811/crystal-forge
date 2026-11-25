@@ -1711,7 +1711,11 @@ mod tests {
             let mut stored = serde_json::to_value(&current).unwrap();
             stored[field] = serde_json::Value::String(combined.clone());
             let stored: CacheDestination = serde_json::from_value(stored).unwrap();
-            let error = decrypt_destination_secrets(stored).unwrap_err().to_string();
+            let error = decrypt_destination_secrets(stored).unwrap_err();
+            // A certificate fault is not a decryption fault: dispatch must not
+            // skip an environment because of it.
+            assert!(error.downcast_ref::<CacheSecretUndecryptable>().is_none());
+            let error = error.to_string();
             assert!(error.contains(field));
             assert!(!error.contains("AQID"));
         }

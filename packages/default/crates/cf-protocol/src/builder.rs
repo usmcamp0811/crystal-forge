@@ -1301,6 +1301,57 @@ mod tests {
         assert!(request.evaluator.is_none());
     }
 
+    /// The reason set as a builder compiled before `cache_secret_undecryptable`
+    /// existed. Frozen on purpose: it stands for builders already deployed.
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
+    enum LegacyNextJobConflictReason {
+        UnsupportedCacheType,
+        UnsupportedExecutionStrategy,
+        IncompatibleEvaluator,
+        IncompatibleSourceDelivery,
+        SourceMaterializationCancelled,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[allow(dead_code)]
+    struct LegacyNextJobConflictResponse {
+        reason: LegacyNextJobConflictReason,
+    }
+
+    #[test]
+    fn rolling_upgrade_older_builders_reject_only_the_new_reason() {
+        // An older builder cannot decode the new reason. Its next-job client
+        // handles a body that does not decode as "unstructured 409", logs a
+        // warning and takes no job, so the new server cannot break it.
+        let body = serde_json::to_vec(&NextJobConflictResponse {
+            reason: NextJobConflictReason::CacheSecretUndecryptable,
+        })
+        .unwrap();
+        assert_eq!(body, br#"{"reason":"cache_secret_undecryptable"}"#);
+        assert!(serde_json::from_slice::<LegacyNextJobConflictResponse>(&body).is_err());
+
+        // Every reason an older server sends still decodes on a newer builder,
+        // and a body from the new server decodes on a newer builder.
+        for reason in [
+            NextJobConflictReason::UnsupportedCacheType,
+            NextJobConflictReason::UnsupportedExecutionStrategy,
+            NextJobConflictReason::IncompatibleEvaluator,
+            NextJobConflictReason::IncompatibleSourceDelivery,
+            NextJobConflictReason::SourceMaterializationCancelled,
+        ] {
+            let body = serde_json::to_vec(&NextJobConflictResponse { reason }).unwrap();
+            assert!(serde_json::from_slice::<LegacyNextJobConflictResponse>(&body).is_ok());
+            assert_eq!(
+                serde_json::from_slice::<NextJobConflictResponse>(&body)
+                    .unwrap()
+                    .reason,
+                reason
+            );
+        }
+    }
+
     #[test]
     fn next_job_conflict_reasons_have_stable_wire_names() {
         for (reason, expected) in [

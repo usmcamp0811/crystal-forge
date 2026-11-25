@@ -518,7 +518,8 @@ SQL
       cross_environment_shared_configuration_fails_closed_until_resolved \
       derivation_environment_rule_is_unique_ambiguous_or_absent \
       explicit_name_and_hostname_fallback_share_one_ambiguity_rule \
-      single_owner_environment_move_rehomes_queued_job
+      single_owner_environment_move_rehomes_queued_job \
+      cache_secret_dispatch_
     echo "=== Selected POA&M authorization, setup, notification, and overdue regressions ==="
     # Current counts and optional assignments have distinct database contracts.
     # Keep these ignored regressions on the normal isolated execution path.

@@ -241,6 +241,29 @@ dispatches after the key or the stored credential is repaired. A builder from
 before this reason existed reads the response as an unstructured 409, takes no
 job and polls again.
 
+Which jobs a fault affects follows from how destinations are chosen. The server
+reads the destinations of the environment that the job's configuration resolves
+to: the enabled destinations assigned to that environment, or, when the
+environment has none, the global destinations (those with no assignment). A
+fault in an assigned destination therefore affects only jobs of that
+environment. A fault in a global destination affects every environment that
+falls back to it, including jobs with no owner environment, and no environment
+that has its own healthy assignment. The server sets aside the environment it
+read the destinations for, and the next selection keeps the queue order among
+the jobs that remain.
+
+The cost of a poll grows with the number of affected environments: one
+selection and one destination read for each, at most once per poll. A poll with
+no fault costs what it did before.
+
+Only a decryption failure sets an environment aside. An ambiguous environment
+keeps its `409` with no body, and any other failure, such as an invalid
+certificate field or a database error, keeps its `500` and fails the poll. A
+replaced stored credential takes effect on the next poll, with no restart. A
+corrected key file needs a server restart: the service wrapper exports the key
+into the server's environment at start. The log line names the destination and
+column and never contains the credential, the stored ciphertext or the key.
+
 This applies to dispatch only. Output and closure publication, which run after a
 claim, still return a server error for the same fault.
 

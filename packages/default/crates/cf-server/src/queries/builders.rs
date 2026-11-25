@@ -3673,64 +3673,563 @@ mod tests {
         (server, source)
     }
 
-    #[sqlx::test(migrations = "./migrations")]
-    #[ignore = "requires isolated migration-backed PostgreSQL"]
-    async fn blocked_environments_hide_only_their_own_jobs_from_both_peeks(pool: PgPool) {
-        let dev: Uuid = sqlx::query_scalar("SELECT id FROM environments WHERE name='dev'")
-            .fetch_one(&pool)
+    async fn environment_named(pool: &PgPool, name: &str) -> Uuid {
+        sqlx::query_scalar("SELECT id FROM environments WHERE name = $1")
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Queues one dispatchable job owned by `environment` (`None`: no owner
+    /// environment) at an explicit queue position. The queue head is the job
+    /// with the highest position, so the position fixes the dispatch order.
+    async fn queued_job_in(pool: &PgPool, environment: Option<Uuid>, position: i32) -> Uuid {
+        let dev = environment_named(pool, "dev").await;
+        let job = artifact_claim_fixture(pool, "external", environment.unwrap_or(dev)).await;
+        if environment.is_none() {
+            // No owner environment: clear it on the registration and the job.
+            sqlx::query(
+                "UPDATE systems s SET environment_id = NULL
+                 FROM build_jobs j
+                 JOIN derivations d ON d.id = j.derivation_id
+                 JOIN commits c ON c.id = d.commit_id
+                 WHERE j.id = $1 AND s.flake_id = c.flake_id",
+            )
+            .bind(job)
+            .execute(pool)
             .await
             .unwrap();
-        let prod: Uuid = sqlx::query_scalar("SELECT id FROM environments WHERE name='prod'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        let dev_job = artifact_claim_fixture(&pool, "external", dev).await;
-        let prod_job = artifact_claim_fixture(&pool, "external", prod).await;
-        let global_job = artifact_claim_fixture(&pool, "external", dev).await;
-        // A job with no owner environment: clear it on the registration and the job.
+            sqlx::query("UPDATE build_jobs SET environment_id = NULL WHERE id = $1")
+                .bind(job)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
         sqlx::query(
-            "UPDATE systems s SET environment_id = NULL
-             FROM build_jobs j
-             JOIN derivations d ON d.id = j.derivation_id
-             JOIN commits c ON c.id = d.commit_id
-             WHERE j.id = $1 AND s.flake_id = c.flake_id",
+            "UPDATE build_jobs SET queue_position = $2, priority_weight = 1.0 WHERE id = $1",
         )
-        .bind(global_job)
-        .execute(&pool)
+        .bind(job)
+        .bind(position)
+        .execute(pool)
         .await
         .unwrap();
-        sqlx::query("UPDATE build_jobs SET environment_id = NULL WHERE id = $1")
-            .bind(global_job)
+        job
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn cache_secret_dispatch_blocked_environments_hide_only_their_own_jobs_from_both_peeks(
+        pool: PgPool,
+    ) {
+        let dev = environment_named(&pool, "dev").await;
+        let prod = environment_named(&pool, "prod").await;
+        let dev_job = queued_job_in(&pool, Some(dev), 1).await;
+        let prod_job = queued_job_in(&pool, Some(prod), 2).await;
+        let global_job = queued_job_in(&pool, None, 3).await;
+        let heads = |server: Option<Uuid>| (server, server);
+
+        // Nothing set aside: the head is the highest queue position.
+        let mut blocked = BlockedEnvironments::default();
+        assert_eq!(peek_heads(&pool, &blocked).await, heads(Some(global_job)));
+
+        // One environment set aside hides only its own jobs. The head moves to
+        // the next position among the jobs that remain.
+        blocked.insert(Some(dev));
+        assert_eq!(peek_heads(&pool, &blocked).await, heads(Some(global_job)));
+        let mut only_global = BlockedEnvironments::default();
+        only_global.insert(None);
+        assert_eq!(peek_heads(&pool, &only_global).await, heads(Some(prod_job)));
+
+        // The NULL environment stays selectable until it is set aside itself.
+        blocked.insert(Some(prod));
+        assert_eq!(peek_heads(&pool, &blocked).await, heads(Some(global_job)));
+        blocked.insert(None);
+        assert_eq!(peek_heads(&pool, &blocked).await, (None, None));
+
+        // Setting aside the other two leaves the lowest position selectable.
+        let mut all_but_dev = BlockedEnvironments::default();
+        all_but_dev.insert(Some(prod));
+        all_but_dev.insert(None);
+        assert_eq!(peek_heads(&pool, &all_but_dev).await, heads(Some(dev_job)));
+    }
+
+    // ---- next-job cache preflight: undecryptable cache credentials ---------
+
+    /// Plaintext stand-in for ciphertext that no key opens. It is stored base64
+    /// encoded in the corrupted column. Neither form, nor the `enc:v1:` prefix,
+    /// may reach a log line or a response.
+    const CACHE_SECRET_MARKER: &str = "TASK544-marker-0123456789abcdefghij";
+
+    /// Adds one Niks3 cache destination. `environment` assigns it to that
+    /// environment, and `None` leaves it global. `undecryptable` replaces its
+    /// stored token with ciphertext that fails authentication under any key.
+    async fn cache_destination_for(
+        pool: &PgPool,
+        name: &str,
+        environment: Option<Uuid>,
+        undecryptable: bool,
+    ) -> i32 {
+        let destination =
+            create_public_niks3_test_cache(pool, name, &format!("https://{name}.example")).await;
+        if undecryptable {
+            let ciphertext = format!(
+                "enc:v1:AAAAAAAAAAAAAAAA.{}",
+                BASE64.encode(CACHE_SECRET_MARKER)
+            );
+            sqlx::query("UPDATE cache_destinations SET niks3_auth_token = $2 WHERE id = $1")
+                .bind(destination.id)
+                .bind(ciphertext)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        if let Some(environment) = environment {
+            sqlx::query(
+                "INSERT INTO cache_destination_environments(cache_destination_id, environment_id)
+                 VALUES ($1, $2)",
+            )
+            .bind(destination.id)
+            .bind(environment)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        destination.id
+    }
+
+    /// Every row dispatch could change: jobs (status, attempts, queue position,
+    /// builder, session, leases, retry state) and their derivations.
+    async fn queue_snapshot(pool: &PgPool) -> (serde_json::Value, serde_json::Value) {
+        let jobs = sqlx::query_scalar(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(j) ORDER BY j.id), '[]'::jsonb) FROM build_jobs j",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let derivations = sqlx::query_scalar(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(d) ORDER BY d.id), '[]'::jsonb) FROM derivations d",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        (jobs, derivations)
+    }
+
+    async fn job_row(pool: &PgPool, job: Uuid) -> serde_json::Value {
+        sqlx::query_scalar("SELECT to_jsonb(j) FROM build_jobs j WHERE j.id = $1")
+            .bind(job)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// A polling builder: one registered builder and the key it signs with.
+    struct Poller {
+        state: crate::handlers::agent_request::CFState,
+        builder: Builder,
+        key: SigningKey,
+    }
+
+    async fn registered_poller(pool: &PgPool, name: &str) -> Poller {
+        let builder = create_active_test_builder(pool, name).await;
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        sqlx::query("UPDATE builders SET public_key = $2 WHERE id = $1")
+            .bind(builder.id)
+            .bind(BASE64.encode(key.verifying_key().to_bytes()))
+            .execute(pool)
+            .await
+            .unwrap();
+        let mut config = crate::config::ServerConfig::default();
+        config.trust_forwarded_builder_https = true;
+        config.trusted_proxy_cidrs = vec!["127.0.0.1/32".into()];
+        let state = crate::handlers::agent_request::CFState::new(
+            pool.clone(),
+            config,
+            std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        Poller {
+            state,
+            builder,
+            key,
+        }
+    }
+
+    /// Sends one signed `POST next-job` through the real handler. Returns the
+    /// status and the JSON body (`Null` when the body is empty), or the status
+    /// the handler rejected the poll with.
+    async fn poll_next_job(
+        poller: &Poller,
+    ) -> Result<(axum::http::StatusCode, serde_json::Value), axum::http::StatusCode> {
+        use axum::{
+            body::Bytes,
+            extract::{ConnectInfo, Path, State},
+            http::{HeaderMap, Method},
+        };
+        use ed25519_dalek::Signer;
+
+        let body = r#"{"capabilities":{"niks3_cache":true}}"#;
+        let path = format!("/api/v1/builders/{}/next-job", poller.builder.id);
+        let timestamp = Utc::now().to_rfc3339();
+        let payload = format!("POST\n{path}\n{timestamp}\n{body}");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Builder-ID",
+            poller.builder.id.to_string().parse().unwrap(),
+        );
+        headers.insert("X-Timestamp", timestamp.parse().unwrap());
+        headers.insert(
+            "X-Signature",
+            BASE64
+                .encode(poller.key.sign(payload.as_bytes()).to_bytes())
+                .parse()
+                .unwrap(),
+        );
+        headers.insert("X-Forwarded-Proto", "https".parse().unwrap());
+        let response = crate::handlers::api::builders::get_next_job(
+            State(poller.state.clone()),
+            Path(poller.builder.id),
+            Some(ConnectInfo("127.0.0.1:47000".parse().unwrap())),
+            Method::POST,
+            headers,
+            Bytes::copy_from_slice(body.as_bytes()),
+        )
+        .await?;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        Ok((status, value))
+    }
+
+    /// Collects every log line a test emits on its own thread, at all levels.
+    #[derive(Clone, Default)]
+    struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl LogCapture {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    fn capture_logs() -> (LogCapture, tracing::subscriber::DefaultGuard) {
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        (capture, tracing::subscriber::set_default(subscriber))
+    }
+
+    /// No credential, ciphertext or key material may appear in a log or body.
+    fn assert_no_secret_material(text: &str) {
+        assert!(
+            !text.contains(CACHE_SECRET_MARKER),
+            "plaintext marker leaked"
+        );
+        assert!(
+            !text.contains(&BASE64.encode(CACHE_SECRET_MARKER)),
+            "ciphertext marker leaked"
+        );
+        assert!(!text.contains("enc:v1:"), "ciphertext envelope leaked");
+    }
+
+    const BLOCKED_BODY: &str = r#"{"reason":"cache_secret_undecryptable"}"#;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn cache_secret_dispatch_mixed_queue_skips_bad_environment_and_keeps_priority(
+        pool: PgPool,
+    ) {
+        use axum::http::StatusCode;
+        let dev = environment_named(&pool, "dev").await;
+        let prod = environment_named(&pool, "prod").await;
+        let staging = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments(id, name) VALUES ($1, 'staging-544')")
+            .bind(staging)
             .execute(&pool)
             .await
             .unwrap();
-        let all = [dev_job, prod_job, global_job];
+        cache_destination_for(&pool, "dev-cache", Some(dev), true).await;
+        cache_destination_for(&pool, "prod-cache", Some(prod), false).await;
+        cache_destination_for(&pool, "staging-cache", Some(staging), false).await;
+        // The undecryptable environment holds the queue head. Among the two
+        // healthy environments the higher position must win.
+        let prod_low = queued_job_in(&pool, Some(prod), 1).await;
+        let staging_mid = queued_job_in(&pool, Some(staging), 2).await;
+        let dev_head = queued_job_in(&pool, Some(dev), 3).await;
+        let dev_before = job_row(&pool, dev_head).await;
+        let poller = registered_poller(&pool, "mixed").await;
+        // Capture only the dispatch, not the fixture setup.
+        let (logs, _guard) = capture_logs();
 
-        let mut blocked = BlockedEnvironments::default();
-        let (server, source) = peek_heads(&pool, &blocked).await;
-        assert!(all.contains(&server.unwrap()));
-        assert!(all.contains(&source.unwrap()));
+        let (status, body) = poll_next_job(&poller).await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["job"]["id"], staging_mid.to_string());
+        let (status, body) = poll_next_job(&poller).await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["job"]["id"], prod_low.to_string());
 
-        // Blocking one environment hides only that environment's jobs.
-        blocked.insert(Some(dev));
-        let (server, source) = peek_heads(&pool, &blocked).await;
-        assert!([prod_job, global_job].contains(&server.unwrap()));
-        assert!([prod_job, global_job].contains(&source.unwrap()));
-
-        let mut only_global = BlockedEnvironments::default();
-        only_global.insert(None);
-        let (server, source) = peek_heads(&pool, &only_global).await;
-        assert!([dev_job, prod_job].contains(&server.unwrap()));
-        assert!([dev_job, prod_job].contains(&source.unwrap()));
-
-        // The NULL environment is selectable until it is blocked itself.
-        blocked.insert(Some(prod));
+        // Only the undecryptable environment remains: nothing is dispatched.
+        let (status, body) = poll_next_job(&poller).await.unwrap();
+        assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(
-            peek_heads(&pool, &blocked).await,
-            (Some(global_job), Some(global_job))
+            body,
+            serde_json::from_str::<serde_json::Value>(BLOCKED_BODY).unwrap()
         );
-        blocked.insert(None);
-        assert_eq!(peek_heads(&pool, &blocked).await, (None, None));
+
+        // The skipped job was never touched: same status, attempts, position,
+        // builder, session, lease times and retry state.
+        assert_eq!(job_row(&pool, dev_head).await, dev_before);
+        assert_eq!(dev_before["status"], "queued");
+        let text = logs.text();
+        assert!(
+            text.contains("dev-cache") && text.contains("niks3_auth_token"),
+            "{text}"
+        );
+        assert_no_secret_material(&text);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn cache_secret_dispatch_fully_blocked_queue_answers_409_and_changes_nothing(
+        pool: PgPool,
+    ) {
+        use axum::http::StatusCode;
+        let dev = environment_named(&pool, "dev").await;
+        let prod = environment_named(&pool, "prod").await;
+        cache_destination_for(&pool, "dev-cache", Some(dev), true).await;
+        cache_destination_for(&pool, "prod-cache", Some(prod), true).await;
+        // No assignment: global, and the NULL environment falls back to it.
+        cache_destination_for(&pool, "global-cache", None, true).await;
+        queued_job_in(&pool, Some(dev), 1).await;
+        queued_job_in(&pool, Some(prod), 2).await;
+        queued_job_in(&pool, None, 3).await;
+        let before = queue_snapshot(&pool).await;
+        let poller = registered_poller(&pool, "blocked").await;
+        // Capture only the dispatch, not the fixture setup.
+        let (logs, _guard) = capture_logs();
+
+        for _ in 0..2 {
+            let (status, body) = poll_next_job(&poller).await.unwrap();
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(
+                body,
+                serde_json::from_str::<serde_json::Value>(BLOCKED_BODY).unwrap()
+            );
+            assert_eq!(queue_snapshot(&pool).await, before);
+        }
+
+        // Termination and cost: each poll sets aside every environment once and
+        // then stops. Three environments (dev, prod, global) over two polls log
+        // exactly six faults, so a poll costs one selection per environment.
+        let text = logs.text();
+        assert_eq!(
+            text.matches("cache credential cannot be decrypted").count(),
+            6,
+            "{text}"
+        );
+        for name in ["dev-cache", "prod-cache", "global-cache"] {
+            assert_eq!(text.matches(name).count(), 2, "{name}: {text}");
+        }
+        assert_no_secret_material(&text);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn cache_secret_dispatch_empty_queue_stays_404(pool: PgPool) {
+        use axum::http::StatusCode;
+        // A bad destination with no job behind it is not a reason to answer 409.
+        let dev = environment_named(&pool, "dev").await;
+        cache_destination_for(&pool, "dev-cache", Some(dev), true).await;
+        let poller = registered_poller(&pool, "empty").await;
+
+        assert_eq!(
+            poll_next_job(&poller).await.unwrap_err(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn cache_secret_dispatch_global_fault_hits_only_environments_that_fall_back_to_it(
+        pool: PgPool,
+    ) {
+        use axum::http::StatusCode;
+        let dev = environment_named(&pool, "dev").await;
+        let prod = environment_named(&pool, "prod").await;
+        // Global and undecryptable. Only prod has an assigned healthy
+        // destination, which overrides the global one for prod alone.
+        cache_destination_for(&pool, "global-cache", None, true).await;
+        cache_destination_for(&pool, "prod-cache", Some(prod), false).await;
+        let prod_job = queued_job_in(&pool, Some(prod), 1).await;
+        let dev_job = queued_job_in(&pool, Some(dev), 2).await;
+        let global_job = queued_job_in(&pool, None, 3).await;
+        let (dev_before, global_before) = (
+            job_row(&pool, dev_job).await,
+            job_row(&pool, global_job).await,
+        );
+        let poller = registered_poller(&pool, "global").await;
+
+        let (status, body) = poll_next_job(&poller).await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["job"]["id"], prod_job.to_string());
+        let (status, _) = poll_next_job(&poller).await.unwrap();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(job_row(&pool, dev_job).await, dev_before);
+        assert_eq!(job_row(&pool, global_job).await, global_before);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn cache_secret_dispatch_recovers_without_a_restart_when_the_credential_is_fixed(
+        pool: PgPool,
+    ) {
+        use axum::http::StatusCode;
+        let dev = environment_named(&pool, "dev").await;
+        let cache = cache_destination_for(&pool, "dev-cache", Some(dev), true).await;
+        let job = queued_job_in(&pool, Some(dev), 1).await;
+        let poller = registered_poller(&pool, "recover").await;
+
+        let (status, _) = poll_next_job(&poller).await.unwrap();
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        // An operator stores the credential again. It is encrypted with the
+        // key this process already holds. The same server state and the same
+        // builder poll again, and the job dispatches.
+        let fixed = crate::security::cache_secrets::encrypt_secret("fixture-write-token").unwrap();
+        sqlx::query("UPDATE cache_destinations SET niks3_auth_token = $2 WHERE id = $1")
+            .bind(cache)
+            .bind(fixed)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (status, body) = poll_next_job(&poller).await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["job"]["id"], job.to_string());
+        assert_eq!(job_row(&pool, job).await["status"], "building");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn cache_secret_dispatch_unrelated_failure_still_fails_the_poll(pool: PgPool) {
+        use axum::http::StatusCode;
+        let dev = environment_named(&pool, "dev").await;
+        let prod = environment_named(&pool, "prod").await;
+        let broken = cache_destination_for(&pool, "dev-cache", Some(dev), false).await;
+        cache_destination_for(&pool, "prod-cache", Some(prod), false).await;
+        // A certificate field holding private key material fails the read gate.
+        // That is not a decryption fault, so it must keep its old behavior: the
+        // poll fails with a server error, and no environment is skipped.
+        sqlx::query(
+            "UPDATE cache_destinations SET
+                niks3_read_auth_mode = 'mtls',
+                niks3_read_client_cert = $2,
+                niks3_read_client_key = 'read-key',
+                niks3_read_ca_cert = $3
+             WHERE id = $1",
+        )
+        .bind(broken)
+        .bind(crate::security::cache_secrets::TEST_CERTIFICATE)
+        .bind(format!(
+            "{}-----BEGIN PRIVATE KEY-----\nAQID\n-----END PRIVATE KEY-----",
+            crate::security::cache_secrets::TEST_CERTIFICATE
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        queued_job_in(&pool, Some(prod), 1).await;
+        queued_job_in(&pool, Some(dev), 2).await;
+        let before = queue_snapshot(&pool).await;
+        let poller = registered_poller(&pool, "unrelated").await;
+
+        assert_eq!(
+            poll_next_job(&poller).await.unwrap_err(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(queue_snapshot(&pool).await, before);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn cache_secret_dispatch_concurrent_polls_claim_each_healthy_job_once(pool: PgPool) {
+        use axum::http::StatusCode;
+        let dev = environment_named(&pool, "dev").await;
+        let prod = environment_named(&pool, "prod").await;
+        cache_destination_for(&pool, "dev-cache", Some(dev), true).await;
+        cache_destination_for(&pool, "prod-cache", Some(prod), false).await;
+        let prod_jobs = [
+            queued_job_in(&pool, Some(prod), 1).await,
+            queued_job_in(&pool, Some(prod), 2).await,
+        ];
+        let dev_head = queued_job_in(&pool, Some(dev), 3).await;
+        let dev_before = job_row(&pool, dev_head).await;
+        let (first, second) = (
+            registered_poller(&pool, "one").await,
+            registered_poller(&pool, "two").await,
+        );
+
+        // Four polls race for two healthy jobs behind an undecryptable head.
+        let outcomes = tokio::join!(
+            poll_next_job(&first),
+            poll_next_job(&second),
+            poll_next_job(&first),
+            poll_next_job(&second)
+        );
+        let outcomes = [outcomes.0, outcomes.1, outcomes.2, outcomes.3];
+
+        let mut claimed = Vec::new();
+        for outcome in &outcomes {
+            match outcome {
+                Ok((StatusCode::OK, body)) => {
+                    claimed.push(body["job"]["id"].as_str().unwrap().to_owned())
+                }
+                // A poll that loses the race gets no job. Either it lost the
+                // claim (404) or it arrived after both healthy jobs were gone
+                // and found only the undecryptable environment (409).
+                Err(StatusCode::NOT_FOUND) | Ok((StatusCode::CONFLICT, _)) => {}
+                other => panic!("unexpected outcome {other:?}"),
+            }
+        }
+        claimed.sort();
+        let mut expected: Vec<_> = prod_jobs.iter().map(Uuid::to_string).collect();
+        expected.sort();
+        assert_eq!(
+            claimed, expected,
+            "each healthy job is claimed exactly once"
+        );
+        for job in prod_jobs {
+            let row = job_row(&pool, job).await;
+            assert_eq!(row["status"], "building");
+            assert!(row["builder_id"].is_string());
+        }
+        assert_eq!(job_row(&pool, dev_head).await, dev_before);
     }
 
     #[sqlx::test(migrations = "./migrations")]

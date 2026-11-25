@@ -2132,6 +2132,94 @@ mod tests {
         server.await.unwrap();
     }
 
+    /// Serves `responses` in order, one per connection, and closes each
+    /// connection after answering. Returns the base URL and the server task.
+    async fn canned_next_job_server(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                // Read the whole request first, so the answer is not a reset.
+                let mut bytes = Vec::new();
+                loop {
+                    let mut chunk = [0; 1024];
+                    let size = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(size, 0);
+                    bytes.extend_from_slice(&chunk[..size]);
+                    let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .map_or(0, |value| value.trim().parse::<usize>().unwrap());
+                    if bytes.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (url, server)
+    }
+
+    fn next_job_test_client(server_url: String) -> BuilderApiClient {
+        BuilderApiClient {
+            client: Client::builder().no_proxy().build().unwrap(),
+            server_url,
+            builder_id: Uuid::new_v4(),
+            builder_session_id: Uuid::new_v4(),
+            signing_key: SigningKey::generate(&mut rand::thread_rng()),
+            supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
+            supported_evaluator_contract_versions: Vec::new(),
+            evaluator: None,
+            capabilities: BuilderCapabilities::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_secret_conflict_takes_no_job_and_the_client_keeps_polling() {
+        let (url, server) = canned_next_job_server(vec![
+            // The new reason: no job, not an error.
+            (409, r#"{"reason":"cache_secret_undecryptable"}"#),
+            // A reason from a future server is the same: no job, not an error.
+            (409, r#"{"reason":"a_reason_added_later"}"#),
+            // The very next poll is an ordinary empty queue.
+            (404, ""),
+            // An older server answers the same fault with an empty 500.
+            (500, ""),
+            // And the client still polls after that error.
+            (404, ""),
+        ])
+        .await;
+        let client = next_job_test_client(url);
+
+        assert!(client.get_next_job().await.unwrap().is_none());
+        assert!(client.get_next_job().await.unwrap().is_none());
+        assert!(client.get_next_job().await.unwrap().is_none());
+
+        let error = client.get_next_job().await.unwrap_err().to_string();
+        assert!(error.contains("500"), "{error}");
+        assert!(error.contains("no response body"), "{error}");
+        assert!(
+            !error.trim_end().ends_with(':'),
+            "blank error text: {error}"
+        );
+
+        assert!(client.get_next_job().await.unwrap().is_none());
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn niks3_completion_signs_destination_id_and_omits_it_without_push() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
