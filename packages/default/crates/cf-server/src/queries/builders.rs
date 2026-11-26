@@ -4217,8 +4217,31 @@ mod tests {
                 other => panic!("unexpected outcome {other:?}"),
             }
         }
+        // What the race guarantees: at least one poll wins, no job is claimed
+        // twice, and only healthy jobs are claimed. It does not guarantee that
+        // both jobs are claimed in this round: a poll whose previewed job was
+        // taken by another builder gets 404 and must not substitute another.
+        assert!(!claimed.is_empty(), "no racing poll won a job");
+        let distinct: std::collections::BTreeSet<_> = claimed.iter().collect();
+        assert_eq!(distinct.len(), claimed.len(), "a job was claimed twice");
+        let healthy: Vec<_> = prod_jobs.iter().map(Uuid::to_string).collect();
+        assert!(claimed.iter().all(|id| healthy.contains(id)), "{claimed:?}");
+
+        // Whatever the race left behind is still dispatchable. Poll until both
+        // healthy jobs are taken. The bound is generous; it only stops a hang.
+        for _ in 0..4 {
+            match poll_next_job(&first).await {
+                Ok((StatusCode::OK, body)) => {
+                    let id = body["job"]["id"].as_str().unwrap().to_owned();
+                    assert!(!claimed.contains(&id), "a job was claimed twice");
+                    claimed.push(id);
+                }
+                Err(StatusCode::NOT_FOUND) | Ok((StatusCode::CONFLICT, _)) => {}
+                other => panic!("unexpected outcome {other:?}"),
+            }
+        }
         claimed.sort();
-        let mut expected: Vec<_> = prod_jobs.iter().map(Uuid::to_string).collect();
+        let mut expected = healthy;
         expected.sort();
         assert_eq!(
             claimed, expected,
@@ -4229,6 +4252,7 @@ mod tests {
             assert_eq!(row["status"], "building");
             assert!(row["builder_id"].is_string());
         }
+        // The undecryptable head was never touched, by any poll.
         assert_eq!(job_row(&pool, dev_head).await, dev_before);
     }
 
