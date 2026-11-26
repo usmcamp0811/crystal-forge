@@ -650,6 +650,16 @@ their metadata, so every commit runs every scenario; shared prerequisites
 generator's fail-closed cases, scenario evidence collection after success and
 failure, and the parent wiring.
 
+### CI measurements
+
+`packages/ci/pipeline-timings.py` summarizes a pipeline from GitLab API JSON
+(pipeline, jobs, and child pipeline jobs): wall time, time to the first job
+start and first successful job, per-job queue and run time, total runner time,
+and the job that finished last. `nix-ci.sh` adds per-build substitution and
+build counts to `ci-metrics/nix.jsonl`; the database suites print `START`/`END`
+phase lines and `DATABASE_SELECTION` counts. Measured baselines and results
+are recorded in the TASK-542.1 task notes, not here.
+
 ### `builder-evaluator-packaging`
 
 Current successors: [module assertions](../../../modules/nixos/crystal-forge/tests/packaging.nix) and [installed runtime probes](../../../modules/nixos/crystal-forge/tests/packaging.sh). The root and nested module-validation derivations described below are removed.
