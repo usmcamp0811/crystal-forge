@@ -637,7 +637,8 @@ per scenario:
 
 Generation fails closed: evaluation aborts when no owner exists, an owner
 registers no scenario, an owner aggregate's `entries` differ from its
-`scenarios` (name or gate output), or a name is not a safe job name; the
+`scenarios` (attribute names only; comparing gate outputs would instantiate every
+VM test and delay all scenario jobs), or a name is not a safe job name; the
 script also fails when the job count differs from the registered scenario
 count. A newly registered scenario appears in the child pipeline without a
 YAML change. The evidence rules are unchanged: a gate is the only pass

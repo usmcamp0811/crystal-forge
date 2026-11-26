@@ -11,13 +11,17 @@
 # INVARIANT (fail closed): evaluation aborts unless
 #   - at least one owner exists and every owner registers at least one
 #     scenario;
-#   - every owner aggregate links exactly its registered scenarios, with the
-#     same gate outputs (`aggregate.entries` equals `scenarios`), so building
-#     every generated job is building every gate of every aggregate;
+#   - every owner aggregate links exactly its registered scenarios (the names
+#     in `aggregate.entries` equal the names in `scenarios`), so building every
+#     generated job is building every gate of every aggregate. Only attribute
+#     names are compared. Comparing gate outputs would instantiate every NixOS
+#     VM test during generation, which delayed all scenario jobs by minutes on
+#     a cold runner. The aggregate links each `scenarios` value by
+#     construction, so equal names mean equal gates;
 #   - every owner and scenario name is a safe job and attribute name.
 # The output is JSON, which GitLab accepts as YAML.
 checks: let
-  inherit (builtins) attrNames concatMap filter listToAttrs mapAttrs match all;
+  inherit (builtins) attrNames concatMap filter listToAttrs match all;
   owners = filter (name: match "integration-.*" name != null && checks.${name} ? scenarios)
     (attrNames checks);
   safe = name: match "[A-Za-z0-9_-]+" name != null;
@@ -31,12 +35,11 @@ checks: let
     aggregate = checks.${owner};
     scenarios = aggregate.scenarios;
     names = attrNames scenarios;
-    entries = mapAttrs (_: toString) (aggregate.entries or (throw "${owner}: aggregate has no entries"));
-    gates = mapAttrs (_: gate: gate.outPath) scenarios;
+    entries = attrNames (aggregate.entries or (throw "integration pipeline: ${owner} aggregate has no entries"));
   in
     if names == []
     then throw "integration pipeline: ${owner} registers no scenarios"
-    else if entries != gates
+    else if entries != names
     then throw "integration pipeline: ${owner} aggregate entries differ from its scenarios"
     else if !(all safe ([owner] ++ names))
     then throw "integration pipeline: unsafe owner or scenario name in ${owner}"

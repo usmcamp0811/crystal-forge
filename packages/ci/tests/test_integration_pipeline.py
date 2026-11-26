@@ -75,9 +75,9 @@ def check_generator():
         "aggregate differs": synthetic(
             {"integration-access": ["one", "two"]},
             entries_override={"integration-access": '"one" = "/nix/store/integration-access-one";'}),
-        "different gate output": synthetic(
+        "extra linked gate": synthetic(
             {"integration-access": ["one"]},
-            entries_override={"integration-access": '"one" = "/nix/store/stale";'}),
+            entries_override={"integration-access": '"one" = "x"; "extra" = "y";'}),
         "unsafe name": synthetic({"integration-access": ["bad name"]}),
         "no owners": '{ "unrelated" = { }; }',
     }
