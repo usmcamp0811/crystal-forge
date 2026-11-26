@@ -50,6 +50,9 @@ if args[:1] == ["config"] and "show" in args:
         print(options.get(name, os.environ.get("MARKER", "")))
     sys.exit(0)
 if args[:2] == ["store", "info"]:
+    if "--json" in args and "--store" not in args:
+        print('{"trusted":' + os.environ.get("TRUSTED", "1") + ',"url":"daemon"}')
+        sys.exit(0)
     sys.exit(1 if os.environ.get("CACHE_DOWN") else 0)
 if args[:1] == ["build"]:
     print("building '/nix/store/aaaa-one.drv'...", file=sys.stderr)
@@ -161,10 +164,14 @@ def main():
         result, calls, records = run(["develop", ".#sqlx", "-c", "true"], directory)
         assert result.returncode == 0 and not records
         assert calls[-1][0] == "develop" and "--fallback" in calls[-1]
-        assert not any(call[:2] == ["store", "info"] for call in calls)
+        assert not any(call[:2] == ["store", "info"] and "--store" in call for call in calls)
 
         result, calls, _ = run(["--check-config"], directory)
         assert result.returncode == 0 and not builds(calls)
+        assert "NixCiTrust daemon=trusted" in result.stdout
+        result, _, _ = run(["--check-config"], directory, TRUSTED="0")
+        assert "NixCiTrust daemon=untrusted" in result.stdout
+        assert "does not trust this user" in result.stderr
         assert run([], directory)[0].returncode == 2
 
     check_pipeline_uses_policy()

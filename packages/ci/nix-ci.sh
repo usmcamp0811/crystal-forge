@@ -131,6 +131,21 @@ validate_policy() {
   done
   printf 'NixCiPolicy substituters=%s,%s require-sigs=true fallback=true\n' \
     "$NIKS3_URL" "$NIXOS_URL"
+  # The daemon applies restricted client settings (substituters, keys,
+  # builders) only for a trusted user; otherwise its own configuration wins.
+  # CI jobs run as root, which the daemon trusts. Report the actual state so
+  # an ignored policy is visible in the log rather than assumed.
+  trust=unknown
+  if info=$(nix store info --json 2>/dev/null); then
+    case "$info" in
+      *'"trusted":1'*|*'"trusted": 1'*|*'"trusted":true'*) trust=trusted ;;
+      *'"trusted":0'*|*'"trusted": 0'*|*'"trusted":false'*) trust=untrusted ;;
+    esac
+  fi
+  printf 'NixCiTrust daemon=%s\n' "$trust"
+  if [ "$trust" = untrusted ]; then
+    printf 'nix-ci: WARNING the Nix daemon does not trust this user; it ignores the cache and resource settings above.\n' >&2
+  fi
   printf 'NixCiResources max-jobs=%s cores=%s builders=%s\n' \
     "${max_jobs:-inherited}" "${cores:-inherited}" \
     "$( [ "$local_only" = 1 ] && echo none || echo inherited )"
