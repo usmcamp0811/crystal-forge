@@ -4,7 +4,7 @@ title: MCP list_system_scans and latest sealed scan fallback
 status: In Progress
 assignee: []
 created_date: '2026-11-24T14:39:00Z'
-updated_date: '2026-11-25T02:29:00Z'
+updated_date: '2026-11-26T04:11:18Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-542
@@ -115,4 +115,8 @@ Hosted pipeline results for MR !356 (GitLab API, https://gitlab.com/crystal-forg
 - 3110276535 at fb11f971 (same code as 1bb3219e, task-file commit only): all 10 jobs success, including complexity-check, component-tests (native core package) and state-machine-tests (MCP database targets).
 - 3111546242 at 6b7f7f4e (this round): running when this note was written.
 The clippy exception in the previous note is withdrawn: the farm clippy run (base 675 and head 675 unique complexity diagnostics, none new) is supplemental evidence, and the gate result is the `complexity-check` job of the pipeline for the final head.
+
+## Owner scope exception (2026-11-26)
+The owner explicitly extended MR !356 to include a CI performance and infrastructure refactor, as an exception to the AGENTS.md one-slice-per-MR rule (asked and answered in session). The CI work goes on this branch in separate logical commits (cache policy, pipeline scheduling, Rust compilation reuse, integration scenario scheduling). The original TASK-542.1 acceptance criteria are unchanged. !356 stays Draft until both the original criteria and the CI verification requirements are met.
+Cache trust decision (owner, 2026-11-26): all CI jobs may substitute from Niks3 and cache.nixos.org; only pipelines on protected refs with a protected CI variable may publish to Niks3. MR pipelines never publish.
 <!-- SECTION:NOTES:END -->
