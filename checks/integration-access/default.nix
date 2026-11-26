@@ -3,9 +3,8 @@
 # share one registered scenario. Missing Access obligations
 # are listed in docs/knowledge/testing/integration-coverage-map.md.
 #
-# CI: GitLab runs each registered scenario gate as its own required job in the
-# child pipeline generated from `scenarios` (packages/ci/integration-pipeline.nix);
-# generation fails unless this aggregate links exactly those scenarios. Legacy
+# CI: GitLab runs each registered scenario gate as a required job in the
+# generated child pipeline (packages/ci/integration-pipeline.nix). Legacy
 # suite retirement has explicit owner approval before replacement coverage is
 # complete (TASK-490.24). This partial owner proves selected behaviors; the
 # coverage map records missing obligations.

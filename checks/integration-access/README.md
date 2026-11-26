@@ -289,48 +289,36 @@ Documentation follow-ups do not require another VM run.
 
 ## GitLab CI
 
-Since TASK-542.1, GitLab runs every registered scenario as its own required
-job in the generated `integration-scenarios` child pipeline (see
-[integration scheduling](../../docs/knowledge/testing/flake-checks.md#integration-scheduling)).
-The job for this owner's scenario runs:
+GitLab runs each registered scenario of every owner as its own required job
+in a child pipeline generated from the owners' `scenarios` sets
+(`packages/ci/integration-pipeline.nix`). For this owner the job runs:
 
 ```bash
 sh packages/ci/integration-owner-build.sh integration-access lifecycle-local-bootstrap
 ```
 
-It builds the scenario gate
-`.#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap`
-through `packages/ci/nix-ci.sh` (see
-[CI cache and resource policy](../../docs/knowledge/testing/flake-checks.md#ci-cache-and-resource-policy)).
-Without the scenario argument the script builds the normal owner aggregate,
-the developer command.
+The script builds the scenario gate
+`.#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap`.
 It never builds a `.run` output as the gate. A `.run` output can build
 successfully while its `result.json` records a failed scenario.
 
 Evidence goes to `integration-evidence/integration-access/`, uploaded with
 `artifacts: when: always`:
 
-- `<scenario>.nix-build.log` (scenario job) or `nix-build.log` (owner
-  aggregate) — the complete build output.
+- `<scenario>.nix-build.log` — the complete build output.
 - `<scenario>/` — real files, not Nix store symlinks: `result.json`,
   `meta.json`, `browser/` (results, screenshots, console logs), and
   `journals/`.
 
-After a successful build, the script copies `result/<scenario>/evidence/`. If
-the build succeeded but evidence is missing, the job fails. After a failed
-build, the `result` link does not exist. The script then resolves each
-registered scenario's `.run.outPath` through evaluation and copies only outputs
-that already exist, including the last listed scenario (the listing has no final
-newline). A copy failure is reported and counted; it does not replace the build
-status, and the remaining scenarios are still collected. The script never builds
-a `.run` derivation, because a crash or timeout could run the VM again and
-replace the original attempt's evidence. After a failed build it always exits
-with the original build status. After a successful build, a missing or
-uncopyable evidence directory fails the job. The scenario names come from the
-owner's own `scenarios` attribute set; the script keeps no second list.
+After a successful build the script copies the gate's `evidence/`; missing or
+uncopyable evidence fails the job. After a failed build it resolves the
+scenario's `.run.outPath` through evaluation and copies it only if it already
+exists, then exits with the original build status. It never builds a `.run`
+derivation, because a crash or timeout could run the VM again and replace the
+original attempt's evidence.
 
-Run the same script locally from the repository root. It removes a stale
-`result` link and writes `integration-evidence/`, which Git ignores.
+Run the same script locally from the repository root; it writes
+`integration-evidence/`, which Git ignores.
 
 Shared mechanics live under `lib/integration-test/`, exposed through
 `lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }`.

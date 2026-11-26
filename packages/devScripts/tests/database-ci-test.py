@@ -34,7 +34,7 @@ execution = "export CARGO_NET_OFFLINE=true SQLX_OFFLINE=true\n" + "\n".join(
 assert execution.count("-- -t=false up") == 1
 # Deliver interruption to the launcher PID, not an intermediate CI shell that
 # can leave its foreground child running after that shell terminates.
-execution = execution.replace("\nnix run ", "\nexec nix run ", 1)
+execution = re.sub(r"\n(\s*)nix run ", r"\n\1exec nix run ", execution, count=1)
 offline = [
     "--offline", "--option", "substituters", "", "--option", "substitute", "false",
     "--option", "builders", "", "--option", "fallback", "false",

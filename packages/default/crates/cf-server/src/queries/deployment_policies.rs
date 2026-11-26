@@ -2161,14 +2161,8 @@ mod tests {
             .expect("clean user");
     }
 
-    /// Returns the crate migrations directory. Cargo sets `CARGO_MANIFEST_DIR`
-    /// at run time as well as at compile time; the run-time value wins so that
-    /// a prebuilt test executable (TASK-542.1) reads the checkout, not the
-    /// compile-time build directory that no longer exists.
     fn migrations_dir() -> PathBuf {
-        std::env::var_os("CARGO_MANIFEST_DIR")
-            .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")), PathBuf::from)
-            .join("migrations")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations")
     }
 
     async fn apply_migrations_through(pool: &sqlx::PgPool, max_version: i64) {

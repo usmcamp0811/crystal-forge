@@ -1,1 +1,0 @@
-{"job":"local","command":"build","installables":[".#code-metrics.complexity-report"],"exit":0,"seconds":15,"cache_health":"available","built":0,"substituted":{"niks3":9,"cache.nixos.org":8,"other":0}}

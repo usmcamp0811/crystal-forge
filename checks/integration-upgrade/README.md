@@ -34,14 +34,14 @@ their inputs through current server APIs.
 Run the normal required gate:
 
 ```sh
-sh packages/ci/integration-owner-build.sh integration-upgrade
+nix build .#checks.x86_64-linux.integration-upgrade -L
 ```
 
-The helper builds through `packages/ci/nix-ci.sh` (shared cache, runner-host
-builder settings), preserves the aggregate's
-actual exit status, and copies available evidence to
-`integration-evidence/integration-upgrade/version-transition/`. A focused gate is
-`checks.x86_64-linux.integration-upgrade.scenarios.version-transition`.
+CI runs the scenario gate
+`checks.x86_64-linux.integration-upgrade.scenarios.version-transition` with
+`sh packages/ci/integration-owner-build.sh integration-upgrade version-transition`,
+which keeps the build's exit status and copies available evidence to
+`integration-evidence/integration-upgrade/version-transition/`.
 Its `.run` output is evidence only. It is not a passing gate.
 
 ## Controlled maintenance boundary

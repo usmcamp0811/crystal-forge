@@ -84,7 +84,7 @@ TASK-500 separately tracks Started/success history presentation and the design
 strategy-label discrepancy; screenshots do not approve those differences.
 
 ```bash
-sh packages/ci/integration-owner-build.sh integration-delivery
+nix build .#checks.x86_64-linux.integration-delivery -L
 ```
 
 The normal aggregate requires every case. Its `.run` output is evidence only.

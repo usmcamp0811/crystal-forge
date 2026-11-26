@@ -1564,11 +1564,7 @@ mod tests {
         let fixture_suffix =
             std::path::Path::new("docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json");
         let mut candidates = Vec::new();
-        // Prefer the run-time manifest directory over the compile-time one.
-        let mut ancestor = std::env::var_os("CARGO_MANIFEST_DIR").map_or_else(
-            || std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
-            std::path::PathBuf::from,
-        );
+        let mut ancestor = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
             candidates.push(ancestor.join(fixture_suffix));
             if !ancestor.pop() {

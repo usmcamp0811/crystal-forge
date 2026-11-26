@@ -98,11 +98,13 @@ scenario gates. Meaningful WIP checks may be discoverable; there is no
 completeness flag. A passing registered subset does not prove missing
 obligations.
 
-Implemented integration owners run automatically in GitLab. The four owner
-jobs are required on merge requests and `main`. For example, Access runs
-`sh packages/ci/integration-owner-build.sh integration-access`, which builds the
-normal owner aggregate (never a `.run` output) and exports evidence files to
-`integration-evidence/integration-access/`, including after a failed build.
+Implemented integration owners run automatically in GitLab and are required on
+merge requests and `main`. Each registered scenario gate is its own job in a
+child pipeline generated from the owners' `scenarios` sets
+(`packages/ci/integration-pipeline.nix`). A job runs
+`sh packages/ci/integration-owner-build.sh <owner> <scenario>`, which builds
+the gate (never a `.run` output) and exports evidence files to
+`integration-evidence/<owner>/<scenario>/`, including after a failed build.
 TASK-490.24 authorizes retirement of the nine legacy suite directories before
 replacement coverage is complete. `legacy-flake-check`, `web-ui-check`, and
 `web-ui-baseline-candidates` are removed. One explicit `component-tests` job
@@ -178,7 +180,7 @@ real predecessor transition. Their registration does not prove complete coverage
 the coverage map separates local results from final integrated and hosted proof.
 Delivery's `delivery-lifecycle` registers real Git/native evaluation, API-only
 builders and target-agent proof. Run its normal aggregate with
-`sh packages/ci/integration-owner-build.sh integration-delivery`; exact tested
+`nix build .#checks.x86_64-linux.integration-delivery -L`; exact tested
 revisions and remaining obligations are in the coverage map.
 Final completion requires exactly four TOTAL attributes, plus complete accepted
 coverage and execution evidence. Evaluate the full set (not a filtered subset):
@@ -195,19 +197,23 @@ the removed wrappers with another registry or aggregation framework.
 
 ## Consolidated component verification
 
-The explicit `component-tests` job in `.gitlab-ci.yml` runs these commands on
-merge requests and `main`. Ordinary core tests own nonignored server library/bin
+The `component-tests` and `integration-pipeline` jobs in `.gitlab-ci.yml` run
+these commands on merge requests and `main` (`integration-pipeline` builds
+`cf-server-drv`, `cf-agent-drv` and `cf-builder-drv` before the scenario jobs). Ordinary core tests own nonignored server library/bin
 tests, all thirteen unchanged `cf-config` CA library tests, 41 `cf-protocol`
 tests and the three pure export targets (13 tests). Core supplies
 `check-jsonschema`, `xmllint` and `CF_TEST_OSCAL_SCHEMAS` explicitly. Core `postCheck`
 owns real Nix inspection, observation, snapshot isolation, source parity and
-Go/Rust CA dataset comparison. These checks do not repeat in the embedded build.
+Go/Rust CA dataset comparison. The embedded build (`cf-server-drv`) runs no tests
+(`doCheck = false`): its only extra library code, `handlers::ui`, is exercised by
+every integration scenario, and testing it would recompile `cf-server` and rerun
+the core suite.
 
 ```bash
 for component in cf-server-core-drv cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv; do
-  sh packages/ci/nix-ci.sh build ".#default.$component" -L --show-trace
+  nix build ".#default.$component" -L --show-trace
 done
-sh packages/ci/nix-ci.sh build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace
+nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace
 
 for suite in builder-cve stig packaging; do
   nix eval --impure --json --expr "
@@ -257,25 +263,11 @@ Prepare the launcher, SQLx environment and locked Cargo sources separately.
 Only this preparation phase permits network acquisition:
 
 ```bash
-sh packages/ci/nix-ci.sh build .#devScripts.state-machine-test .#devScripts.cve-test \
+nix build .#devScripts.state-machine-test .#devScripts.cve-test \
   .#devScripts.dashboard-visibility-test --no-link
-sh packages/ci/nix-ci.sh build .#default.cf-database-test-executables \
-  --out-link database-test-executables
-sh packages/ci/nix-ci.sh develop .#sqlx \
+nix develop .#sqlx \
   -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
 ```
-
-The `cf-database-test-executables` build compiles the database test configuration once
-(TASK-542.1): the full workspace, `test` profile, default features and
-`SQLX_OFFLINE=true`, as plain `cargo test` did inside each suite. Export
-`CF_PREBUILT_TEST_EXECUTABLES=$(readlink -f database-test-executables)` before
-the offline run below and every `cargo test` selection runs those executables
-through `packages/devScripts/tests/prebuilt-cargo-test.sh` instead of
-compiling. The selection guard in `database-environment.sh` still lists,
-counts and compares every selection. Prebuilt mode fails closed: a missing
-manifest or executable, an unknown target, or an unsupported Cargo option is an
-error and never compiles or fetches. Leave the variable unset to compile with
-Cargo, which coverage runs do.
 
 Run one prepared database workflow offline. Select `state-machine-test`,
 `cve-test`, or `dashboard-visibility-test` explicitly:
@@ -501,7 +493,7 @@ python_expression='let
   f = builtins.getFlake ("git+file://" + toString ./.);
   p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
 in p.python3'
-sh packages/ci/nix-ci.sh shell --impure --expr "$python_expression" --command true
+nix shell --impure --expr "$python_expression" --command true
 nix shell --offline --option substituters '' --option substitute false \
   --option builders '' --option fallback false \
   --option accept-flake-config false --max-jobs 0 --no-update-lock-file \
