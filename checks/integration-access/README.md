@@ -289,23 +289,29 @@ Documentation follow-ups do not require another VM run.
 
 ## GitLab CI
 
-The `integration-access` job in `.gitlab-ci.yml` runs automatically on merge
-requests and `main` and is required. It runs:
+Since TASK-542.1, GitLab runs every registered scenario as its own required
+job in the generated `integration-scenarios` child pipeline (see
+[integration scheduling](../../docs/knowledge/testing/flake-checks.md#integration-scheduling)).
+The job for this owner's scenario runs:
 
 ```bash
-sh packages/ci/integration-owner-build.sh integration-access
+sh packages/ci/integration-owner-build.sh integration-access lifecycle-local-bootstrap
 ```
 
-The script builds the normal owner aggregate with
-`sh packages/ci/nix-ci.sh build ".#checks.x86_64-linux.integration-access" -L --show-trace`
-(see [CI cache and resource policy](../../docs/knowledge/testing/flake-checks.md#ci-cache-and-resource-policy)).
+It builds the scenario gate
+`.#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap`
+through `packages/ci/nix-ci.sh` (see
+[CI cache and resource policy](../../docs/knowledge/testing/flake-checks.md#ci-cache-and-resource-policy)).
+Without the scenario argument the script builds the normal owner aggregate,
+the developer command.
 It never builds a `.run` output as the gate. A `.run` output can build
 successfully while its `result.json` records a failed scenario.
 
 Evidence goes to `integration-evidence/integration-access/`, uploaded with
 `artifacts: when: always`:
 
-- `nix-build.log` — the complete build output.
+- `<scenario>.nix-build.log` (scenario job) or `nix-build.log` (owner
+  aggregate) — the complete build output.
 - `<scenario>/` — real files, not Nix store symlinks: `result.json`,
   `meta.json`, `browser/` (results, screenshots, console logs), and
   `journals/`.

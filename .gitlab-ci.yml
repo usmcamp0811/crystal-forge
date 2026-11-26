@@ -62,6 +62,7 @@ ci-selftest:
         python3 packages/ci/tests/test_nix_ci.py
         bash packages/devScripts/tests/prebuilt-cargo-test-test.sh \
           packages/devScripts/tests/prebuilt-cargo-test.sh
+        python3 packages/ci/tests/test_integration_pipeline.py
         CARGO_NET_OFFLINE=true python3 packages/code-metrics/test-report.py \
           complexity-launcher/bin/complexity-report
       '
@@ -194,57 +195,47 @@ manual-version-bump:
   variables:
     NEW_VERSION: ""
 
-# Implemented integration owners run automatically and are required. The normal
-# owner aggregate builds every registered scenario gate and fails when any gate
-# fails. Never build a `.run` output here: it records a failed scenario and can
-# still build successfully. Access, Delivery and Assurance have real scenarios;
-# Upgrade is added only with a real approved version transition. See
+# Implemented integration owners run automatically and are required. The
+# child pipeline is generated from the registered scenarios of every owner
+# (packages/ci/integration-pipeline.nix): one job per scenario gate, all
+# started at once on any eligible runner, so one failed scenario can be
+# retried alone. Generation fails closed unless every owner aggregate links
+# exactly its registered scenarios. `strategy: depend` makes the parent
+# pipeline fail when any scenario job fails. Never build a `.run` output here:
+# it records a failed scenario and can still build successfully. See
 # docs/knowledge/testing/integration-coverage-map.md for the remaining gaps.
-integration-access:
+integration-pipeline:
   stage: check
   tags:
     - nix
-  retry:
-    max: 2
-    when:
-      - runner_system_failure
+  needs: []
   before_script:
     - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
     - echo "login gitlab-ci-token" >> ~/.netrc
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - sh packages/ci/integration-owner-build.sh integration-access
+    - sh packages/ci/integration-pipeline.sh
   artifacts:
-    when: always
-    expire_in: 30 days
     paths:
-      - integration-evidence/
-    expose_as: "Integration Access Evidence"
+      - integration-pipeline.yml
+      - integration-scenarios.txt
   only:
     - merge_requests
     - main
 
-integration-delivery:
-  extends: integration-access
-  script:
-    - sh packages/ci/integration-owner-build.sh integration-delivery
-  artifacts:
-    expose_as: "Integration Delivery Evidence"
-
-integration-assurance:
-  extends: integration-access
-  script:
-    - sh packages/ci/integration-owner-build.sh integration-assurance
-  artifacts:
-    expose_as: "Integration Assurance Evidence"
-
-integration-upgrade:
-  extends: integration-access
-  script:
-    - sh packages/ci/integration-owner-build.sh integration-upgrade
-  artifacts:
-    expose_as: "Integration Upgrade Evidence"
+integration-scenarios:
+  stage: check
+  needs:
+    - integration-pipeline
+  trigger:
+    include:
+      - artifact: integration-pipeline.yml
+        job: integration-pipeline
+    strategy: depend
+  only:
+    - merge_requests
+    - main
 
 # Ordinary component builds own unit, evaluator-protocol and schema checks.
 # Pure module assertions and developer-command selftests run directly here;

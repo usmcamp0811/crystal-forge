@@ -468,8 +468,8 @@ failed job does not block the pipeline.
 The automatic `web-ui-screenshots-mr-comment` job that posted a screenshot
 summary to the merge request was removed with the TASK-490.24 early CI
 transition. Its only source was this job. The manual job keeps its downloadable
-artifacts, and the automatic `integration-access` job exports its own evidence
-under `integration-evidence/integration-access/`. No replacement comment bot
+artifacts, and the automatic integration scenario jobs export their own evidence
+under `integration-evidence/<owner>/<scenario>/`. No replacement comment bot
 exists.
 
 The manual `web-ui-baseline-candidates` job publishes equivalent candidate

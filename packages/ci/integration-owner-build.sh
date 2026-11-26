@@ -1,17 +1,26 @@
 #!/bin/sh
-# Builds one integration owner aggregate for GitLab and exports its evidence.
+# Builds one integration owner aggregate, or one registered scenario gate, for
+# GitLab and exports its evidence.
 #
-# Usage: sh packages/ci/integration-owner-build.sh integration-access
+# Usage:
+#   sh packages/ci/integration-owner-build.sh integration-access
+#   sh packages/ci/integration-owner-build.sh integration-access lifecycle-local-bootstrap
 #
-# CONTRACT: The job result is the result of the normal owner aggregate build.
-# The aggregate builds every registered scenario gate, and a gate fails unless
-# its recorded scenario status is "passed". This script never substitutes a
-# focused scenario or a `.run` output for that build.
+# CONTRACT: The job result is the result of the normal build of the selected
+# gate. Owner mode builds the owner aggregate, which builds every registered
+# scenario gate. Scenario mode builds
+# `.#checks.x86_64-linux.<owner>.scenarios.<scenario>`, the same gate
+# derivation that the aggregate links. A gate fails unless its recorded
+# scenario status is "passed". This script never substitutes a `.run` output
+# for a gate build. CI runs scenario mode from the generated child pipeline
+# (packages/ci/integration-pipeline.sh); owner mode is the developer command.
 #
 # Evidence layout in the CI workspace:
-#   integration-evidence/<owner>/nix-build.log
-#   integration-evidence/<owner>/<scenario>/   (result.json, meta.json,
-#                                               browser/, journals/)
+#   owner mode:    integration-evidence/<owner>/nix-build.log
+#                  integration-evidence/<owner>/<scenario>/  (one per scenario)
+#   scenario mode: integration-evidence/<owner>/<scenario>.nix-build.log
+#                  integration-evidence/<owner>/<scenario>/
+# Each scenario directory holds result.json, meta.json, browser/ and journals/.
 #
 # INVARIANT: After a failed build this script only copies `.run` outputs that
 # already exist. It MUST NOT build a `.run` derivation. A rebuild after a
@@ -26,24 +35,40 @@
 # This script keeps no second list of scenario names.
 set -eu
 
-if [ "$#" != 1 ]; then
-  printf 'Usage: %s <integration-owner>\n' "$0" >&2
-  exit 2
-fi
-owner=$1
-attribute=".#checks.x86_64-linux.${owner}"
+case "$#" in
+  1) owner=$1; scenario='' ;;
+  2) owner=$1; scenario=$2 ;;
+  *)
+    printf 'Usage: %s <integration-owner> [<scenario>]\n' "$0" >&2
+    exit 2
+    ;;
+esac
+case "$owner$scenario" in
+  *[!A-Za-z0-9_-]*)
+    printf 'Owner and scenario names may contain only letters, digits, - and _.\n' >&2
+    exit 2
+    ;;
+esac
 evidence="integration-evidence/${owner}"
-log="${evidence}/nix-build.log"
-
-# A stale link from an earlier run must not satisfy the success path below.
-rm -rf "$evidence" result
+if [ -n "$scenario" ]; then
+  attribute=".#checks.x86_64-linux.${owner}.scenarios.${scenario}"
+  log="${evidence}/${scenario}.nix-build.log"
+  link="result-${owner}-${scenario}"
+  # A stale link or copy from an earlier run must not satisfy success below.
+  rm -rf "${evidence:?}/${scenario}" "$log" "$link"
+else
+  attribute=".#checks.x86_64-linux.${owner}"
+  log="${evidence}/nix-build.log"
+  link="result-${owner}"
+  rm -rf "$evidence" "$link"
+fi
 mkdir -p "$evidence"
 
 # Run the build through `tee` so the CI log stays live. A pipeline reports only
 # the status of `tee`, so the build status goes through a temporary file.
 status_file=$(mktemp)
 {
-  if sh packages/ci/nix-ci.sh build "$attribute" -L --show-trace; then
+  if sh packages/ci/nix-ci.sh build "$attribute" -L --show-trace --out-link "$link"; then
     build_status=0
   else
     build_status=$?
@@ -70,23 +95,36 @@ copy_evidence() {
 collected=0
 collection_errors=0
 if [ "$build_status" = 0 ]; then
-  # Success: the owner link is a linkFarm of scenario gates. Each gate exposes
-  # its run output as `evidence`. The job promises that evidence, so any
-  # collection problem fails the job. Every scenario is still attempted so the
-  # report names all problems at once.
-  if [ ! -d result ]; then
-    printf 'Owner build succeeded but no result link exists.\n' >&2
+  # Success: the job promises the evidence, so any collection problem fails
+  # the job. Every scenario is still attempted so the report names all
+  # problems at once.
+  if [ ! -d "$link" ]; then
+    printf 'Build succeeded but no result link exists.\n' >&2
     exit 1
   fi
-  for gate in result/*/; do
-    scenario=$(basename "$gate")
-    if [ ! -d "${gate}evidence" ]; then
+  if [ -n "$scenario" ]; then
+    # A gate output exposes its run output as `evidence`.
+    if [ ! -d "${link}/evidence" ]; then
       printf 'Scenario %s has no evidence directory.\n' "$scenario" >&2
+      exit 1
+    fi
+    if ! copy_evidence "$scenario" "${link}/evidence"; then
+      printf 'Could not copy evidence for scenario %s.\n' "$scenario" >&2
+      exit 1
+    fi
+    printf 'Collected evidence for scenario %s under %s\n' "$scenario" "$evidence"
+    exit 0
+  fi
+  # Owner mode: the link is a linkFarm of scenario gates.
+  for gate in "$link"/*/; do
+    name=$(basename "$gate")
+    if [ ! -d "${gate}evidence" ]; then
+      printf 'Scenario %s has no evidence directory.\n' "$name" >&2
       collection_errors=$((collection_errors + 1))
-    elif copy_evidence "$scenario" "${gate}evidence"; then
+    elif copy_evidence "$name" "${gate}evidence"; then
       collected=$((collected + 1))
     else
-      printf 'Could not copy evidence for scenario %s.\n' "$scenario" >&2
+      printf 'Could not copy evidence for scenario %s.\n' "$name" >&2
       collection_errors=$((collection_errors + 1))
     fi
   done
@@ -103,36 +141,41 @@ if [ "$build_status" = 0 ]; then
   exit 0
 fi
 
-# Failure: the owner `result` link does not exist. Resolve the registered
-# scenarios' run output paths through evaluation, which builds nothing.
+# Failure: no result link exists. Resolve the run output paths through
+# evaluation, which builds nothing.
 #
 # INVARIANT: The original build status is the job result. Nothing below may
 # replace it, so `set -e` is off for the rest of the script. A collection
 # problem is reported and counted, and the script continues with the next
 # scenario.
 set +e
-printf 'Owner build failed with exit status %s; collecting existing evidence only.\n' \
+printf 'Build failed with exit status %s; collecting existing evidence only.\n' \
   "$build_status" >&2
 listing=$(mktemp)
 # The single quotes are deliberate: `${...}` below is Nix string interpolation,
 # not shell expansion.
 # shellcheck disable=SC2016
-if nix eval --raw "${attribute}.scenarios" --apply \
-  'scenarios: builtins.concatStringsSep "\n" (builtins.attrValues (builtins.mapAttrs (name: scenario: "${name} ${scenario.run.outPath}") scenarios))' \
-  >"$listing" 2>>"$log"; then
+if [ -n "$scenario" ]; then
+  expression='scenario: "'"$scenario"' ${scenario.run.outPath}"'
+  target="${attribute}"
+else
+  expression='scenarios: builtins.concatStringsSep "\n" (builtins.attrValues (builtins.mapAttrs (name: scenario: "${name} ${scenario.run.outPath}") scenarios))'
+  target="${attribute}.scenarios"
+fi
+if nix eval --raw "$target" --apply "$expression" >"$listing" 2>>"$log"; then
   # The Nix expression joins records with newlines and adds none after the
   # last one. `read` returns nonzero for that unterminated last record but
   # still sets its variables, so test them as well. Without the second test
   # the final scenario is silently skipped.
-  while IFS=' ' read -r scenario run_path || [ -n "$scenario" ]; do
-    if [ -z "$scenario" ]; then
+  while IFS=' ' read -r name run_path || [ -n "$name" ]; do
+    if [ -z "$name" ]; then
       continue
     elif [ ! -d "$run_path" ]; then
-      printf 'No run output exists for scenario %s; build log retained.\n' "$scenario" >&2
-    elif copy_evidence "$scenario" "$run_path"; then
+      printf 'No run output exists for scenario %s; build log retained.\n' "$name" >&2
+    elif copy_evidence "$name" "$run_path"; then
       collected=$((collected + 1))
     else
-      printf 'Could not copy evidence for scenario %s; continuing.\n' "$scenario" >&2
+      printf 'Could not copy evidence for scenario %s; continuing.\n' "$name" >&2
       collection_errors=$((collection_errors + 1))
     fi
   done <"$listing"

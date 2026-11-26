@@ -613,6 +613,43 @@ a different compilation configuration. `prebuilt-cargo-test-test.sh` (job
 `ci-selftest`) covers selection, filters, failure order, the runner variable
 and the fail-closed cases.
 
+### Integration scheduling
+
+The logical owners (Access, Delivery, Assurance, Upgrade) and their aggregate
+checks are unchanged; `nix build .#checks.x86_64-linux.integration-<owner>`
+still builds every registered scenario of that owner. CI schedules physically
+per scenario:
+
+1. `integration-pipeline` (`needs: []`) runs `packages/ci/integration-pipeline.sh`.
+   It evaluates `packages/ci/integration-pipeline.nix` against
+   `.#checks.x86_64-linux` and writes `integration-pipeline.yml` and
+   `integration-scenarios.txt`. The scenario registry (each owner's
+   `scenarios` attribute set) is the only list; YAML holds none.
+2. `integration-scenarios` triggers that file as a child pipeline with
+   `strategy: depend`, so the parent pipeline fails when any scenario job
+   fails, and is pending until all finish.
+3. The child pipeline has one stage per owner (grouping) and one job per
+   scenario with `needs: []` (no ordering between independent scenarios). Each
+   job runs `sh packages/ci/integration-owner-build.sh <owner> <scenario>`,
+   which builds the scenario gate and exports
+   `integration-evidence/<owner>/<scenario>/` and
+   `<scenario>.nix-build.log`. A failed scenario job can be retried alone.
+
+Generation fails closed: evaluation aborts when no owner exists, an owner
+registers no scenario, an owner aggregate's `entries` differ from its
+`scenarios` (name or gate output), or a name is not a safe job name; the
+script also fails when the job count differs from the registered scenario
+count. A newly registered scenario appears in the child pipeline without a
+YAML change. The evidence rules are unchanged: a gate is the only pass
+signal, a `.run` output is never built as a substitute, and after a failure
+only an existing run output is copied. No scenario declares a dependency on
+another, so none is encoded. Scenario gates embed the source revision in
+their metadata, so every commit runs every scenario; shared prerequisites
+(component packages, VM closures) are substituted from Niks3.
+`packages/ci/tests/test_integration_pipeline.py` (job `ci-selftest`) covers the
+generator's fail-closed cases, scenario evidence collection after success and
+failure, and the parent wiring.
+
 ### `builder-evaluator-packaging`
 
 Current successors: [module assertions](../../../modules/nixos/crystal-forge/tests/packaging.nix) and [installed runtime probes](../../../modules/nixos/crystal-forge/tests/packaging.sh). The root and nested module-validation derivations described below are removed.
