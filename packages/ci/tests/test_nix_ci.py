@@ -168,6 +168,7 @@ def main():
         assert run([], directory)[0].returncode == 2
 
     check_pipeline_uses_policy()
+    check_pipeline_schedule()
     print("PASS test_nix_ci")
 
 
@@ -197,6 +198,34 @@ def check_pipeline_uses_policy():
                 assert "public-cache-build" not in stripped, (name, stripped)
                 if "--builders ''" in stripped or "builders ''" in stripped:
                     assert "--offline" in text, (name, stripped)
+
+
+
+def check_pipeline_schedule():
+    """The DAG encodes only real dependencies, and cancellation never stops
+    deployment, publication or version bumps."""
+    pipeline = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
+    assert pipeline["workflow"]["auto_cancel"]["on_new_commit"] == "interruptible"
+    assert pipeline["default"]["interruptible"] is True
+    for name in ("docs-pages", "auto-bump-patch", "manual-version-bump"):
+        assert pipeline[name]["interruptible"] is False, name
+    assert pipeline["complexity-check"]["needs"] == [], "complexity-check waits"
+    assert pipeline["docs-pages"]["needs"] == ["docs-site-check"]
+    coverage_inputs = set(pipeline["coverage-check"]["needs"])
+    for name, job in pipeline.items():
+        if not isinstance(job, dict) or name == "coverage-check":
+            continue
+        text = "\n".join(script_lines(job.get("script", [])))
+        if "coverage-artifacts" in text or job.get("extends") == "state-machine-tests":
+            assert name in coverage_inputs, (name, "coverage producer not awaited")
+    for name in coverage_inputs:
+        assert name in pipeline, name
+    for name, job in pipeline.items():
+        if isinstance(job, dict):
+            assert "allow_failure" not in job, (name, "required gate made optional")
+    builds = [line for line in script_lines(pipeline["component-tests"]["script"])
+              if "nix-ci.sh build" in line]
+    assert len(builds) == 1, "component builds must share one Nix invocation"
 
 
 if __name__ == "__main__":

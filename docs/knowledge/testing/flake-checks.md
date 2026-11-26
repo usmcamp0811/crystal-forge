@@ -561,6 +561,30 @@ policy argv, validation failures, the health warning, metrics counts, the
 absence of leaked settings, and that every acquiring Nix command in
 `.gitlab-ci.yml` uses the script.
 
+### CI scheduling
+
+The pipeline DAG encodes only real dependencies:
+
+- `complexity-check` has `needs: []`. It no longer waits for every check-stage
+  job; before TASK-542.1 it started only after the slowest check finished and
+  added its whole duration (12 to 23 minutes) to the critical path.
+- `coverage-check` needs exactly its coverage producers; `docs-pages` needs
+  only `docs-site-check`.
+- `component-tests` builds the five components and the static artifacts in one
+  `nix-ci.sh build` invocation, so Nix builds independent derivations in
+  parallel instead of one `nix build` per component.
+- `ci-selftest` runs the CI policy and scheduling tests and the metrics
+  launcher self-test (`packages/code-metrics/test-report.py`, controlled Cargo
+  JSON, no Rust build). It gives regression feedback in minutes.
+- Every job is `interruptible` except `docs-pages`, `auto-bump-patch` and
+  `manual-version-bump`, and `workflow.auto_cancel.on_new_commit` is
+  `interruptible`. A new commit on a merge request cancels the superseded
+  pipeline. Before, no job was interruptible, so a superseded pipeline that had
+  started any job ran to completion and held runner slots.
+
+No job uses `allow_failure`; `packages/ci/tests/test_nix_ci.py` fails if one
+does or if a coverage producer is missing from `coverage-check.needs`.
+
 ### `builder-evaluator-packaging`
 
 Current successors: [module assertions](../../../modules/nixos/crystal-forge/tests/packaging.nix) and [installed runtime probes](../../../modules/nixos/crystal-forge/tests/packaging.sh). The root and nested module-validation derivations described below are removed.

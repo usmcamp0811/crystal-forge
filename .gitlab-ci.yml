@@ -1,3 +1,12 @@
+# Superseded merge request pipelines are cancelled: every check job is
+# interruptible. Deployment, Pages publication and version bumps are not.
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+
+default:
+  interruptible: true
+
 stages:
   - check
   - metrics
@@ -40,13 +49,20 @@ ci-selftest:
     - chmod 600 ~/.netrc
   script:
     - sh packages/ci/nix-ci.sh --check-config
+    # The metrics launcher self-test uses controlled Cargo JSON; it never
+    # compiles Rust. complexity-check runs the real analysis.
+    - sh packages/ci/nix-ci.sh build .#code-metrics.complexity-report --out-link complexity-launcher
     - |
       sh packages/ci/nix-ci.sh shell --impure --expr '
         let
           f = builtins.getFlake ("git+file://" + toString ./.);
           p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
-        in p.python3.withPackages (ps: [ ps.pyyaml ])
-      ' --command python3 packages/ci/tests/test_nix_ci.py
+        in [ (p.python3.withPackages (ps: [ ps.pyyaml ])) p.bash p.coreutils ]
+      ' --command sh -euc '
+        python3 packages/ci/tests/test_nix_ci.py
+        CARGO_NET_OFFLINE=true python3 packages/code-metrics/test-report.py \
+          complexity-launcher/bin/complexity-report
+      '
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
@@ -55,7 +71,8 @@ docs-pages:
   stage: deploy
   tags:
     - nix
-  dependencies:
+  interruptible: false
+  needs:
     - docs-site-check
   script:
     - test -s public/index.html
@@ -106,6 +123,8 @@ complexity-check:
   stage: metrics
   tags:
     - nix
+  # Independent of every other job: start at pipeline creation.
+  needs: []
   before_script:
     - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
     - echo "login gitlab-ci-token" >> ~/.netrc
@@ -148,6 +167,7 @@ auto-bump-patch:
   stage: bump
   tags:
     - nix
+  interruptible: false
   before_script:
     - git remote set-url origin "https://oauth2:${GITLAB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
   script:
@@ -161,6 +181,7 @@ manual-version-bump:
   stage: bump
   tags:
     - nix
+  interruptible: false
   before_script:
     - git remote set-url origin "https://oauth2:${GITLAB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
   script:
@@ -242,18 +263,25 @@ component-tests:
     - chmod 600 ~/.netrc
   script:
     - |
-      for component in cf-server-core-drv cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv; do
-        target=".#default.$component"
-        if [ "${CF_COVERAGE:-0}" = 1 ]; then target="$target.coverage"; fi
-        sh packages/ci/nix-ci.sh build "$target" -L --show-trace
-        if [ "${CF_COVERAGE:-0}" = 1 ]; then
-          mkdir -p coverage-artifacts
-          cp -rL --no-preserve=mode "$(nix eval --raw "$target.profile.outPath")" "coverage-artifacts/component-$component"
-        fi
-      done
-    - sh packages/ci/nix-ci.sh build .#cf-nixos-module .#cf-nixos-module.tests.helper .#cf-nixos-module.tests.generation --no-link -L --show-trace
-    - sh packages/ci/nix-ci.sh build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace
-    - sh packages/ci/nix-ci.sh build .#code-metrics.complexity-report --no-link
+      suffix=''
+      if [ "${CF_COVERAGE:-0}" = 1 ]; then suffix=.coverage; fi
+      # One invocation lets Nix build independent components in parallel and
+      # share their common dependency derivations. The out-links root every
+      # output for the installed-fixture commands below.
+      sh packages/ci/nix-ci.sh build \
+        ".#default.cf-server-core-drv$suffix" ".#default.cf-server-drv$suffix" \
+        ".#default.cf-agent-drv$suffix" ".#default.cf-builder-drv$suffix" \
+        ".#default.cf-keygen-drv$suffix" \
+        .#cf-nixos-module .#cf-nixos-module.tests.helper .#cf-nixos-module.tests.generation \
+        .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas \
+        --out-link component-result -L --show-trace
+      if [ "${CF_COVERAGE:-0}" = 1 ]; then
+        mkdir -p coverage-artifacts
+        for component in cf-server-core-drv cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv; do
+          cp -rL --no-preserve=mode "$(nix eval --raw ".#default.$component.coverage.profile.outPath")" \
+            "coverage-artifacts/component-$component"
+        done
+      fi
     - |
       for suite in builder-cve stig packaging; do
         nix eval --impure --json --expr "
@@ -303,8 +331,6 @@ component-tests:
         bash packages/devScripts/db-only-start-test.sh packages/devScripts/db-only-start.sh
         bash packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh \
           packages/devScripts/web-ui/tests/web-ui-test.sh packages/devScripts/web-ui/coverage-manifest.json
-        complexity=$(nix eval --raw .#code-metrics.complexity-report.outPath)
-        CARGO_NET_OFFLINE=true python3 packages/code-metrics/test-report.py "$complexity/bin/complexity-report"
       '
   artifacts:
     when: always
