@@ -37,7 +37,8 @@ Run the normal required gate:
 sh packages/ci/integration-owner-build.sh integration-upgrade
 ```
 
-The helper uses local `--max-jobs 1 --cores 2` builds, preserves the aggregate's
+The helper builds through `packages/ci/nix-ci.sh` (shared cache, runner-host
+builder settings), preserves the aggregate's
 actual exit status, and copies available evidence to
 `integration-evidence/integration-upgrade/version-transition/`. A focused gate is
 `checks.x86_64-linux.integration-upgrade.scenarios.version-transition`.

@@ -43,8 +43,7 @@ mkdir -p "$evidence"
 # the status of `tee`, so the build status goes through a temporary file.
 status_file=$(mktemp)
 {
-  if sh packages/ci/public-cache-build.sh "$attribute" -L --show-trace \
-    --builders '' --max-jobs 1 --cores 2; then
+  if sh packages/ci/nix-ci.sh build "$attribute" -L --show-trace; then
     build_status=0
   else
     build_status=$?

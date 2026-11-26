@@ -205,9 +205,9 @@ Go/Rust CA dataset comparison. These checks do not repeat in the embedded build.
 
 ```bash
 for component in cf-server-core-drv cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv; do
-  sh packages/ci/public-cache-build.sh ".#default.$component" -L --show-trace --builders '' --max-jobs 1 --cores 2
+  sh packages/ci/nix-ci.sh build ".#default.$component" -L --show-trace
 done
-nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace --builders '' --max-jobs 1 --cores 2
+sh packages/ci/nix-ci.sh build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace
 
 for suite in builder-cve stig packaging; do
   nix eval --impure --json --expr "
@@ -257,13 +257,9 @@ Prepare the launcher, SQLx environment and locked Cargo sources separately.
 Only this preparation phase permits network acquisition:
 
 ```bash
-nix build .#devScripts.state-machine-test .#devScripts.cve-test \
-  .#devScripts.dashboard-visibility-test --no-link --builders '' \
-  --option substituters https://cache.nixos.org --option extra-substituters '' \
-  --option accept-flake-config false --max-jobs 1 --cores 2
-nix develop .#sqlx --builders '' \
-  --option substituters https://cache.nixos.org --option extra-substituters '' \
-  --option accept-flake-config false --max-jobs 1 --cores 2 \
+sh packages/ci/nix-ci.sh build .#devScripts.state-machine-test .#devScripts.cve-test \
+  .#devScripts.dashboard-visibility-test --no-link
+sh packages/ci/nix-ci.sh develop .#sqlx \
   -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
 ```
 
@@ -491,9 +487,7 @@ python_expression='let
   f = builtins.getFlake ("git+file://" + toString ./.);
   p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
 in p.python3'
-nix shell --impure --expr "$python_expression" --builders '' \
-  --option substituters https://cache.nixos.org --option extra-substituters '' \
-  --option accept-flake-config false --max-jobs 1 --cores 2 --command true
+sh packages/ci/nix-ci.sh shell --impure --expr "$python_expression" --command true
 nix shell --offline --option substituters '' --option substitute false \
   --option builders '' --option fallback false \
   --option accept-flake-config false --max-jobs 0 --no-update-lock-file \

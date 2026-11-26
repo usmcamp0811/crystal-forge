@@ -297,7 +297,8 @@ sh packages/ci/integration-owner-build.sh integration-access
 ```
 
 The script builds the normal owner aggregate with
-`sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.integration-access" -L --show-trace --builders '' --max-jobs 1 --cores 2`.
+`sh packages/ci/nix-ci.sh build ".#checks.x86_64-linux.integration-access" -L --show-trace`
+(see [CI cache and resource policy](../../docs/knowledge/testing/flake-checks.md#ci-cache-and-resource-policy)).
 It never builds a `.run` output as the gate. A `.run` output can build
 successfully while its `result.json` records a failed scenario.
 

@@ -519,23 +519,47 @@ exact-test guard. Progress adds no heartbeat, command-argument dump, environment
 dump, or `--nocapture`. Earlier aggregate compilation output did not identify a
 hung target or the cause of a remote failure; these boundaries aid future diagnosis.
 
-For the checks `server-regressions`, `niks3-cache`, and
-`builder-evaluator-packaging`, current CI invokes
-`bash packages/ci/public-cache-build.sh` before the normal build attribute.
-The `integration-access` job, the full `web-ui-check` job, and the
-`web-ui-baseline-candidates` job use the same wrapper. The full browser job and
-the candidate job are manual and optional (`allow_failure: true`).
-Other matrix entries keep their existing commands. This is command-local policy, not removal of organization
-caches from global configuration or a change to the application's Attic access.
-The wrapper validates public-only substituters, empty extra substituters, and
-rejection of flake-supplied cache settings. It bounds connection attempts to
-10 seconds, stalled downloads to 30 seconds, and download attempts to two, with
-fallback source builds and signature checks retained. Builder settings remain
-inherited; these limits do not bound total compilation or test duration. It
-prints the actual Nix version, a boolean inherited-cache indicator, and known
-effective settings without exposing unknown runner values. Local configuration
-evidence does not establish the remote runner's settings or a CI pass. No manual
-baseline action is implied by this catalog entry.
+### CI cache and resource policy
+
+Every CI command that may acquire store paths runs through
+`sh packages/ci/nix-ci.sh <nix-subcommand> ...`. The script:
+
+- substitutes from the trusted Campground Niks3 cache
+  (`https://niks3.lan.aicampground.com`) and from `https://cache.nixos.org`;
+- trusts exactly three signing keys: `niks3-campground-1`, the former Attic key
+  `campground` (Niks3 still serves paths signed with it, and every Campground
+  host trusts it), and `cache.nixos.org-1`. The URL and keys are the values of
+  the Campground infrastructure configuration; the script defines no new key;
+- requires signatures, refuses flake-supplied cache settings, bounds
+  connections to 10 seconds, stalled downloads to 30 seconds and download
+  attempts to two, and builds from source (`--fallback`) when a substituter
+  fails;
+- inherits the runner host's `builders`, `max-jobs` and `cores`. The job
+  variables `CF_CI_NIX_MAX_JOBS`, `CF_CI_NIX_CORES` and `CF_CI_NIX_LOCAL_ONLY`
+  override them and are validated before Nix runs;
+- validates the effective settings with the exact command argv before running
+  and prints only the values that it sets, never inherited runner settings;
+- probes Niks3 before a build and prints `CacheHealth niks3=available` or
+  `CacheHealth niks3=unavailable`. An unavailable cache is a logged warning,
+  not a failure, unless `CF_CI_REQUIRE_PRIVATE_CACHE=1`;
+- appends one JSON record per build to `ci-metrics/nix.jsonl` (duration,
+  exit status, built derivations, substituted paths per cache) and prints a
+  `NixCiMetrics` line.
+
+History: TASK-470 restricted CI to `cache.nixos.org` and
+`--builders '' --max-jobs 1 --cores 2` because the former Attic cache stalled
+and failed TLS, and the former remote builders were unhealthy. Niks3 and the
+nix-grpc-store farm replaced both, so TASK-542.1 restored the private cache and
+host builder settings. Offline database and complexity execution blocks keep
+their `--offline`, no-substituter, no-builder settings: those settings enforce
+that execution never acquires a missing prerequisite.
+
+Publication to Niks3 is outside the repository. The runner hosts' existing
+`niks3-auto-upload` post-build hook uploads what they build; CI jobs do not
+upload. `packages/ci/tests/test_nix_ci.py` (job `ci-selftest`) checks the
+policy argv, validation failures, the health warning, metrics counts, the
+absence of leaked settings, and that every acquiring Nix command in
+`.gitlab-ci.yml` uses the script.
 
 ### `builder-evaluator-packaging`
 

@@ -11,8 +11,9 @@ docs-site-check:
   tags:
     - nix
   script:
-    - nix build .#docs-site.tests.browser -L --out-link docs-site-check-result --builders '' --max-jobs 1 --cores 2
-    - nix build .#docs-site -L --out-link docs-site-result --builders '' --max-jobs 1 --cores 2
+    - sh packages/ci/nix-ci.sh build .#docs-site.tests.browser .#docs-site -L --out-link docs-site-check-result
+    - test -e docs-site-check-result && test -e docs-site-check-result-1
+    - ln -sfn "$(readlink docs-site-check-result-1)" docs-site-result
     - mkdir -p public docs-site-screenshots
     - cp -rL docs-site-result/share/docs-site/. public/
     - cp -rL docs-site-check-result/screenshots/. docs-site-screenshots/
@@ -25,6 +26,30 @@ docs-site-check:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+# Fast CI policy and orchestration self-tests. No product build, no network
+# beyond the pinned Python closure. Gives regression feedback within minutes.
+ci-selftest:
+  stage: check
+  tags:
+    - nix
+  before_script:
+    - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
+    - echo "login gitlab-ci-token" >> ~/.netrc
+    - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
+    - chmod 600 ~/.netrc
+  script:
+    - sh packages/ci/nix-ci.sh --check-config
+    - |
+      sh packages/ci/nix-ci.sh shell --impure --expr '
+        let
+          f = builtins.getFlake ("git+file://" + toString ./.);
+          p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
+        in p.python3.withPackages (ps: [ ps.pyyaml ])
+      ' --command python3 packages/ci/tests/test_nix_ci.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
 
 docs-pages:
   stage: deploy
@@ -87,9 +112,9 @@ complexity-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix build .#code-metrics.complexity-report --no-link --option substitute true --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2
-    - nix develop .#sqlx --option substitute true --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2 -c env CARGO_NET_OFFLINE=false cargo fetch --locked --manifest-path packages/default/Cargo.toml
-    - nix develop .#sqlx --option substitute true --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2 -c env CARGO_NET_OFFLINE=false cargo fetch --locked --manifest-path packages/web-ui/Cargo.toml
+    - sh packages/ci/nix-ci.sh build .#code-metrics.complexity-report --no-link
+    - sh packages/ci/nix-ci.sh develop .#sqlx -c env CARGO_NET_OFFLINE=false cargo fetch --locked --manifest-path packages/default/Cargo.toml
+    - sh packages/ci/nix-ci.sh develop .#sqlx -c env CARGO_NET_OFFLINE=false cargo fetch --locked --manifest-path packages/web-ui/Cargo.toml
     - |
       export CARGO_NET_OFFLINE=true
       export SQLX_OFFLINE=true
@@ -220,15 +245,15 @@ component-tests:
       for component in cf-server-core-drv cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv; do
         target=".#default.$component"
         if [ "${CF_COVERAGE:-0}" = 1 ]; then target="$target.coverage"; fi
-        sh packages/ci/public-cache-build.sh "$target" -L --show-trace --builders '' --max-jobs 1 --cores 2
+        sh packages/ci/nix-ci.sh build "$target" -L --show-trace
         if [ "${CF_COVERAGE:-0}" = 1 ]; then
           mkdir -p coverage-artifacts
           cp -rL --no-preserve=mode "$(nix eval --raw "$target.profile.outPath")" "coverage-artifacts/component-$component"
         fi
       done
-    - nix build .#cf-nixos-module .#cf-nixos-module.tests.helper .#cf-nixos-module.tests.generation --no-link -L --show-trace --builders '' --max-jobs 1 --cores 2
-    - nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace --builders '' --max-jobs 1 --cores 2
-    - nix build .#code-metrics.complexity-report --no-link --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2
+    - sh packages/ci/nix-ci.sh build .#cf-nixos-module .#cf-nixos-module.tests.helper .#cf-nixos-module.tests.generation --no-link -L --show-trace
+    - sh packages/ci/nix-ci.sh build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace
+    - sh packages/ci/nix-ci.sh build .#code-metrics.complexity-report --no-link
     - |
       for suite in builder-cve stig packaging; do
         nix eval --impure --json --expr "
@@ -245,14 +270,14 @@ component-tests:
           }"
       done
     - |
-      nix shell --impure --expr '
+      sh packages/ci/nix-ci.sh shell --impure --expr '
         let
           f = builtins.getFlake ("git+file://" + toString ./.);
           p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
         in [ p.bash p.coreutils p.gnugrep p.gnused p.iproute2 p.procps p.util-linux
              p.nodejs p.python3 p.nix-eval-jobs.nix p.nix-eval-jobs p.git
              p.remarshal p.jq p.libxml2 p.openscap ]
-      ' --builders '' --max-jobs 1 --cores 2 --command bash -euo pipefail -c '
+      ' --command bash -euo pipefail -c '
         bash modules/nixos/crystal-forge/tests/discovery.sh
         bash modules/nixos/crystal-forge/tests/packaging.sh
         core_target=.#default.cf-server-core-drv
@@ -330,20 +355,18 @@ state-machine-tests:
     # must fail on missing prerequisites instead of fetching them during tests.
     - |
       if [ "${CF_COVERAGE:-0}" = 1 ]; then
-        nix build .#coverage --no-link --builders '' --max-jobs 1 --cores 2
+        sh packages/ci/nix-ci.sh build .#coverage --no-link
       fi
-    - nix build ".#devScripts.${DATABASE_TEST_APP:-state-machine-test}" --no-link --builders '' --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --max-jobs 1 --cores 2
-    - nix develop .#sqlx --builders '' --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --max-jobs 1 --cores 2 -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
+    - sh packages/ci/nix-ci.sh build ".#devScripts.${DATABASE_TEST_APP:-state-machine-test}" --no-link
+    - sh packages/ci/nix-ci.sh develop .#sqlx -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
     - |
       if [ -n "${DATABASE_TEST_APP:-}" ]; then
-        nix shell --impure --expr '
+        sh packages/ci/nix-ci.sh shell --impure --expr '
           let
             f = builtins.getFlake ("git+file://" + toString ./.);
             p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
           in [ p.python3 p.bash ]
-        ' --builders '' --option substituters https://cache.nixos.org \
-          --option extra-substituters '' --option accept-flake-config false \
-          --max-jobs 1 --cores 2 --command true
+        ' --command true
       fi
     - |
       if [ -n "${DATABASE_TEST_APP:-}" ]; then
