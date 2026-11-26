@@ -79,7 +79,13 @@
       renderProfile = browser.profile;
       design = factLib.designReference;
     });
-    run = pkgs.testers.runNixOSTest {
+    # preferLocalBuild: run the VMs on the host that builds the gate (the CI
+    # runner holding the scenario's job slot) instead of queueing them on a
+    # remote builder. Measured in pipeline 3119599541: VM runs sent to the build
+    # farm waited 7 to 44 minutes for a farm slot while the job slot idled; the
+    # farm builders are the same machines as the runners. Compilation of
+    # prerequisites is unaffected and still uses the farm and the cache.
+    run = (pkgs.testers.runNixOSTest {
       name = "cf-it-${owner}-${name}-run";
       skipLint = true;
       skipTypeCheck = true;
@@ -97,7 +103,7 @@
         CF_IT_BODY = "${script}"
         exec(open("${driverPrelude}").read())
       '';
-    };
+    }).overrideTestDerivation (_: {preferLocalBuild = true;});
   in
     assert lib.assertMsg (unknownRoles == [])
     "cf-it ${owner}/${name}: unknown role(s) ${toString unknownRoles}; allowed: ${toString roleNames}";
