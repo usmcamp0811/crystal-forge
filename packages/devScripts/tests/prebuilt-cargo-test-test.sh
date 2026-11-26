@@ -71,6 +71,8 @@ expect "no-run executes nothing" 0 "" test -p cf-server --test mcp_tools --no-ru
 expect "failing target stops later targets" 101 \
   "cf-server--test--broken|$server|$server|" \
   test -p cf-server --test broken --test mcp_tools
+grep -qE "process didn't exit successfully: .*cf-server--test--broken.* [(]exit status: 101[)]" "$work/stderr" ||
+  { echo "FAIL failure message lacks Cargo's exit status wording" >&2; failures=$((failures + 1)); }
 expect "unknown test target" 2 "" test -p cf-server --test missing
 expect "unknown option" 2 "" test -p cf-server --lib --release
 expect "no target kind" 2 "" test -p cf-server

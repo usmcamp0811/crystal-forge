@@ -112,6 +112,10 @@ cf_prebuilt_cargo_test() {
     else
       # Like Cargo without --no-fail-fast: stop at the first failing target.
       status=$?
+      # Same wording as Cargo. database-ci-test.py asserts on "exit status: N".
+      # shellcheck disable=SC2016  # Backticks are literal, as in Cargo's message.
+      printf 'error: test failed, to rerun pass `-p %s --%s`\n\nCaused by:\n  process didn'"'"'t exit successfully: `%s` (exit status: %s)\n' \
+        "$package" "$kind" "$executable" "$status" >&2
       break
     fi
   done
