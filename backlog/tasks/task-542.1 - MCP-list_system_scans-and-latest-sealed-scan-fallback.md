@@ -4,7 +4,7 @@ title: MCP list_system_scans and latest sealed scan fallback
 status: In Progress
 assignee: []
 created_date: '2026-11-24T14:39:00Z'
-updated_date: '2026-11-26T04:11:18Z'
+updated_date: '2026-11-26T21:18:41Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-542
@@ -119,4 +119,18 @@ The clippy exception in the previous note is withdrawn: the farm clippy run (bas
 ## Owner scope exception (2026-11-26)
 The owner explicitly extended MR !356 to include a CI performance and infrastructure refactor, as an exception to the AGENTS.md one-slice-per-MR rule (asked and answered in session). The CI work goes on this branch in separate logical commits (cache policy, pipeline scheduling, Rust compilation reuse, integration scenario scheduling). The original TASK-542.1 acceptance criteria are unchanged. !356 stays Draft until both the original criteria and the CI verification requirements are met.
 Cache trust decision (owner, 2026-11-26): all CI jobs may substitute from Niks3 and cache.nixos.org; only pipelines on protected refs with a protected CI variable may publish to Niks3. MR pipelines never publish.
+
+## CI simplification (2026-11-26), head 342a8458
+
+Removed: ci-selftest job; packages/ci/nix-ci.sh, packages/ci/tests/*, packages/ci/pipeline-timings.py, packages/ci/integration-pipeline.sh; the prebuilt test-executable derivation, prebuilt-cargo-test.sh and its test, the three Rust fixture path changes; committed ci-metrics/nix.jsonl; the pre-existing public-cache-build.sh and its unused 363-line test. CI infrastructure vs base b760157a: 8 files, +194 / -684. Product code: unchanged by CI work.
+
+Kept/changed: plain nix (runner daemons already use Niks3 + keys + farm); cf-server-drv doCheck=false; integration-pipeline builds cf-server-drv/agent/builder then generates the scenario child pipeline (one nix eval, explicit rules); preferLocalBuild on scenario VM runs; CVE+dashboard share one job (database-launcher-tests); state-machine runs alone (database-tests); interruptible jobs + auto-cancel; complexity-check needs [].
+
+Measured (GitLab API):
+- Baseline successful 3110276535 / 3100779917 / 3099949246: wall 205 / 186 / 183 min; component-tests 38 / 44 / 37; state-machine 43 / 42 / 41; complexity 13 / 16 / 23.
+- 3120511772 (warm): component-tests 7.0, complexity 9.4, docs 0.3, integration-pipeline 0.3, database-launcher-tests 8.8 (baseline CVE+dashboard 12 runner-min); scenarios access 7.5, assurance 25, delivery-lifecycle 31.9, failure-reporting 7.6, upgrade 30.3; all scenarios finished 52 min after creation. database-tests on webb: timeout at 122 min -> pipeline failed.
+- 3120173363 (warm): same picture; database-tests on webb timeout at 120 min.
+- 3119599541 (cf-server-drv cold): 119 min, failed by TASK-546 driver flake; database merged job 53 min on sledge.
+Cross-runner substitution: cf-server-core-0.3.0 (drv s4px..., out yma0...) built on runner 31882425 (pipeline 3111548109), substituted from Niks3 (sig niks3-campground-1) by runner 40527293 in 3119599541.
+Blocker: webb (runner 59818941) runs the state-machine suite ~10x slower (access_tokens run ~29 min vs ~2 min; migration phase 104-107 s vs 6 s). All previous state-machine runs were on sledge/lucas (41-53 min). Infrastructure, not changed here.
 <!-- SECTION:NOTES:END -->
