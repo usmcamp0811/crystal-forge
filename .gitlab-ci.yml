@@ -60,6 +60,8 @@ ci-selftest:
         in [ (p.python3.withPackages (ps: [ ps.pyyaml ])) p.bash p.coreutils ]
       ' --command sh -euc '
         python3 packages/ci/tests/test_nix_ci.py
+        bash packages/devScripts/tests/prebuilt-cargo-test-test.sh \
+          packages/devScripts/tests/prebuilt-cargo-test.sh
         CARGO_NET_OFFLINE=true python3 packages/code-metrics/test-report.py \
           complexity-launcher/bin/complexity-report
       '
@@ -383,6 +385,14 @@ state-machine-tests:
       if [ "${CF_COVERAGE:-0}" = 1 ]; then
         sh packages/ci/nix-ci.sh build .#coverage --no-link
       fi
+    # Compiled once per configuration and substituted from the shared cache;
+    # the suites below run these executables (TASK-542.1). Coverage runs keep
+    # compiling instrumented code in their own target directory.
+    - |
+      if [ "${CF_COVERAGE:-0}" != 1 ]; then
+        sh packages/ci/nix-ci.sh build .#default.cf-database-test-executables \
+          --out-link database-test-executables -L
+      fi
     - sh packages/ci/nix-ci.sh build ".#devScripts.${DATABASE_TEST_APP:-state-machine-test}" --no-link
     - sh packages/ci/nix-ci.sh develop .#sqlx -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
     - |
@@ -409,6 +419,10 @@ state-machine-tests:
       fi
     - |
       export CARGO_NET_OFFLINE=true SQLX_OFFLINE=true
+      if [ "${CF_COVERAGE:-0}" != 1 ]; then
+        CF_PREBUILT_TEST_EXECUTABLES=$(readlink -f database-test-executables)
+        export CF_PREBUILT_TEST_EXECUTABLES
+      fi
       if [ "${CF_COVERAGE:-0}" = 1 ]; then
         export CF_LLVM_BIN="$(nix eval --raw .#coverage.llvm.outPath)/bin"
         export CF_COVERAGE_DIR="$PWD/coverage-artifacts/${DATABASE_TEST_APP:-state-machine-test}"

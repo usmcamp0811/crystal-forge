@@ -259,9 +259,23 @@ Only this preparation phase permits network acquisition:
 ```bash
 sh packages/ci/nix-ci.sh build .#devScripts.state-machine-test .#devScripts.cve-test \
   .#devScripts.dashboard-visibility-test --no-link
+sh packages/ci/nix-ci.sh build .#default.cf-database-test-executables \
+  --out-link database-test-executables
 sh packages/ci/nix-ci.sh develop .#sqlx \
   -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
 ```
+
+The `cf-database-test-executables` build compiles the database test configuration once
+(TASK-542.1): the full workspace, `test` profile, default features and
+`SQLX_OFFLINE=true`, as plain `cargo test` did inside each suite. Export
+`CF_PREBUILT_TEST_EXECUTABLES=$(readlink -f database-test-executables)` before
+the offline run below and every `cargo test` selection runs those executables
+through `packages/devScripts/tests/prebuilt-cargo-test.sh` instead of
+compiling. The selection guard in `database-environment.sh` still lists,
+counts and compares every selection. Prebuilt mode fails closed: a missing
+manifest or executable, an unknown target, or an unsupported Cargo option is an
+error and never compiles or fetches. Leave the variable unset to compile with
+Cargo, which coverage runs do.
 
 Run one prepared database workflow offline. Select `state-machine-test`,
 `cve-test`, or `dashboard-visibility-test` explicitly:

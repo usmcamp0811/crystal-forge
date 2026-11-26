@@ -585,6 +585,34 @@ The pipeline DAG encodes only real dependencies:
 No job uses `allow_failure`; `packages/ci/tests/test_nix_ci.py` fails if one
 does or if a coverage producer is missing from `coverage-check.needs`.
 
+### Database test compilation
+
+`state-machine-tests`, `cve-processing-test` and `dashboard-visibility-tests`
+each compiled the workspace with `cargo test` in an invocation-owned target
+directory, and the fault harness (`database-ci-test.py`) compiled again for
+each injected fault. `.#default.cf-database-test-executables` now compiles that
+configuration once as an immutable, cacheable Nix output: the complete
+eight-member workspace, the `test` profile, default features,
+`SQLX_OFFLINE=true` and the `sqlx` shell's toolchain, without component build
+variables. It installs 53 executables (eight library unit-test executables and
+45 integration-test executables) and a manifest.
+
+The jobs build or substitute it during preparation and export
+`CF_PREBUILT_TEST_EXECUTABLES` for offline execution. Each suite still starts
+its own disposable PostgreSQL, keeps root/`nobody` privilege separation and the
+completion receipt, and runs every `cargo test` selection through the unchanged
+selection guard; `packages/devScripts/tests/prebuilt-cargo-test.sh` replaces
+only the compile-and-run step. It runs each executable from its crate directory
+with `CARGO_MANIFEST_DIR` set, as Cargo does, honours
+`CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER` (used by the fault harness), and
+fails closed on a missing executable, an unknown target or an unsupported
+Cargo option. Three test helpers that read checkout files at run time prefer
+the run-time `CARGO_MANIFEST_DIR` over the compile-time path. Coverage runs
+(`CF_COVERAGE=1`) keep compiling instrumented code with Cargo, because that is
+a different compilation configuration. `prebuilt-cargo-test-test.sh` (job
+`ci-selftest`) covers selection, filters, failure order, the runner variable
+and the fail-closed cases.
+
 ### `builder-evaluator-packaging`
 
 Current successors: [module assertions](../../../modules/nixos/crystal-forge/tests/packaging.nix) and [installed runtime probes](../../../modules/nixos/crystal-forge/tests/packaging.sh). The root and nested module-validation derivations described below are removed.

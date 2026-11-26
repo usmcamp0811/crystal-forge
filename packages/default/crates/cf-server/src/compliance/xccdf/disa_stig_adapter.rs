@@ -908,7 +908,13 @@ mod tests {
     fn real_anduril_v1r2() -> ParsedXccdf {
         use crate::compliance::interchange::InterchangeLimits;
         use crate::compliance::xccdf::parser::parse_xccdf;
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        // Prefer the run-time manifest directory (set by Cargo and by the
+        // prebuilt test runner) over the compile-time build directory.
+        let path = std::env::var_os("CARGO_MANIFEST_DIR")
+            .map_or_else(
+                || std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+                std::path::PathBuf::from,
+            )
             .join("testdata/xccdf/U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml");
         let bytes = std::fs::read(&path).expect("real V1R2 fixture must exist");
         parse_xccdf(&bytes, Some("fixture.xml"), &InterchangeLimits::default())

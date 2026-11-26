@@ -415,6 +415,104 @@ let
   };
 
   # ─────────────────────────────────────────────────────────────────────────
+  # Database test executables (TASK-542.1)
+  #
+  # The PostgreSQL-backed CI suites (devScripts state-machine-test, cve-test
+  # and dashboard-visibility-test) ran `cargo test` in each job's own Cargo
+  # target directory, so every job compiled the workspace again. This
+  # derivation compiles the same configuration once, as an immutable and
+  # cacheable output; the suites then run these executables against their own
+  # invocation-owned PostgreSQL (see packages/devScripts/tests/
+  # database-environment.sh, CF_PREBUILT_TEST_EXECUTABLES).
+  #
+  # INVARIANT: The configuration equals the one the suites compiled before:
+  # the complete workspace manifest (all eight members, so workspace `--lib`
+  # selections without `-p` keep their member set), the `test` profile that
+  # plain `cargo test` uses, default features, SQLX_OFFLINE=true, the pkgs
+  # Rust toolchain of the `sqlx` development shell, and none of the component
+  # build variables (SRC_HASH, CRYSTAL_FORGE_NIXOS_OPTIONS_METADATA,
+  # CRYSTAL_FORGE_UI_DIST), which that shell does not set either. Coverage
+  # runs keep compiling in their own instrumented target directory.
+  #
+  # Output: bin/<package>--<kind>--<target> for every lib unit-test and
+  # integration-test executable, and manifest.json (with a tab-separated copy,
+  # manifest.tsv) mapping each executable to its package, target kind, target
+  # name and crate directory relative to the workspace root. Executables keep
+  # their symbols, as Cargo-built ones did (about 400 MB in total); the Cargo
+  # target tarball is not installed.
+  # ─────────────────────────────────────────────────────────────────────────
+  databaseTestCrates = [
+    "cf-protocol" "cf-config" "cf-agent" "cf-builder" "cf-keygen"
+    "cf-compliance" "cf-nixos-module" "cf-server"
+  ];
+  databaseTestArgs = {
+    pname = "cf-database-test";
+    inherit version;
+    src = mkWorkspaceSrc {
+      crates = databaseTestCrates;
+      rootPaths = serverRootPaths;
+    };
+    strictDeps = true;
+    CARGO_PROFILE = "test";
+    SQLX_OFFLINE = "true";
+    nativeBuildInputs = commonNativeBuildInputs ++ [ pkgs.jq ];
+    buildInputs = commonBuildInputs;
+    doCheck = false;
+  };
+  databaseTestDeps = craneLib.buildDepsOnly (databaseTestArgs // {
+    # The dummy source has no integration-test targets. Dependencies,
+    # including dev-dependencies, are the same for every test target.
+    buildPhaseCargoCommand = "cargoWithProfile test --locked --workspace --no-run";
+  });
+  cf-database-test-executables = craneLib.mkCargoDerivation (databaseTestArgs // {
+    pname = "cf-database-test-executables";
+    cargoArtifacts = databaseTestDeps;
+    # Only the executables are reused; the 2 GB Cargo target tarball is not.
+    doInstallCargoArtifacts = false;
+    buildPhaseCargoCommand = ''
+      cargoWithProfile test --locked --workspace --lib --test '*' --no-run \
+        --message-format json-render-diagnostics > "$TMPDIR/cargo-test.jsonl"
+    '';
+    # Cargo package IDs are `path+file:///dir#name@version`, or
+    # `path+file:///dir#version` when the directory name is the package name.
+    installPhaseCommand = ''
+      mkdir -p "$out/bin"
+      jq -c --arg root "$PWD/" '
+        select(.reason == "compiler-artifact" and .profile.test == true
+               and .executable != null)
+        | (.package_id | split("#")) as $id
+        | {
+            package: (if ($id[1] | contains("@")) then ($id[1] | split("@")[0])
+                      else ($id[0] | split("/") | last) end),
+            kind: .target.kind[0],
+            target: .target.name,
+            crate_dir: (.manifest_path | ltrimstr($root) | rtrimstr("/Cargo.toml")),
+            source: .executable
+          }' "$TMPDIR/cargo-test.jsonl" > "$TMPDIR/artifacts.jsonl"
+      while IFS= read -r artifact; do
+        name=$(jq -r '"\(.package)--\(.kind)--\(.target)"' <<<"$artifact")
+        if [ -e "$out/bin/$name" ]; then
+          echo "duplicate test executable $name" >&2
+          exit 1
+        fi
+        cp "$(jq -r .source <<<"$artifact")" "$out/bin/$name"
+      done < "$TMPDIR/artifacts.jsonl"
+      jq -s 'map(del(.source) + {executable: "bin/\(.package)--\(.kind)--\(.target)"})
+             | sort_by(.package, .kind, .target)' \
+        "$TMPDIR/artifacts.jsonl" > "$out/manifest.json"
+      # Tab-separated copy for the database shell, which has no jq.
+      jq -r '.[] | [.package, .kind, .target, .crate_dir, .executable] | @tsv' \
+        "$out/manifest.json" > "$out/manifest.tsv"
+      count=$(jq length "$out/manifest.json")
+      if [ "$count" -eq 0 ]; then
+        echo "no test executables were produced" >&2
+        exit 1
+      fi
+      echo "installed $count test executables"
+    '';
+  });
+
+  # ─────────────────────────────────────────────────────────────────────────
   # Agent derivation — builds cf-agent only
   # Does NOT compile cf-server, cf-builder, or server-only dependencies.
   # SRC_HASH is derived from agentSrc only; server changes do not affect it.
@@ -664,6 +762,7 @@ in crystal-forge // {
   # `crystal-forge`, `server`, or `agent` aggregates above, so that a component
   # closure contains only what that consumer runs.
   inherit serverCargoArtifacts;
+  inherit cf-database-test-executables;
   cf-server-drv = withCoverage cf-server-drv;
   cf-server-core-drv = withCoverage cf-server-core-drv;
   cf-agent-drv = withCoverage cf-agent-drv;

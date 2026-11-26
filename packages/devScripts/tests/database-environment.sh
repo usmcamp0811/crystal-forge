@@ -45,6 +45,10 @@ if [[ -n "${CF_COVERAGE_DIR:-}" ]]; then
   coverage_start "$PWD"
 fi
 
+# Prebuilt test executables (TASK-542.1); see prebuilt-cargo-test.sh.
+# shellcheck source=packages/devScripts/tests/prebuilt-cargo-test.sh
+source "$PROJECT_ROOT/packages/devScripts/tests/prebuilt-cargo-test.sh"
+
 # Bind execution to libtest's selected names, not just a positive result count.
 # Listing uses the same Cargo targets/filters and libtest options, and never
 # executes test bodies. Default --list includes ignored tests: subtract the
@@ -73,7 +77,7 @@ cargo() {
   if [[ "$execution" == true ]]; then
     if [[ "$separator" == false ]]; then list_args+=(--); fi
     list_args+=(--list)
-    if command cargo "${list_args[@]}" >"$work/list" 2>>"$errors"; then
+    if cf_cargo "${list_args[@]}" >"$work/list" 2>>"$errors"; then
       : > "$work/names"
       while IFS= read -r line; do
         if [[ "$line" =~ ^(.+):\ test$ ]]; then
@@ -82,7 +86,7 @@ cargo() {
       done < "$work/list"
       LC_ALL=C sort "$work/names" > "$work/expected"
       if [[ "$mode" == default ]]; then
-        if command cargo "${list_args[@]}" --ignored >"$work/ignored-list" 2>>"$errors"; then
+        if cf_cargo "${list_args[@]}" --ignored >"$work/ignored-list" 2>>"$errors"; then
           : > "$work/ignored-names"
           while IFS= read -r line; do
             if [[ "$line" =~ ^(.+):\ test$ ]]; then
@@ -108,7 +112,7 @@ cargo() {
   fi
   # Execute each selection once. A listing/setup failure must not run tests.
   if (( status == 0 )); then
-    if (set -o pipefail; command cargo "$@" 2>>"$errors" | tee "$output"); then
+    if (set -o pipefail; cf_cargo "$@" 2>>"$errors" | tee "$output"); then
       status=0
     else
       status=$?
@@ -164,4 +168,4 @@ cargo() {
   if (( status == 0 )); then status=$cleanup_status; fi
   return "$status"
 }
-export -f cargo
+export -f cargo cf_cargo cf_prebuilt_cargo_test
