@@ -199,15 +199,17 @@ the removed wrappers with another registry or aggregation framework.
 
 The `component-tests` and `integration-pipeline` jobs in `.gitlab-ci.yml` run
 these commands on merge requests and `main` (`integration-pipeline` builds
-`cf-server-drv`, `cf-agent-drv` and `cf-builder-drv` before the scenario jobs). Ordinary core tests own nonignored server library/bin
+`cf-server-drv`, `cf-agent-drv` and `cf-builder-drv` before the scenario jobs).
+Ordinary core tests own nonignored server library/bin
 tests, all thirteen unchanged `cf-config` CA library tests, 41 `cf-protocol`
 tests and the three pure export targets (13 tests). Core supplies
 `check-jsonschema`, `xmllint` and `CF_TEST_OSCAL_SCHEMAS` explicitly. Core `postCheck`
 owns real Nix inspection, observation, snapshot isolation, source parity and
 Go/Rust CA dataset comparison. The embedded build (`cf-server-drv`) runs no tests
 (`doCheck = false`): its only extra library code, `handlers::ui`, is exercised by
-every integration scenario, and testing it would recompile `cf-server` and rerun
-the core suite.
+every integration scenario; its path classification (`handlers::ui_paths`) is
+ungated and tested in core. Testing the embedded variant would recompile
+`cf-server` and rerun the core suite.
 
 ```bash
 for component in cf-server-core-drv cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv; do

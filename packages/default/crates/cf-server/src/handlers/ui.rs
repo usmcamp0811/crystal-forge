@@ -5,6 +5,8 @@ use axum::response::{IntoResponse, Response};
 use include_dir::{Dir, include_dir};
 use mime_guess::mime;
 
+use super::ui_paths::is_api_path;
+
 static UI_DIST: Dir<'static> = include_dir!("$CRYSTAL_FORGE_UI_DIST");
 
 pub async fn serve_ui(OriginalUri(uri): OriginalUri) -> Response {
@@ -62,33 +64,4 @@ fn serve_asset(path: &str, bytes: &'static [u8]) -> Response {
 
 fn normalize_path(path: &str) -> &str {
     path.trim_start_matches('/')
-}
-
-fn is_api_path(path: &str) -> bool {
-    path == "/status"
-        || path == "/system_state"
-        || path.starts_with("/agent/")
-        || path == "/webhook"
-        || path.starts_with("/api/")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_api_path;
-
-    #[test]
-    fn detects_api_paths() {
-        assert!(is_api_path("/status"));
-        assert!(is_api_path("/system_state"));
-        assert!(is_api_path("/agent/heartbeat"));
-        assert!(is_api_path("/webhook"));
-        assert!(is_api_path("/api/v1/dashboard/summary"));
-    }
-
-    #[test]
-    fn allows_spa_paths() {
-        assert!(!is_api_path("/"));
-        assert!(!is_api_path("/systems"));
-        assert!(!is_api_path("/assets/main.js"));
-    }
 }

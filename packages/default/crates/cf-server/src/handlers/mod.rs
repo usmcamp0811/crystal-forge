@@ -5,4 +5,5 @@ pub mod builder_request;
 pub mod status;
 #[cfg(feature = "embedded-ui")]
 pub mod ui;
+mod ui_paths;
 pub mod webhook;

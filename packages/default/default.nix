@@ -329,11 +329,11 @@ let
       cargoArtifacts = serverCargoArtifacts;
       cargoExtraArgs = "--locked --package cf-server${cargoFeatureArg}";
       cargoBuildExtraArgs = serverCargoBuildExtraArgs;
-      # Core owns the tests. The embedded-ui feature adds only handlers::ui to
-      # the library (two tests of its pure is_api_path); testing the embedded
-      # variant would recompile cf-server in test mode and rerun the whole core
-      # library suite. Every integration scenario exercises the embedded
-      # server's UI and API routing end to end.
+      # Core owns the tests. The embedded-ui feature adds only handlers::ui,
+      # whose path classification (handlers::ui_paths) is ungated and tested in
+      # core; testing the embedded variant would recompile cf-server in test
+      # mode and rerun the whole core library suite. Every integration scenario
+      # exercises the embedded server's UI and API routing end to end.
       doCheck = !embedUi;
       # Cargo does not run dependency tests for --package cf-server. Core owns
       # the foundational config/protocol tests and pure export targets once.
